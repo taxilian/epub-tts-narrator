@@ -365,6 +365,31 @@ class RunModelTests(unittest.TestCase):
         self.assertEqual([item["state"] for key, item in self.model.visible_chapters() if key.startswith("b1")],
                          ["done", "done", "not started", "not started"])
 
+    def test_chapters_with_no_planned_speech_work_stay_hidden_from_every_view(self):
+        board = BusBoard(self.bus)
+        board.book_state("/q/b1", "rendering")
+        board.chapter_plan("/q/b1", [{"number": 1, "title": "Spoken", "blocks": 2, "saved": False},
+                                     {"number": 2, "title": "Truly empty", "blocks": 0, "saved": False},
+                                     {"number": 4, "title": "Silence controls only", "blocks": 1, "saved": False}])
+        # State events for the empty chapter cannot bring it back; silence-control chapters stay.
+        board.chapter_state("/q/b1", 2, "done")
+        board.chapter_state("/q/b1", 1, "done")
+        self.assertEqual([key for key, _ in self.model.visible_chapters()], ["b1\x1f1", "b1\x1f4"])
+        self.assertEqual(self.model.chapter_breakdown(), [("b1", 2, {"done": 1, "queued": 1}, 0)])
+        book, percent, state, ready, total, *_ = self.model.book_rows()[0]
+        self.assertEqual((book, percent, state, ready, total), ("b1", 50, "rendering", 1, 2))
+        # A live row and a completion for the hidden chapter do not surface anywhere.
+        with ChapterProgress(2, 4, chunks(1), notify=PrefixedBoardNotify(board, "[b1] "), clock=self.clock,
+                             heartbeat=False) as chapter:
+            chapter.refresh()
+            self.assertEqual(self.model.visible_rows(), [])
+            self.assertNotIn("chapter(s) active", self.model.summary())
+        board.chapter_state("/q/b1", 4, "done")
+        self.model.finish(0)
+        self.assertNotIn("chapter(s) finished", self.model.summary())
+        # Source numbering of visible chapters keeps its gaps: 1 and 4, never renumbered.
+        self.assertEqual(self.model.chapter_states(), ["done"])
+
     def test_live_rows_of_a_command_without_a_plan_still_show(self):
         board = BusBoard(self.bus)
         with ChapterProgress(5, 9, chunks(2), notify=PrefixedBoardNotify(board, "[b9] "), clock=self.clock,

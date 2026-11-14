@@ -1372,8 +1372,8 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
         if args.chapters_only:
             self.notify("Completed chapter audio:")
             for chapter in result["chapters"]:
-                location = chapter.get("audio_file") or "empty chapter (no speech)"
-                self.notify(f"  Chapter {chapter['number']} / {len(bundle['chapters'])}: {location}")
+                if chapter.get("audio_file"):
+                    self.notify(f"  Chapter {chapter['number']}: {chapter['audio_file']}")
         else:
             self.notify(f"Completed audiobook: {config['render']['output_dir']}")
         return result

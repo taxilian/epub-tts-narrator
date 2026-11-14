@@ -658,8 +658,12 @@ class ChapterProgress:
 
     def __init__(self, number, total_chapters, chunks, *, notify=print, parallel=1,
                  clock=time.monotonic, stream=None, heartbeat=None,
-                 refresh_interval=1.0, log_interval=30.0):
+                 refresh_interval=1.0, log_interval=30.0, ordinal=None):
         self.number = number
+        # ``ordinal`` is display-only: source chapters may have gaps (a chapter
+        # with no speech work is hidden everywhere), so rows and percentages
+        # count visible chapters while ``number`` stays the source identity.
+        self.ordinal = number if ordinal is None else ordinal
         self.total_chapters = total_chapters
         self._weights = [0 if chunk.get("silent_control") else len(chunk.get("spoken_text", ""))
                          for chunk in chunks]
@@ -877,7 +881,7 @@ class ChapterProgress:
     def _row(self):
         """This chapter's live board row: no book percentage or shared segment."""
         now = self._clock()
-        parts = [f"Ch {self.number}/{self.total_chapters}",
+        parts = [f"Ch {self.ordinal}/{self.total_chapters}",
                  f"{len(self._done)}/{len(self._weights)} blocks "
                  f"({round(100 * len(self._done) / max(1, len(self._weights)))}%)",
                  format_duration(now - self._started)]
@@ -904,7 +908,7 @@ class ChapterProgress:
         now = self._clock()
         elapsed = format_duration(now - self._started)
         chapter_percent = round(100 * len(self._done) / max(1, len(self._weights)))
-        book_percent = round(100 * ((self.number - 1)
+        book_percent = round(100 * ((self.ordinal - 1)
                                     + len(self._done) / max(1, len(self._weights)))
                              / max(1, self.total_chapters))
         if compact and final is None and any(task.worker for task in self._active.values()):
@@ -927,7 +931,7 @@ class ChapterProgress:
                 else:
                     label = "cache" if "saved" in task.phase else "ready"
                 active.append(f"{label} #{index + 1}")
-            parts = [f"Ch {self.number}/{self.total_chapters} ({book_percent}%) | " + "; ".join(active),
+            parts = [f"Ch {self.ordinal}/{self.total_chapters} ({book_percent}%) | " + "; ".join(active),
                      f"{len(self._done)}/{len(self._weights)} blocks ({chapter_percent}%)",
                      f"{elapsed} elapsed"]
             segment = _scheduling_segment()
@@ -935,11 +939,11 @@ class ChapterProgress:
                 parts.append(segment)
             return " | ".join(parts)
         if compact:
-            parts = [f"Ch {self.number}/{self.total_chapters} ({book_percent}%)",
+            parts = [f"Ch {self.ordinal}/{self.total_chapters} ({book_percent}%)",
                      f"{len(self._done)}/{len(self._weights)} blocks ({chapter_percent}%)",
                      f"{elapsed} elapsed"]
         else:
-            parts = [f"Chapter {self.number} / {self.total_chapters} (book {book_percent}%)",
+            parts = [f"Chapter {self.ordinal} / {self.total_chapters} (book {book_percent}%)",
                      f"Blocks {len(self._done)} / {len(self._weights)} complete ({chapter_percent}%)",
                      f"elapsed {elapsed}"]
         if final is not None:

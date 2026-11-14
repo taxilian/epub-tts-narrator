@@ -67,6 +67,44 @@ class RenderProgressWorkflowTests(unittest.TestCase):
         self.assertTrue(any("Completed chapter 2 / 2" in line and "run elapsed" in line
                             for line in self.messages))
 
+    def test_zero_speech_chapter_is_hidden_from_plain_output_but_keeps_source_numbering(self):
+        document = chapter_document([
+            ("CHAPTER TWO", "heading", "p"),
+            ("At dawn the boat returned safely to shore.", "narration", "p"),
+        ])
+        document["source"]["chapters"].insert(0, {
+            "id": "empty", "title": "Illustration", "source_href": "cover.xhtml", "block_ids": []})
+        bundle = self.bundle(document)
+
+        result = self.chapters(bundle)
+
+        # Machine records keep source numbering and both chapter records.
+        self.assertEqual([chapter["number"] for chapter in result["chapters"]], [1, 2])
+        # Only the spoken chapter generated: the empty chapter spent no synthesis.
+        self.assertCountEqual([call["text"] for call in self.engine.speech_calls],
+                              ["CHAPTER TWO", "At dawn the boat returned safely to shore."])
+        # Plain output never mentions the empty chapter, and totals count spoken work only.
+        for hidden in ("Processing chapter 1 /", "Reusing completed chapter 1 /",
+                       "Completed chapter 1 /", "Illustration"):
+            self.assertFalse(any(hidden in line for line in self.messages), hidden)
+        self.assertFalse(any("empty" in line.lower() for line in self.messages))
+        self.assertTrue(any("Processing chapter 2 / 2:" in line for line in self.messages))
+        # The live progress row counts visible work: source chapter 2 is the 1st of 1 spoken.
+        self.assertTrue(any("Chapter 1 / 1 (book" in line for line in self.messages))
+        completion = next(line for line in self.messages if "Completed chapter 2 / 2" in line)
+        self.assertIn("1 / 1 selected chapters ready", completion)
+        self.assertFalse(any("chapter 2 / 1" in line.lower() for line in self.messages))
+
+        self.messages.clear()
+        calls = len(self.engine.speech_calls), len(self.verifier.calls)
+        with patch.object(self.engine, "synthesize", side_effect=AssertionError("regenerated accepted audio")), \
+             patch.object(self.verifier, "transcribe", side_effect=AssertionError("reverified accepted audio")):
+            resumed = self.chapters(bundle)
+        self.assertEqual(resumed["chapters"], result["chapters"])
+        self.assertEqual(calls, (len(self.engine.speech_calls), len(self.verifier.calls)))
+        self.assertFalse(any("chapter 1 /" in line.lower() for line in self.messages))
+        self.assertTrue(any("Reusing completed chapter 2 / 2:" in line for line in self.messages))
+
     def test_logs_distinguish_new_synthesis_from_reusing_clips_during_recomposition(self):
         bundle = self.bundle(read_json(EXAMPLE / "reviewed.json"))
         for row in bundle["chapters"][0]["rows"]:

@@ -454,9 +454,9 @@ class RunpodLifecycleTests(unittest.TestCase):
         with patch("epub_tts_narrator.renderer.chapter_client.render_remote", return_value=result) as render:
             self.assertIs(deployment.encode(args), result)
         render.assert_called_once_with(bundle, config, notify=self.notify, chapters_only=True)
+        # A finished chapter without audio has no speech work (like the M4B, the summary omits it).
         self.assertEqual([call.args[0] for call in self.notify.call_args_list], [
-            "Completed chapter audio:", "  Chapter 1 / 3: empty chapter (no speech)",
-            "  Chapter 3 / 3: /work/remote-chapters/fixture/chapter.m4a"])
+            "Completed chapter audio:", "  Chapter 3: /work/remote-chapters/fixture/chapter.m4a"])
 
     def test_encode_audiobook_still_reports_published_output_directory(self):
         deployment = self.deployment()

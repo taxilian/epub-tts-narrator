@@ -77,8 +77,12 @@ def _chapter_outline(book):
     from .common import read_json
     try:
         scripts = read_json(Path(book) / "manifest.json")["files"]["scripts"]
+        # A zero-segment chapter has no planned speech work (a chapter holding
+        # only silence controls still has segments and stays listed); the
+        # render's plan hides it too, and the M4B never includes it.
         return [{"number": number, "title": str(entry.get("title") or ""), "blocks": None, "saved": False}
-                for number, entry in enumerate(scripts, 1)]
+                for number, entry in enumerate(scripts, 1)
+                if entry.get("segment_count") != 0]
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -400,12 +404,16 @@ def _build_render_components(config):
             create_verifier(config["verification"], config.get("jev"), config.get("provider")))
 
 
+def _audible_chapters(result):
+    """Completed chapters that produced audio; a finished chapter without an
+    audio file has no speech work (the M4B never includes it) and stays hidden."""
+    return [chapter for chapter in (result or {}).get("chapters", []) if chapter.get("audio_file")]
+
+
 def _report_remote_completion(result, config, bundle, *, chapters_only, notify):
     if chapters_only:
-        total = len(bundle["chapters"])
-        for chapter in (result or {}).get("chapters", []):
-            notify(f"Completed chapter {chapter['number']} / {total}: "
-                   f"{chapter.get('audio_file') or 'empty chapter (no speech)'}")
+        for chapter in _audible_chapters(result):
+            notify(f"Completed chapter {chapter['number']}: {chapter['audio_file']}")
     else:
         notify(f"Completed audiobook: {config['render']['output_dir']}")
 
@@ -414,9 +422,8 @@ def _report_local_completion(result, config, bundle, *, chapters_only, notify):
     if chapters_only:
         notify(f"Completed chapter audio: {Path(config['render']['work_dir']) / 'chapters'}")
         if isinstance(result, dict):
-            for chapter in result.get("chapters", []):
-                notify(f"  Chapter {chapter['number']} / {len(bundle['chapters'])}: "
-                       f"{chapter.get('audio_file') or 'empty chapter (no speech)'}")
+            for chapter in _audible_chapters(result):
+                notify(f"  Chapter {chapter['number']}: {chapter['audio_file']}")
     else:
         notify(f"Completed audiobook: {config['render']['output_dir']}")
 

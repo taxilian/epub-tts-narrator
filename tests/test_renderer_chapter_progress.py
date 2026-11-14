@@ -49,14 +49,17 @@ class ChapterProgressTests(unittest.TestCase):
         self.assertEqual(self.chapter, original)
         self.assertEqual(self.messages, ["Reusing completed chapter 6 / 35: A Later Chapter"])
 
-    def test_empty_chapter_uses_context_total_without_changing_metadata(self):
+    def test_empty_chapter_composes_silently_and_keeps_context_total_metadata(self):
         del self.chapter["_total_chapters"]
         self.clips = []
         result = self.prepare(context={"total_chapters": 35})
         self.assertIsNone(result["encoded_path"])
-        self.assertIn("Assembling chapter 6 / 35: A Later Chapter", self.messages)
-        self.assertIn("Chapter 6 / 35 is empty; recorded as skipped", self.messages)
+        # A chapter with no speech work is hidden from plain output like every
+        # other render surface; its persisted record keeps source numbering.
+        self.assertEqual(self.messages, [])
         self.assertFalse(any(message.startswith("Encoding") for message in self.messages))
+        self.assertEqual(result["total_chapters"], 35)
+        self.assertEqual(result["number"], 6)
 
     def test_packaging_cached_partial_chapter_keeps_full_book_count(self):
         chapter = self.prepare()

@@ -2619,9 +2619,14 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
 
 def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, config, work, *, notify,
                            total_chapters=None, retry_budget=None, take_locks=None, take_locks_guard=None,
-                           speech_cache=None, paragraph_split_available=False, scheduler_owner=None):
+                           speech_cache=None, paragraph_split_available=False, scheduler_owner=None,
+                           display_total=None, display_ordinal=None):
     """Bound in-flight jobs and restore source order before composing a chapter."""
     chunks = chapter["chunks"]
+    if not chunks:
+        # No speech work exists: no progress row, continuity, or synthesis to
+        # report, so the chapter composes its empty record without any of them.
+        return [], []
     from .continuity import ChapterContinuity, require_support
     require_support(engine)
     continuity = ChapterContinuity(engine_identity, voices)
@@ -2643,8 +2648,10 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
     resources = getattr(engine, "resources", None)
     owner = scheduler_owner or (None, chapter.get("number", 1))
 
-    with ChapterProgress(chapter.get("number", 1), total_chapters or chapter.get("number", 1), chunks,
-                         notify=notify, parallel=getattr(engine, "max_parallel", 1)) as progress:
+    with ChapterProgress(chapter.get("number", 1),
+                         display_total or total_chapters or chapter.get("number", 1), chunks,
+                         notify=notify, parallel=getattr(engine, "max_parallel", 1),
+                         ordinal=display_ordinal) as progress:
         def run(index):
             stop_if_requested()
             def transaction():
@@ -2698,7 +2705,8 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
 
 def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identity,
                                 verifier, config, work, *, notify, retry_budget=None, speech_cache=None,
-                                take_locks=None, take_locks_guard=None, scheduler_owner=None):
+                                take_locks=None, take_locks_guard=None, scheduler_owner=None,
+                                display_total=None, display_ordinal=None):
     """Split only exhausted paragraph performances, retaining verified work."""
     from .paragraph_recovery import record_paragraph_fallback
 
@@ -2715,7 +2723,8 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
                 notify=notify, total_chapters=len(bundle["chapters"]), retry_budget=retry_budget,
                 speech_cache=speech_cache, paragraph_split_available=True,
                 take_locks=take_locks, take_locks_guard=take_locks_guard,
-                scheduler_owner=scheduler_owner)
+                scheduler_owner=scheduler_owner, display_total=display_total,
+                display_ordinal=display_ordinal)
             return chapter, clips, acceptance
         except SpeechVerificationFailed as exc:
             stop_if_requested()
@@ -2882,6 +2891,15 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
     report_chapter_plan(notify, book_key, lambda: [
         {"number": chapter["number"], "title": chapter["title"], "blocks": len(chapter["chunks"]),
          "saved": _checkpoint_path(work, chapter).is_file()} for chapter in plan["chapters"]])
+    # Display counts cover chapters with speech work only: a zero-chunk chapter
+    # renders nothing and stays hidden from plain output, like the M4B it never
+    # joins. Source numbers are untouched; the ordinal is the visible position.
+    spoken_ordinals = {}
+    spoken_total = 0
+    for index, item in enumerate(plan["chapters"]):
+        if item["chunks"]:
+            spoken_total += 1
+            spoken_ordinals[index] = spoken_total
     book_lock = None
     voice_lock = None
     assembly_executor = None
@@ -2942,9 +2960,12 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         def completed(index, composed, chapter_acceptance, chapter_label, chapter_started, reused=False):
             composed_records[index] = (composed, chapter_acceptance)
             report_chapter_state(notify, book_key, plan["chapters"][index]["number"], "done", reused=reused)
+            if not plan["chapters"][index]["chunks"]:
+                return
+            ready = sum(1 for done_index in composed_records if plan["chapters"][done_index]["chunks"])
             notify(f"=== Completed {chapter_label} in {format_duration(monotonic() - chapter_started)}; "
                    f"run elapsed {format_duration(monotonic() - run_started)} "
-                   f"({len(composed_records)} / {len(plan['chapters'])} selected chapters ready). ===")
+                   f"({ready} / {spoken_total} selected chapters ready). ===")
 
         def finish_completed(final=False):
             # Publication, notification, and checkpoint bookkeeping stay in
@@ -2974,6 +2995,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             stop_if_requested()
             chapter_started = monotonic()
             chapter_label = f"chapter {chapter['number']} / {len(bundle['chapters'])}"
+            audible = bool(chapter["chunks"])
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
             saved = _read_checkpoint(work, chapter)
             composed = None
@@ -2988,24 +3010,29 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     composed, chapter_acceptance = _restore_chapter(
                         work, chapter, saved, restore_context, voices, config, speech_cache=speech_cache, notify=notify)
                 except ChapterNeedsRendering as exc:
-                    notify(f"Rebuilding {chapter_label}: {exc.reason}; "
-                           "reusing matching verified clips.")
+                    if audible:
+                        notify(f"Rebuilding {chapter_label}: {exc.reason}; "
+                               "reusing matching verified clips.")
                 else:
                     if restore_context is not context:
                         composed = _retag_chapter(work, composed, chapter, context, bundle, config, notify=notify)
                         with plan_lock:
                             _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
                             _publish_work_chapter_link(config, composed, notify=notify)
-                    notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
+                    if audible:
+                        notify(f"Reusing completed {chapter_label}: {chapter['title']} "
+                               f"({composed['encoded_path']})")
             if composed is None:
                 report_chapter_state(notify, book_key, chapter["number"], "rendering")
-                notify(f"Processing {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
+                if audible:
+                    notify(f"Processing {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
                 try:
                     rendered_chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
                         bundle, chapter, voices, engine, engine_identity, verifier, config, work,
                         notify=notify, retry_budget=budget or retry_budget, speech_cache=speech_cache,
                         take_locks=take_locks, take_locks_guard=take_locks_guard,
-                        scheduler_owner=(run_key, chapter["number"]))
+                        scheduler_owner=(run_key, chapter["number"]),
+                        display_total=spoken_total, display_ordinal=spoken_ordinals.get(chapter_index))
                 except RenderBlocked as exc:
                     # Ordinary chapter render failures (bounded speech
                     # verification, chapter-local recovery/cache blocks) are

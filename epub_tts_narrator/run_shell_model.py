@@ -128,6 +128,7 @@ class RunModel:
         self.book_states = {}     # book -> {"state", "ready", "total", "key"}
         self.chapter_plans = {}   # book -> {number: {"number", "title", "blocks", "state", "done", ...}}
         self._outlines = set()    # books whose chapters are still a queued outline
+        self._hidden = {}         # book -> chapters proven to have no planned speech work (blocks == 0)
         self.sched = None         # latest render_schedule_status snapshot (polled by the screen)
         self._done_by_key = {}    # board key -> blocks done last seen
         self.accepted = deque()   # (time, blocks) accepted while chapters ran
@@ -221,9 +222,9 @@ class RunModel:
                         handler = self.rebuild_handlers.get(place[0])
                         if callable(handler):
                             handler(place[1])
-                if row is not None:
-                    book = row["scope"].get("book")
-                    self.completed[book] = self.completed.get(book, 0) + 1
+                    if not self._hidden_chapter(place[0], place[1]):
+                        book = row["scope"].get("book")
+                        self.completed[book] = self.completed.get(book, 0) + 1
             elif event.kind == OUTCOME:
                 book = event.scope.get("book")
                 self.books[book] = bool(event.data.get("succeeded"))
@@ -279,25 +280,36 @@ class RunModel:
         if outline and book in self.chapter_plans and book not in self._outlines:
             return
         self._book(book)
-        plan = {}
+        plan, hidden = {}, set()
         for item in chapters:
             number = item.get("number")
             if type(number) is not int:
                 continue
             blocks = item.get("blocks") if type(item.get("blocks")) is int else None
+            if blocks == 0:
+                # A chapter with no planned speech work (unlike one holding only
+                # silence controls, which has blocks) renders nothing; it stays
+                # out of every list and count, like the M4B it never joins.
+                hidden.add(number)
+                continue
             plan[number] = {"number": number, "title": str(item.get("title") or ""), "blocks": blocks,
                             "state": "saved" if item.get("saved") else "queued", "done": 0, "reused": False,
                             "error": None, "error_type": None}
         self.chapter_plans[book] = dict(sorted(plan.items()))
+        self._hidden[book] = hidden
         if outline:
             self._outlines.add(book)
         else:
             self._outlines.discard(book)
 
+    def _hidden_chapter(self, book, number):
+        """Whether a chapter is proven to have no planned speech work and stays hidden."""
+        return number in self._hidden.get(book, ())
+
     def _chapter(self, book, number, *, create=True):
         """A planned chapter's entry; a state for an unplanned chapter of a planned book adds it."""
         plan = self.chapter_plans.get(book)
-        if plan is None or type(number) is not int:
+        if plan is None or type(number) is not int or self._hidden_chapter(book, number):
             return None
         if number not in plan and create:
             plan[number] = {"number": number, "title": "", "blocks": None, "state": "queued", "done": 0,
@@ -549,7 +561,8 @@ class RunModel:
             items = [(key, row["scope"], row["snapshot"], row["text"]) for key, row in self.rows.items()]
         flt = self.filter
         items = [item for item in items
-                 if (flt.book is None or item[1].get("book") == flt.book)
+                 if not self._hidden_chapter(item[1].get("book"), item[1].get("chapter"))
+                 and (flt.book is None or item[1].get("book") == flt.book)
                  and (flt.chapter is None or item[1].get("chapter") == flt.chapter)
                  and (flt.worker is None or any(task.get("worker") == flt.worker
                                                 for task in (item[2] or {}).get("active", [])))
@@ -573,6 +586,8 @@ class RunModel:
         unplanned = []
         for key, row in self.rows.items():
             place = (row["scope"].get("book"), row["scope"].get("chapter"))
+            if self._hidden_chapter(place[0], place[1]):
+                continue
             if place[0] in self.chapter_plans and place[1] in self.chapter_plans[place[0]]:
                 live[place] = (key, row)
             else:
@@ -728,6 +743,8 @@ class RunModel:
             failures = len(self.current_failures())
             remaining = [row["snapshot"].get("remaining") for row in self.rows.values()
                          if row["snapshot"] and row["snapshot"].get("remaining")]
+            active_rows = sum(1 for row in self.rows.values()
+                              if not self._hidden_chapter(row["scope"].get("book"), row["scope"].get("chapter")))
             stages = (self.sched or {}).get("stages") or {}
         activity = self.activity()
         level, text = self.health(now)
@@ -747,7 +764,7 @@ class RunModel:
             "Failures": (str(failures), "r retries · t listens to takes" if failures else "none",
                          "error" if failures else "ok"),
             "Left": (f"~{_duration(max(remaining))}" if remaining and self.running else "—",
-                     f"{len(self.rows)} chapter(s) active", "ok"),
+                     f"{active_rows} chapter(s) active", "ok"),
         }
         for stage, label in (("synthesis", "Generating"), ("recognition", "Verifying")):
             gauges = stages.get(stage)
@@ -791,22 +808,32 @@ class RunModel:
         """``[(book, percent or None, state, ready, total, active chapters, blocks done/total, failures)]``.
 
         The percentage counts finished chapters plus the accepted share of
-        each active chapter's blocks; unknown until a chapter total is seen.
+        each active chapter's blocks. Chapters proven to have no planned
+        speech work are hidden, so their book's totals come from its visible
+        plan rather than the render's raw log totals; unknown until then.
         """
         with self._lock:
             rows = []
             for book, state in self.book_states.items():
-                live = [row for row in self.rows.values() if row["scope"].get("book") == book and row["snapshot"]]
+                live = [row for row in self.rows.values()
+                        if row["scope"].get("book") == book and row["snapshot"]
+                        and not self._hidden_chapter(book, row["scope"].get("chapter"))]
                 done = sum(row["snapshot"]["done"] for row in live)
                 blocks = sum(row["snapshot"]["blocks"] for row in live)
                 failed = sum(1 for item in self.current_failures() if item["scope"].get("book") == book)
+                plan = self.chapter_plans.get(book)
+                if plan is not None:
+                    total = len(plan)
+                    ready = sum(1 for entry in plan.values() if entry["state"] == "done")
+                else:
+                    total, ready = state["total"], state["ready"]
                 percent = None
                 if state["state"] == "done":
                     percent = 100
-                elif state["total"]:
+                elif total:
                     partial = sum(row["snapshot"]["done"] / max(1, row["snapshot"]["blocks"]) for row in live)
-                    percent = min(99, int(100 * (state["ready"] + partial) / state["total"]))
-                rows.append((book, percent, state["state"] or "starting", state["ready"], state["total"], len(live),
+                    percent = min(99, int(100 * (ready + partial) / total))
+                rows.append((book, percent, state["state"] or "starting", ready, total, len(live),
                              f"{done}/{blocks}" if live else "", failed))
         return rows
 
@@ -856,8 +883,10 @@ class RunModel:
                              f"{progress['step_fraction']:.0%}")
                 if progress.get("streams"):
                     parts.append(f"{progress['streams']} model request(s) active")
-            if self.rows:
-                parts.append(f"{len(self.rows)} chapter(s) active")
+            active = sum(1 for row in self.rows.values()
+                         if not self._hidden_chapter(row["scope"].get("book"), row["scope"].get("chapter")))
+            if active:
+                parts.append(f"{active} chapter(s) active")
             done = sum(self.completed.values())
             if done:
                 parts.append(f"{done} chapter(s) finished")

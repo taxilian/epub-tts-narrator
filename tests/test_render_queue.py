@@ -8,6 +8,7 @@ as a fraction of a second so no wait exceeds a fraction of a second.
 
 import contextlib
 from io import StringIO
+import json
 from pathlib import Path
 import re
 import tempfile
@@ -20,8 +21,8 @@ from epub_tts_narrator.cli import export_bundle
 from epub_tts_narrator.renderer.chapter_client import ChapterClientError
 from epub_tts_narrator.renderer.cli import main, parser
 from epub_tts_narrator.renderer.render_queue import (
-    _book_name, _prefixed, first_completed_chapter, gate_busy, gate_capacity,
-    gate_decision, render_queue_command,
+    _book_name, _chapter_outline, _prefixed, _report_local_completion, _report_remote_completion,
+    first_completed_chapter, gate_busy, gate_capacity, gate_decision, render_queue_command,
 )
 from audition_fixtures import prepare_document
 from test_contracts import valid_document
@@ -897,6 +898,10 @@ class QueueCliWiringTests(QueueFixtureTests):
 
 
 class SmallUnitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+
     def test_book_name_uses_the_book_directory(self):
         self.assertEqual(_book_name("/tmp/runs/book-2"), "book-2")
 
@@ -904,6 +909,36 @@ class SmallUnitTests(unittest.TestCase):
         lines = []
         _prefixed("[book-2] ", lines.append)("hello")
         self.assertEqual(lines, ["[book-2] hello"])
+
+    def test_queued_outline_hides_zero_segment_chapters_and_keeps_source_numbers(self):
+        directory = Path(self.temp.name) / "queued-book"
+        directory.mkdir()
+        scripts = [{"path": "scripts/chapter-0001.jsonl", "segment_count": 3, "title": "One"},
+                   {"path": "scripts/chapter-0002.jsonl", "segment_count": 0, "title": "Truly empty"},
+                   {"path": "scripts/chapter-0003.jsonl", "title": "No count kept"}]
+        (directory / "manifest.json").write_text(json.dumps({"files": {"scripts": scripts}}))
+        # The uncountable chapter cannot be proven empty, so it stays listed.
+        self.assertEqual([(item["number"], item["title"]) for item in _chapter_outline(directory)],
+                         [(1, "One"), (3, "No count kept")])
+        (directory / "manifest.json").write_text("{broken")
+        self.assertIsNone(_chapter_outline(directory))
+
+    def test_completion_summaries_hide_finished_chapters_without_audio(self):
+        result = {"chapters": [{"number": 1, "audio_file": "/work/chapters/chapter-0001.wav"},
+                               {"number": 2, "audio_file": None},
+                               {"number": 4, "audio_file": "/work/chapters/chapter-0004.wav"}]}
+        bundle = {"chapters": [object(), object(), object(), object()]}
+        config = {"render": {"work_dir": "/work", "output_dir": "/out"}}
+        lines = []
+        _report_local_completion(result, config, bundle, chapters_only=True, notify=lines.append)
+        _report_remote_completion(result, config, bundle, chapters_only=True, notify=lines.append)
+        self.assertEqual(lines, [
+            "Completed chapter audio: /work/chapters",
+            "  Chapter 1: /work/chapters/chapter-0001.wav",
+            "  Chapter 4: /work/chapters/chapter-0004.wav",
+            "Completed chapter 1: /work/chapters/chapter-0001.wav",
+            "Completed chapter 4: /work/chapters/chapter-0004.wav",
+        ])
 
 
 if __name__ == "__main__":

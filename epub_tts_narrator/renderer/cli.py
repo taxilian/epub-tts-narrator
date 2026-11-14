@@ -712,8 +712,11 @@ def main(argv=None, *, in_shell=False):
             multi_speaker = (all(worker.get("multi_speaker", True) for worker in workers)
                              if workers else config["engine"]["type"] == "drama3_mlx")
             plan = make_render_plan(bundle, config, multi_speaker=multi_speaker)
+            # Chapters with no planned speech work render nothing and never join
+            # the M4B, so the estimate lists only chapters that actually speak.
+            spoken = [c for c in plan["chapters"] if c["chunks"]]
             print(json.dumps({
-                "book": plan["book"]["title"], "chapters": len(plan["chapters"]),
+                "book": plan["book"]["title"], "chapters": len(spoken),
                 "chunks": sum(len(c["chunks"]) for c in plan["chapters"]),
                 "voices": len(plan["voice_ids"]), "partial_book": plan["partial_book"],
                 "review_items": plan["review_items"], "errors": plan["errors"],
@@ -725,7 +728,7 @@ def main(argv=None, *, in_shell=False):
                 "output_directory": config["render"]["output_dir"],
                 "renderers": [{key: worker[key] for key in ("name", "type", "concurrency")}
                               for worker in workers],
-                "chapter_titles": [{"number": c["number"], "title": c["title"]} for c in plan["chapters"]],
+                "chapter_titles": [{"number": c["number"], "title": c["title"]} for c in spoken],
             }, ensure_ascii=False, indent=2))
             return 2 if plan["errors"] else 0
         expected_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
@@ -750,7 +753,8 @@ def main(argv=None, *, in_shell=False):
                                   alignment_verifier_factory=alignment_verifier)
                 if args.chapters_only:
                     for chapter in result["chapters"]:
-                        print(f"Completed chapter {chapter['number']}: {chapter.get('audio_file') or 'empty'}")
+                        if chapter.get("audio_file"):
+                            print(f"Completed chapter {chapter['number']}: {chapter['audio_file']}")
             if not args.chapters_only:
                 print(f"Completed audiobook: {config['render']['output_dir']}")
             return 0
@@ -759,8 +763,8 @@ def main(argv=None, *, in_shell=False):
             result = render_remote(bundle, config, chapters_only=args.chapters_only)
             if args.chapters_only:
                 for chapter in result.get("chapters", []):
-                    print(f"Completed chapter {chapter['number']} / {len(bundle['chapters'])}: "
-                          f"{chapter.get('audio_file') or 'empty chapter (no speech)'}")
+                    if chapter.get("audio_file"):
+                        print(f"Completed chapter {chapter['number']}: {chapter['audio_file']}")
             else:
                 print(f"Completed audiobook: {config['render']['output_dir']}")
             return 0
@@ -849,8 +853,8 @@ def main(argv=None, *, in_shell=False):
                 print(f"Completed chapter audio: {Path(config['render']['work_dir']) / 'chapters'}")
                 if isinstance(result, dict):
                     for chapter in result.get("chapters", []):
-                        location = chapter.get("audio_file") or "empty chapter (no speech)"
-                        print(f"  Chapter {chapter['number']} / {len(bundle['chapters'])}: {location}")
+                        if chapter.get("audio_file"):
+                            print(f"  Chapter {chapter['number']}: {chapter['audio_file']}")
             else:
                 print(f"Completed audiobook: {config['render']['output_dir']}")
         return 0

@@ -284,7 +284,7 @@ class RendererCLITests(unittest.TestCase):
                 "--chapters", "1", "--chapters-only", "--chapter-format", "mp3", "--allow-review")
         self.assertEqual(status, 0, error)
         self.assertIn("Completed chapter audio", output)
-        self.assertIn("Chapter 1 / 1: /fixture/chapter.mp3", output)
+        self.assertIn("Chapter 1: /fixture/chapter.mp3", output)
         config = render.call_args.args[1]
         self.assertEqual(config["render"]["chapter_numbers"], [1])
         self.assertEqual(config["render"]["chapter_format"], "mp3")
@@ -292,6 +292,62 @@ class RendererCLITests(unittest.TestCase):
         self.assertEqual(render.call_args.kwargs, {"chapters_only": True})
         engine.close.assert_called_once()
         verifier.close.assert_called_once()
+
+    def test_chapters_only_summary_hides_chapters_that_produced_no_audio(self):
+        engine, verifier = Mock(), Mock()
+        with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine),
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=verifier),
+              patch("epub_tts_narrator.renderer.workflow.render") as render):
+            render.return_value = {"status": "chapters_complete", "chapter_count": 1,
+                                   "chapters": [{"number": 1, "title": "Divider", "audio_file": None}]}
+            status, output, error = self.run_cli("render", self.bundle, "--config", self.config,
+                                                 "--chapters", "1", "--chapters-only", "--chapter-format", "mp3",
+                                                 "--allow-review")
+        self.assertEqual(status, 0, error)
+        self.assertIn("Completed chapter audio", output)
+        self.assertNotIn("Chapter 1 /", output)
+        self.assertNotIn("empty", output)
+
+    def test_assemble_chapters_only_summary_hides_chapters_without_audio(self):
+        self.config.write_text(self.config.read_text() + '[render]\nrequire_cover=false\n')
+        with (patch("epub_tts_narrator.renderer.engines.create_engine") as engine,
+              patch("epub_tts_narrator.renderer.verification.create_verifier") as verifier,
+              patch("epub_tts_narrator.renderer.workflow.assemble", create=True) as assemble):
+            assemble.return_value = {"chapters": [{"number": 1, "audio_file": None}]}
+            status, output, error = self.run_cli("assemble", self.bundle, "--config", self.config,
+                                                 "--chapters", "1", "--chapters-only", "--chapter-format", "mp3")
+        self.assertEqual(status, 0, error)
+        self.assertNotIn("Completed chapter 1", output)
+        self.assertNotIn("empty", output)
+        engine.assert_not_called()
+        verifier.assert_not_called()
+
+    def test_single_book_remote_render_summary_hides_chapters_without_audio(self):
+        self.config.write_text(self.config.read_text()
+                               + '[remote_chapters]\nurl = "https://fixture.example"\n')
+        result = {"chapters": [{"number": 1, "audio_file": None},
+                               {"number": 1, "audio_file": "/work/remote-chapters/chapter-0001.m4a"}]}
+        with patch("epub_tts_narrator.renderer.chapter_client.render_remote", return_value=result) as render:
+            status, output, error = self.run_cli("render", self.bundle, "--config", self.config,
+                                                 "--chapters", "1", "--chapters-only")
+        self.assertEqual(status, 0, error)
+        render.assert_called_once()
+        self.assertEqual([line for line in output.splitlines() if "chapter" in line.lower()],
+                         ["Completed chapter 1: /work/remote-chapters/chapter-0001.m4a"])
+
+    def test_plan_display_lists_only_chapters_with_speech_work(self):
+        plan = {"book": {"title": "Fixture"}, "chapters": [
+            {"number": 1, "title": "One", "chunks": [{"chunk_id": "c1"}]},
+            {"number": 2, "title": "Truly empty", "chunks": []}],
+            "voice_ids": ["v1"], "partial_book": False, "review_items": 0, "errors": []}
+        with patch("epub_tts_narrator.renderer.workflow.make_render_plan", return_value=plan):
+            status, output, error = self.run_cli("plan", self.bundle, "--config", self.config)
+        self.assertEqual(status, 0, error)
+        record = json.loads(output)
+        self.assertEqual(record["chapters"], 1)
+        self.assertEqual(record["chunks"], 1)
+        self.assertEqual(record["chapter_titles"], [{"number": 1, "title": "One"}])
 
     def test_assemble_does_not_create_any_model(self):
         self.config.write_text(self.config.read_text() + '[render]\nrequire_cover=false\n')

@@ -451,13 +451,15 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
     folder = directory / key
     if folder.exists() or folder.is_symlink():
         result = load_chapter(folder, ffprobe=settings["ffprobe"])
-        notify(f"Reusing completed chapter {chapter_label}: {metadata['title']}")
+        if clips:
+            notify(f"Reusing completed chapter {chapter_label}: {metadata['title']}")
         return result
     directory.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".chapter-", dir=directory) as temporary:
         stage = Path(temporary) / "ready"
         stage.mkdir()
-        notify(f"Assembling chapter {chapter_label}: {metadata['title']}")
+        if clips:
+            notify(f"Assembling chapter {chapter_label}: {metadata['title']}")
         composed = compose_chapter(
             clips, stage / f"chapter-{metadata['number']:04d}.wav", sample_rate=settings["sample_rate"],
             paragraph_pause_ms=settings["paragraph_pause_ms"],
@@ -498,7 +500,9 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
     result = load_chapter(folder, ffprobe=settings["ffprobe"])
     if result["encoded_path"]:
         notify(f"Chapter {chapter_label} ready: {result['encoded_path']}")
-    else:
+    elif clips:
+        # Zero frames with clips is unexpected and stays reported; a chapter
+        # with no clips has no speech work and stays hidden like the M4B.
         notify(f"Chapter {chapter_label} is empty; recorded as skipped")
     return result
 
