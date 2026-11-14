@@ -29,6 +29,10 @@ render *args:
 assemble *args:
     @"{{ python }}" -m epub_tts_narrator.renderer assemble "$@"
 
+# BOOK... [--only voices,chapters,clips] [--dry-run] [--yes]: delete superseded voices, chapters and takes.
+cleanup *args:
+    @"{{ python }}" -m epub_tts_narrator.renderer prune "$@"
+
 runpod-cleanup *args:
     @"{{ python }}" -m epub_tts_narrator.renderer runpod cleanup "$@"
 

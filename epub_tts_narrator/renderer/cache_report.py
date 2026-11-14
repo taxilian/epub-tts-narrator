@@ -142,7 +142,8 @@ def _differences(saved, identity, request):
     return changed or ["saved_record_not_reusable"]
 
 
-def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_examples=10):
+def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_examples=10, needed=None,
+                 resumed=None):
     """Report actual cache hits and the nearest prior inputs for current misses.
 
     Candidate comparisons explain differences; they never authorize reuse. The
@@ -150,6 +151,10 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
     provenance and waveform checksums. Run while rendering is paused for a stable
     snapshot. Text, voice transcripts, credentials and raw engine metadata are
     deliberately omitted from the shareable report.
+
+    ``needed`` and ``resumed``, sets, receive the take directory names
+    (request hashes) the next render uses (``prune``): every hit's accepted
+    take, and every miss's own take directory, where its earlier attempts are.
     """
     if type(max_examples) is not int or max_examples < 0:
         raise ValueError("max_examples must be a nonnegative integer")
@@ -204,6 +209,8 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                         continuity.bind(digest(identity))
                         found = cache.find(identity, request=bound)
                         if found is not None:
+                            if needed is not None:
+                                needed.add(found[1]["request_hash"])
                             continuity.accept(*found)
                             totals["hits"] += 1
                             continue
@@ -213,10 +220,15 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                                                             exclude=continuity.accepted_audio())
                                  if tolerant else None)
                         if found is not None:
+                            if needed is not None:
+                                needed.add(found[1]["request_hash"])
                             continuity.accept(*found, tolerate_history=True)
                             totals["hits"] += 1
                             totals["history_changed_hits"] += 1
                             continue
+                        if resumed is not None:
+                            # The take directory the render uses for this miss.
+                            resumed.add(digest(dict(bound, synthesis_identity=identity)))
                     speakers = request_speakers(bound)
                     earlier_changed = bool(speakers & changed_voices)
                     changed_voices.update(speakers)

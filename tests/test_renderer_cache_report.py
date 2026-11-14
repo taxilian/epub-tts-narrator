@@ -164,6 +164,25 @@ class CacheReportTests(unittest.TestCase):
         self.assertEqual(report["summary"]["history_changed_hits"], 0)
         self.assertEqual(report["reasons"]["earlier_take_in_chapter_changed"], 1)
 
+    def test_needed_names_the_takes_the_next_render_uses(self):
+        # A take recorded under other weights is not reused; the current take is.
+        stale = dict(self.engine, checkpoint_files_sha256={"weights": "earlier"})
+        _, old = self.save(dict(self.request, engine=stale), runtime=stale)
+        _, current = self.save()
+        needed, resumed = set(), set()
+
+        report = cache_report(self.bundle, self.config, self.engine, needed=needed, resumed=resumed)
+
+        self.assertEqual(report["summary"]["hits"], 1)
+        self.assertEqual((needed, resumed), ({current["request_hash"]}, set()))
+
+        # A miss names the one take directory its render would write to.
+        shutil.rmtree(Path(self.config["render"]["work_dir"]) / "clips" / current["request_hash"])
+        needed, resumed = set(), set()
+        cache_report(self.bundle, self.config, self.engine, needed=needed, resumed=resumed)
+        self.assertEqual((needed, len(resumed)), (set(), 1))
+        self.assertFalse(resumed & {current["request_hash"], old["request_hash"]})
+
     def test_changed_weights_explain_miss_without_exposing_raw_engine_metadata(self):
         _, record = self.save()
         current = dict(self.engine, checkpoint_files_sha256={"weights": "changed"},

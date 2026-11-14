@@ -1407,7 +1407,25 @@ To remove the generated speech and chapter caches as well, use the explicit disc
 
 This deletes the managed `clips`, `mixes`, `chapters`, and `completed-chapters` stores under that book's render work directory, including the playable checkpoint files created by `--chapters-only`. **Speech resumability is lost:** rendering again will generate new speech using the saved voices. Published M4A/MP3 chapters and the M4B in the output directory remain intact.
 
-Both modes always preserve voice samples, cloning references, casting candidates (including failed attempts), audition previews, and ancestor books. They do not traverse or delete the voice stores. Remaining accepted speech and current lossless chapter WAVs are intentional: they avoid lossy re-encoding and retain exact synchronization when reassembling. Voice-sample compression is not performed; their existing identity includes the original WAV bytes, so converting them in place would invalidate voice identities and speech caches.
+### Removing what a book no longer needs (`prune`, `just cleanup`)
+
+`cleanup` keeps everything a render could resume from. To remove superseded voices, chapter versions and takes as well, use `prune` (or `just cleanup`), on one or several books:
+
+```sh
+just cleanup runs/book-01 runs/book-02 --dry-run
+just cleanup runs/book-01                     # shows the summary, then asks before deleting
+just cleanup runs/book-01 --only voices,clips --yes
+```
+
+It works in three groups, all on by default; `--only` takes a comma-separated subset:
+
+- **voices** — each voice keeps its current choice. This book's other recordings of that voice (older revisions and the first recording a later choice replaced), the casting takes that made them under `render-work/casting-candidates`, and loudness previews of recordings that are no longer current are deleted. A voice whose recast is pending or failed, or that has no choice in this book, keeps everything. Earlier books' voice stores are never touched, so a continued book keeps every voice it inherits; a casting take whose hosted (Gemini) voice has not been released yet is kept.
+- **chapters** — each chapter keeps its newest complete version, even when it is out of date, and the version its checkpoint names (normally the same one); older versions and abandoned assembly staging are deleted. The published book in the output directory, and every `.m4b`, are never touched.
+- **clips** — a take folder stays when the next render reuses or resumes it (decided by the speech cache exactly as `cache-report` replays the current plan), when a kept chapter was built from it, or when you judged one of its takes or a failed chapter names it; recovery parts a kept take names stay too. Inside a kept, accepted take the rejected attempts' audio and continuity codes are deleted while its records stay; pending (still failing) takes stay whole. Every other take folder, its speech-index entries and pause timings, and old run plans are deleted. Cleaning clips needs this book's own render plan, so it refuses with a remote chapter service, a non-built-in engine, or a plan with problems; use `--only voices,chapters` then.
+
+`--dry-run` prints the per-group counts and sizes and deletes nothing; otherwise the same summary is shown and you are asked before anything is deleted. `--yes` deletes without asking; without a terminal and without `--yes`, nothing is deleted. `--json` prints the full report with every file. Anything `prune` does not recognize, and anything holding a link, lock or lease, is kept and listed. It takes the book's render, book-audio and voice-store locks for the whole run, so it refuses while a render, assembly, casting session or cleanup uses the book, and any of those started meanwhile refuses until it finishes. Lock and lease files are never deleted. Run `cache-report` afterwards if you want to confirm the next render reuses what it did before.
+
+Both `cleanup` modes always preserve voice samples, cloning references, casting candidates (including failed attempts), audition previews, and ancestor books. They do not traverse or delete the voice stores. Remaining accepted speech and current lossless chapter WAVs are intentional: they avoid lossy re-encoding and retain exact synchronization when reassembling. Voice-sample compression is not performed; their existing identity includes the original WAV bytes, so converting them in place would invalidate voice identities and speech caches.
 
 ## Verification and recovery
 
