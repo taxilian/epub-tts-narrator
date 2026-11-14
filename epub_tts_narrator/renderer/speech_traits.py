@@ -218,7 +218,8 @@ def _book_terms(bundle):
 
 def designed_description(store, profile):
     """The description that designed a voice's saved recording, else the one that will."""
-    saved = store.load(profile["id"]) if store is not None else None
+    load = getattr(store, "load", None)
+    saved = load(profile["id"]) if callable(load) else None
     requested = ((saved or {}).get("creation") or {}).get("requested_description")
     return requested if isinstance(requested, str) and requested else profile.get("description", "")
 
@@ -239,9 +240,10 @@ def accent_cues(bundle, config, *, store=None):
     chosen = accent_overrides(bundle, config, include_cleared=True)
     chosen_traits = speech_trait_overrides(bundle, config)
     assigned = assigned_accents(bundle, config)
-    if store is None:
+    if store is None and (config.get("voices") or {}).get("directory"):
         from .book_context import voice_store
         store = voice_store(bundle, config)
+    # Without a voice directory there are no saved recordings: descriptions are the profiles'.
     cues = {}
     derived = {}
     for profile in bundle["cast"]["voices"]:
