@@ -12,7 +12,8 @@ from .verification_prompts import PHONETIC_PROMPT
 _LIMITS = {"max_pairs": 4, "max_fraction": 0.2,
            "minimum_allowed_substitutions": 1, "max_words": 2000,
            "context_words": 3, "guard_version": 3}
-_PROVEN_COVERAGE_OPERATIONS = frozenset({"contraction", "colloquial", "spelling_boundary", "letter_names"})
+_PROVEN_COVERAGE_OPERATIONS = frozenset({"contraction", "colloquial", "spelling_boundary", "letter_names",
+                                         "roman_numeral", "symbol_reading"})
 
 
 def _original_words(text, words):
@@ -49,8 +50,17 @@ def substitution_pairs(expected_text, transcript):
     coverage = speech_coverage(expected_text, transcript)
     if not coverage["passed"]:
         return None
+    # A vocal sound, restart or joining hyphen on one side only is not a sound
+    # pair, and votes on other words must not approve a passage around it:
+    # only the whole-passage text judge can. Unspoken symbols carry no words.
+    if any((change["expected_end"] == change["expected_start"]
+            or change["actual_end"] == change["actual_start"])
+           and change.get("rule") != "unspoken_symbol" for change in coverage["alignment"]):
+        return None
     changed = [change for change in coverage["alignment"]
-               if change["operation"] not in _PROVEN_COVERAGE_OPERATIONS]
+               if change["operation"] not in _PROVEN_COVERAGE_OPERATIONS
+               and change["expected_end"] > change["expected_start"]
+               and change["actual_end"] > change["actual_start"]]
     if not changed:
         return None
     expected_original = _original_words(expected_text, expected)

@@ -20,8 +20,116 @@ from .phonetic_match import (
 )
 
 
-SPEECH_COVERAGE_VERSION = 14
+SPEECH_COVERAGE_VERSION = 15
 _MAX_ALIGNMENT_STATES = 20_000
+# Non-lexical vocal sounds a performance may add or leave out ("Oh,", "Ha!").
+# They carry no words, so omitting, adding or changing one is a performance
+# difference for review, never a missing or extra word. Bounded per passage.
+_VOCALIZATIONS = frozenset("""
+ah aah ahh oh ohh ooh uh uhh um umm er erm eh hm hmm mm mmm huh heh ha hah
+""".split())
+# A closed-mouth hum the text asks for is a deliberate audible beat; a take
+# may add one, but leaving it out stays a missing sound no judge can excuse.
+_HUMS = frozenset("hm hmm mm mmm".split())
+_MAX_SPOKEN_GAPS = 2
+# Symbols with no fixed spoken form: a reader may say them or pass over them.
+_SKIPPABLE_SYMBOLS = frozenset({"/", "*"})
+_SYMBOL_NAMES = {"/": frozenset({"slash", "stroke"})}
+_DEGREE_UNITS = {"c": frozenset({"celsius", "centigrade", "c"}),
+                 "f": frozenset({"fahrenheit", "f"}), "k": frozenset({"kelvin", "k"})}
+_CONTRACTION_SUFFIXES = {"s": ("is", "has"), "ve": ("have",), "ll": ("will",),
+                         "d": ("had", "would"), "re": ("are",), "m": ("am",)}
+_GENERAL_CONTRACTION = re.compile(r"([a-z]+)'(s|ve|ll|d|re|m)\Z")
+_ROMAN_NUMERAL = re.compile(r"M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})\Z")
+_ROMAN_VALUES = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+_VOWEL_PHONES = frozenset("AA AE AH AO AW AY EH ER EY IH IY OW OY UH UW".split())
+_CERTAIN_OPERATIONS = frozenset({"colloquial", "contraction", "spelling_boundary", "letter_names",
+                                 "address_pronunciation", "roman_numeral", "symbol_reading"})
+
+
+def contraction_expansions(word):
+    """Spelled-out forms of a contraction, for any host word.
+
+    The fixed table keeps its pronoun-specific readings; otherwise a word plus
+    's, 've, 'll, 'd, 're or 'm is its host followed by the auxiliary
+    ("else's" → "else is"/"else has", "to've" → "to have").
+    """
+    if word in _CONTRACTIONS:
+        return _CONTRACTIONS[word]
+    match = _GENERAL_CONTRACTION.fullmatch(word)
+    if match is None or "n't" in word:
+        return ()
+    return tuple((match.group(1), auxiliary) for auxiliary in _CONTRACTION_SUFFIXES[match.group(2)])
+
+
+def roman_numeral_words(spelling):
+    """Cardinal words for an uppercase Roman numeral of two or more letters, else None."""
+    from .quality import _integer_words
+    if (not isinstance(spelling, str) or len(spelling) < 2 or not spelling.isupper()
+            or _ROMAN_NUMERAL.fullmatch(spelling) is None):
+        return None
+    values = [_ROMAN_VALUES[letter] for letter in spelling]
+    total = sum(-value if index + 1 < len(values) and value < values[index + 1] else value
+                for index, value in enumerate(values))
+    return tuple(_integer_words(total))
+
+
+@lru_cache(maxsize=4096)
+def _dictionary_phones(word):
+    from ..pronunciation_dictionary import dictionary_readings
+    return tuple(re.sub(r"\d", "", reading) for reading in dictionary_readings(word))
+
+
+def _non_rhotic(phones):
+    """A reading as a non-rhotic accent says it: no R before a consonant or pause."""
+    phones = phones.split()
+    kept = []
+    for index, phone in enumerate(phones):
+        if phone == "R" and (index + 1 == len(phones) or phones[index + 1] not in _VOWEL_PHONES):
+            continue
+        kept.append("AH" if phone == "ER" else phone)
+    return " ".join(kept)
+
+
+def _one_edit_per_four(first, second):
+    """Levenshtein distance within one edit per four sounds of the longer code."""
+    allowed = max(len(first), len(second)) // 4
+    if allowed < 1 or abs(len(first) - len(second)) > allowed:
+        return False
+    row = list(range(len(second) + 1))
+    for index, left in enumerate(first, 1):
+        previous, row[0] = row[0], index
+        for column, right in enumerate(second, 1):
+            previous, row[column] = row[column], min(row[column] + 1, row[column - 1] + 1,
+                                                     previous + (left != right))
+    return row[-1] <= allowed
+
+
+def dictionary_homophone(left, right):
+    """Two different dictionary words that share a reading ("high"/"hi", "two"/"to")."""
+    return left != right and bool(set(_dictionary_phones(left)) & set(_dictionary_phones(right)))
+
+
+def non_rhotic_homophone(left, right, metaphone):
+    """Words that sound alike once R is dropped before a consonant or pause.
+
+    Many English accents never sound such an R, so "floor" and "flaw" or an
+    invented "Killa" and "killer" are said alike. Dictionary readings decide
+    when both words have one; otherwise their Double Metaphone codes after
+    dropping a written r not followed by a vowel must agree.
+    """
+    if left == right or not ("r" in left or "r" in right):
+        return False
+    if any(len(word) < 3 or not re.fullmatch(r"[a-z]+", word) or word in _FUNCTION_WORDS
+           or word in _PROTECTED for word in (left, right)):
+        return False
+    readings = [_dictionary_phones(word) for word in (left, right)]
+    if all(readings):
+        return bool({_non_rhotic(reading) for reading in readings[0]}
+                    & {_non_rhotic(reading) for reading in readings[1]})
+    codes = [{key for key in metaphone(re.sub(r"r+(?![aeiouy])", "", word)) if len(key) >= 2}
+             for word in (left, right)]
+    return bool(codes[0] & codes[1])
 _SPELLING_VARIANTS: dict[frozenset[str], str] = {
     frozenset(("qi", "chi")): "standard_transliteration",
 }
@@ -305,6 +413,163 @@ def speech_coverage(expected_text, transcript):
                 return None
         return "terminal_s_variation"
 
+    def change_record(operation, rule, i, end_i, j, end_j):
+        return {"operation": operation, "rule": rule, "expected_start": i, "expected_end": end_i,
+                "actual_start": j, "actual_end": end_j,
+                "expected": expected[i:end_i], "actual": actual[j:end_j]}
+
+    def raw(side, index):
+        source, spans = ((expected_source, expected_spans) if side == "expected"
+                         else (actual_source, actual_spans))
+        return source[spans[index][0]:spans[index][1]]
+
+    def elided(form, span, source, words, start, side):
+        """End positions where an apostrophe-elided spelling is read in full.
+
+        A leading apostrophe ("'em") or an inner one that is not a
+        contraction ending ("g'night") marks one to three left-out letters.
+        The full form keeps every written letter in order around them.
+        """
+        if not _ALPHABETIC_WORD.fullmatch(form) or "n't" in form or contraction_expansions(form):
+            return
+        if "'" in form:
+            head, _, tail = form.partition("'")
+            if "'" in tail or not head or len(tail) < 2:
+                return
+        elif span[0] > 0 and source[span[0] - 1] == "'" and len(form) >= 2:
+            head, tail = "", form
+        else:
+            return
+        for size in (1, 2):
+            if start + size > len(words) or (size > 1 and not contiguous(side, start, size)):
+                continue
+            pieces = words[start:start + size]
+            if not all(re.fullmatch(r"[a-z]+", piece) for piece in pieces):
+                continue
+            joined = "".join(pieces)
+            if (joined.startswith(head) and joined.endswith(tail)
+                    and 1 <= len(joined) - len(head) - len(tail) <= 3):
+                yield start + size
+
+    def written_readings(i, j):
+        """Bounded readings of a written form that compare words, never drop one."""
+        left, right = expected[i], actual[j]
+        for reverse in (False, True):
+            form, span, source, words, start, side = (
+                (actual[j], actual_spans[j], actual_source, expected, i, "expected") if reverse else
+                (expected[i], expected_spans[i], expected_source, actual, j, "actual"))
+            for end in elided(form, span, source, words, start, side):
+                yield ((end, j + 1) if reverse else (i + 1, end)) + (change_record(
+                    "pronunciation_candidate", "elided_spelling",
+                    i, end if reverse else i + 1, j, j + 1 if reverse else end),)
+            numeral = roman_numeral_words(raw("actual" if reverse else "expected", j if reverse else i))
+            if numeral is not None and tuple(words[start:start + len(numeral)]) == numeral:
+                end = start + len(numeral)
+                yield ((end, j + 1) if reverse else (i + 1, end)) + (change_record(
+                    "roman_numeral", "uppercase_roman_numeral",
+                    i, end if reverse else i + 1, j, j + 1 if reverse else end),)
+        units = _DEGREE_UNITS.get(left)
+        before = expected_source[:expected_spans[i][0]].rstrip()
+        if units is not None and before.endswith("°"):
+            for size in (1, 2):
+                spoken = actual[j:j + size]
+                if (len(spoken) == size and spoken[-1] in units
+                        and (size == 1 or spoken[0] in {"degree", "degrees"})):
+                    yield i + 1, j + size, change_record("symbol_reading", "degree_unit", i, i + 1, j, j + size)
+        names = _SYMBOL_NAMES.get(left)
+        if names is not None and right in names:
+            yield i + 1, j + 1, change_record("symbol_reading", "symbol_name", i, i + 1, j, j + 1)
+        if not all(_ALPHABETIC_WORD.fullmatch(word) for word in (left, right)) or left == right:
+            return
+        if any(source[span[0]:span[1]].isupper() and len(word) > 1
+               for source, span, word in ((expected_source, expected_spans[i], left),
+                                          (actual_source, actual_spans[j], right))):
+            return  # An initialism is spelled letter by letter, not read as a word.
+        if dictionary_homophone(left, right):
+            yield i + 1, j + 1, change_record("pronunciation_candidate", "dictionary_homophone", i, i + 1, j, j + 1)
+        elif non_rhotic_homophone(left, right, metaphone):
+            yield i + 1, j + 1, change_record("pronunciation_candidate", "non_rhotic", i, i + 1, j, j + 1)
+
+    def invented_name_sounds(i, j):
+        """A name no dictionary knows, heard as nearby sounds across new word breaks.
+
+        A recognizer cannot spell an invented name, so it splits, joins or
+        respells it ("Killashandra Ree" heard as "Kila Chandra Rhee"). One or
+        two source words, at least one of them a capitalized word outside the
+        dictionary, may match one to three heard words when the Double
+        Metaphone codes of the joined spellings differ by at most one edit per
+        four sounds. Heard grammar words may sit inside the name; negations
+        and quantities may not, and a heard word equal to a source word
+        around the span is never absorbed. The sound judges still decide.
+        """
+        for left_size in (1, 2):
+            source = expected[i:i + left_size]
+            if (len(source) < left_size or not contiguous("expected", i, left_size)
+                    or not all(re.fullmatch(r"[a-z]{2,}", word) and word not in _PROTECTED
+                               and word not in _FUNCTION_WORDS for word in source)):
+                continue
+            invented = [word for index, word in enumerate(source)
+                        if len(word) >= 4 and not _dictionary_phones(word)
+                        and raw("expected", i + index)[:1].isupper()
+                        and not raw("expected", i + index).isupper()]
+            if not invented:
+                continue
+            neighbours = set(expected[max(0, i - 1):i]) | set(expected[i + left_size:i + left_size + 1])
+            left_codes = {key for key in metaphone("".join(source)) if len(key) >= 3}
+            for right_size in (1, 2, 3):
+                if left_size == right_size == 1:
+                    continue  # One-word respellings keep their established rules.
+                heard = actual[j:j + right_size]
+                if (len(heard) < right_size or not contiguous("actual", j, right_size)
+                        or not all(re.fullmatch(r"[a-z]+", word) and word not in _PROTECTED
+                                   for word in heard)
+                        or set(heard) & (neighbours | set(source))):
+                    continue
+                right_codes = {key for key in metaphone("".join(heard)) if len(key) >= 3}
+                if any(first[0] == second[0] and _one_edit_per_four(first, second)
+                       for first in left_codes for second in right_codes):
+                    yield i + left_size, j + right_size, change_record(
+                        "pronunciation_candidate", "invented_name_sound",
+                        i, i + left_size, j, j + right_size)
+
+    def attached_hyphen(side, index):
+        # "-4" in "23-4-3308" or "-43NW" after "F42NW": a joining hyphen read
+        # as nothing, not a spoken minus sign. A spaced "-4" keeps its sign.
+        words, spans, source = ((expected, expected_spans, expected_source) if side == "expected"
+                                else (actual, actual_spans, actual_source))
+        start = spans[index][0]
+        return (words[index] == "minus" and source[start:start + 1] == "-" and start > 0
+                and source[start - 1].isalnum()
+                and (index == 0 or spans[index - 1][:2] != spans[index][:2]))
+
+    def gap_matches(i, j, gaps):
+        """Edges that consume words on one side only: unspoken symbols and vocal sounds."""
+        for side, index in (("expected", i), ("actual", j)):
+            words = expected if side == "expected" else actual
+            if index >= len(words):
+                continue
+            step = (i + 1, j) if side == "expected" else (i, j + 1)
+            change = (change_record("symbol_reading", None, i, step[0], j, step[1]))
+            if words[index] in _SKIPPABLE_SYMBOLS:
+                yield step + (gaps, dict(change, rule="unspoken_symbol"))
+            elif attached_hyphen(side, index):
+                yield step + (gaps, dict(change, rule="joining_hyphen"))
+        if gaps >= _MAX_SPOKEN_GAPS:
+            return
+        if i < len(expected) and j < len(actual) and expected[i] != actual[j] and {
+                expected[i], actual[j]} <= _VOCALIZATIONS:
+            yield i + 1, j + 1, gaps + 1, change_record("vocalization", "changed_vocalization", i, i + 1, j, j + 1)
+        if i < len(expected) and expected[i] in _VOCALIZATIONS - _HUMS:
+            yield i + 1, j, gaps + 1, change_record("vocalization", "omitted_vocalization", i, i + 1, j, j)
+        if j < len(actual) and actual[j] in _VOCALIZATIONS:
+            yield i, j + 1, gaps + 1, change_record("vocalization", "added_vocalization", i, i, j, j + 1)
+        if (j + 1 < len(actual) and re.fullmatch(r"[a-z]+", actual[j])
+                and (len(actual[j]) <= 3 or actual[j] == actual[j + 1])
+                and actual[j + 1].startswith(actual[j])
+                and re.fullmatch(r"[\-‐‑]", actual_source[actual_spans[j][1]:actual_spans[j + 1][0]])):
+            # "T-Trag", "Or-or": a hyphen-joined restart of the following word.
+            yield i, j + 1, gaps + 1, change_record("stammer", "hyphenated_restart", i, i, j, j + 1)
+
     def next_matches(i, j):
         yield from address_matches(i, j)
         if expected[i] == actual[j]:
@@ -339,7 +604,7 @@ def speech_coverage(expected_text, transcript):
             yield i + 1, j + 1, {"operation": "pronunciation_candidate", "rule": variant,
                 "expected_start": i, "expected_end": i + 1, "actual_start": j,
                 "actual_end": j + 1, "expected": expected[i:i + 1], "actual": actual[j:j + 1]}
-        left_expansions, right_expansions = _CONTRACTIONS.get(expected[i], ()), _CONTRACTIONS.get(actual[j], ())
+        left_expansions, right_expansions = contraction_expansions(expected[i]), contraction_expansions(actual[j])
         if set(left_expansions).intersection(right_expansions):
             yield i + 1, j + 1, {"operation": "contraction", "expected_start": i,
                 "expected_end": i + 1, "actual_start": j, "actual_end": j + 1,
@@ -381,6 +646,8 @@ def speech_coverage(expected_text, transcript):
             if review_only:
                 change.update(rule="colloquial_expansion", expansion=list(expansion))
             yield end_i, end_j, change
+        yield from written_readings(i, j)
+        yield from invented_name_sounds(i, j)
         for left_size, right_size in ((1, 1), (1, 2), (2, 1), (1, 3), (3, 1)):
             if letter_matches.blocks_fuzzy(i, j, left_size, right_size):
                 continue
@@ -453,11 +720,13 @@ def speech_coverage(expected_text, transcript):
                 "expected_keys": list(left_keys), "actual_keys": list(right_keys),
             }
 
-    pending, parents = [(0, 0)], {(0, 0): None}
-    finish = (len(expected), len(actual))
+    # A state also counts the vocal sounds and restarts consumed on one side
+    # only, so no path can excuse more than _MAX_SPOKEN_GAPS of them.
+    pending, parents = [(0, 0, 0)], {(0, 0, 0): None}
     while pending:
         state = pending.pop()
-        if state == finish:
+        i, j, gaps = state
+        if (i, j) == (len(expected), len(actual)):
             changes = []
             while parents[state] is not None:
                 previous, change = parents[state]
@@ -465,17 +734,17 @@ def speech_coverage(expected_text, transcript):
                     changes.append(change)
                 state = previous
             changes.reverse()
-            uncertain = [change for change in changes if change["operation"] not in {
-                "colloquial", "contraction", "spelling_boundary", "letter_names", "address_pronunciation"}]
+            uncertain = [change for change in changes if change["operation"] not in _CERTAIN_OPERATIONS]
             if ({word for change in uncertain for word in change["expected"]}
                     & {word for change in uncertain for word in change["actual"]}):
                 return dict(result, reason="reordered_spoken_content")
             return dict(result, passed=True, reason="complete_reviewable_coverage", alignment=changes)
-        i, j = state
-        if i == len(expected) or j == len(actual):
-            continue
-        for end_i, end_j, change in reversed(list(next_matches(i, j))):
-            following = (end_i, end_j)
+        edges = list(gap_matches(i, j, gaps))
+        if i < len(expected) and j < len(actual):
+            # Two-sided matches come first, so they are explored first.
+            edges = [(end_i, end_j, gaps, change) for end_i, end_j, change in next_matches(i, j)] + edges
+        for end_i, end_j, end_gaps, change in reversed(edges):
+            following = (end_i, end_j, end_gaps)
             if following not in parents:
                 if len(parents) >= _MAX_ALIGNMENT_STATES:
                     return dict(result, reason="comparison_limit")

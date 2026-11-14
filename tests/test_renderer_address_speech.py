@@ -108,10 +108,17 @@ for source, heard in cases:
 
     def test_spelling_and_separator_conventions_do_not_leak_into_prose(self):
         for expected, heard in (("Write A07KJSRVMS.", "Write ay zero seven kay jay ess are vee em ess."),
-                                ("Go from home/work.", "Go from home slash work."),
                                 ("Read the writer.email.", "Read the writer dot email.")):
             with self.subTest(expected=expected):
                 self.assertFalse(speech_coverage(expected, heard)["passed"])
+
+    def test_a_prose_slash_read_aloud_is_a_symbol_reading_for_the_judge(self):
+        # Listeners accepted "signing slash reasing" and "DNA slash RNA": a
+        # slash has no fixed spoken form, so the text judge decides.
+        coverage = speech_coverage("Go from home/work.", "Go from home slash work.")
+        self.assertTrue(coverage["passed"])
+        self.assertEqual([(row["operation"], row["rule"]) for row in coverage["alignment"]],
+                         [("symbol_reading", "symbol_name")])
 
 
 class AddressJevTests(unittest.TestCase):

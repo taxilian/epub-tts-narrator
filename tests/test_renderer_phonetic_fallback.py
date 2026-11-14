@@ -216,7 +216,7 @@ class PhoneticFallbackResumeTests(unittest.TestCase):
                              verifier, self.config, notify=lambda _: None,
                              retry_budget=SpeechRetryBudget())
 
-    def test_new_policy_verifies_a_fresh_take_and_preserves_the_rejected_attempt(self):
+    def test_new_policy_rechecks_the_rejected_take_and_keeps_its_old_report(self):
         judge = Judge("uncertain")
         before = ReferenceTextJudgingVerifier(PrimaryVerifier(RECOGNIZED), judge)
         with self.assertRaises(SpeechVerificationFailed):
@@ -227,15 +227,19 @@ class PhoneticFallbackResumeTests(unittest.TestCase):
         old_bytes = stored_audio.read_bytes(wav)
         reviewer = PronunciationReviewer(PairClient())
         after = ReferenceTextJudgingVerifier(PrimaryVerifier(RECOGNIZED), judge, reviewer)
-        regenerated, accepted = self.take(after)
-        self.assertEqual(accepted["attempt"], 2)
-        self.assertEqual(regenerated, self.root / "takes" / accepted["audio_file"])
+        reused, accepted = self.take(after)
+        # A take rejected only for its words is verified again in full under
+        # the new policy before any new synthesis is spent.
+        self.assertEqual(accepted["attempt"], 1)
+        self.assertEqual(reused, wav)
         self.assertEqual(stored_audio.read_bytes(wav), old_bytes)
-        self.assertEqual(read_json(old_report_path), old_report)
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.calls), 1)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["report"]["text_confirmation_method"], "phonetic_primary")
         self.assertNotEqual(accepted["validation_key"], old_report["validation_key"])
+        rechecked = read_json(old_report_path)
+        self.assertEqual(rechecked["policy_recheck"]["previous_report"], old_report["report"])
+        self.assertEqual(rechecked["policy_recheck"]["previous_validation_key"], old_report["validation_key"])
 
     def test_provider_outage_pauses_without_new_takes_and_resume_rechecks_same_waveform(self):
         client = PairClient()

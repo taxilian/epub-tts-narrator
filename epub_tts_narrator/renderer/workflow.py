@@ -349,6 +349,26 @@ def _take_review(directory, config, verifier, request_hash):
     return TakeReview(Path(directory).parent.parent, config, verifier, request_hash)
 
 
+def _rechecks_under_new_policy(previous, validation_key, text):
+    """Whether a saved take rejected only for its words is checked again rather than remade.
+
+    A take rejected for ``text_mismatch`` under another validation key (an
+    earlier coverage or comparison policy, verifier or judge) may pass today's
+    rules. Checking its unchanged audio again costs one recognition, while a new
+    take costs a synthesis. History echoes and acoustic failures are never
+    rechecked, and a recheck under the current key is never repeated.
+    """
+    from .history_echo import attempt_evidence
+    report = previous.get("report")
+    return (isinstance(report, dict) and report.get("passed") is not True
+            and report.get("reasons") == ["text_mismatch"]
+            and isinstance(previous.get("validation_key"), str)
+            and previous.get("validation_key") != validation_key
+            and isinstance(previous.get("audio_file"), str)
+            and isinstance(previous.get("audio_sha256"), str)
+            and attempt_evidence(report, previous.get("engine_metadata"), text) is None)
+
+
 def _verified_take(text, generate, directory, request, verifier, config, *, notify=print,
                   purpose="speech", resume_attempt=None, retry_budget=None, seed_identity=None,
                   generate_repaired=None, resolution_episode=None, paragraph_split_available=False,
@@ -733,6 +753,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
         generation_ordinal = None
         attempt_ticket = None
         metadata = {}
+        policy_recheck = None
         elevenlabs = request.get("designer", {}).get("engine") == "elevenlabs_voice_design"
         generation_path = directory / (prefix + "-generation.json")
         generation = None
@@ -754,14 +775,24 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 # changed. Preserve the failed request and append a new take.
                 last_report = previous.get("report", {})
                 continue
+            recheck = (purpose == "speech" and _rechecks_under_new_policy(previous, validation_key, text)
+                       and audio_present(wav))
             if ((purpose == "speech" or previous.get("validation_key") == validation_key)
                     and previous.get("report", {}).get("passed") is not True
                     and not pending_confirmation(previous.get("report", {}))
                     and not previous.get("report", {}).get("retry_on_resume", False)
                     and not ("recovery" in request and previous.get("audio_file") is None)
-                    and not (purpose == "reference" and attempt == demoted_attempt)):
+                    and not (purpose == "reference" and attempt == demoted_attempt)
+                    and not recheck):
                 last_report = previous.get("report", {})
                 continue
+            if recheck:
+                # Recognition and review run again on the unchanged saved audio;
+                # nothing is synthesized and the generation allowance is untouched.
+                policy_recheck = {"previous_validation_key": previous.get("validation_key"),
+                                  "previous_report": previous.get("report")}
+                notify(f"  Rechecking saved take {attempt}, rejected for its words under an earlier "
+                       "verification policy, before making a new take.")
             metadata = previous.get("engine_metadata", {})
         if (fresh_speech and attempt in saved_attempts and not audio_present(wav)
                 and attempt != missing_accepted_attempt):
@@ -966,6 +997,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             "raw_file": raw.name if audio_present(raw) else None,
             "audio_sha256": audio_hash(wav) if audio_present(wav) else None,
         }
+        if policy_recheck is not None:
+            record["policy_recheck"] = policy_recheck
         write_json(result_path, record)
         if record["audio_file"] is not None and purpose == "speech":
             # Kept takes live as exact FLAC copies; the record still names the WAV.
@@ -995,6 +1028,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             stop_for_confirmation()
         if report.get("retryable") is False:
             raise RenderBlocked(report["provider_error"] if "provider_error" in report else report["error"])
+        if policy_recheck is not None:
+            # Rejected again: it was reported and recovered from when it was
+            # first rejected, so it starts no recovery decision now.
+            notify(f"  Saved take {attempt} is still rejected under current verification.")
+            continue
         detail = _verification_failure_detail(report)
         suffix = f" ({detail})" if detail else ""
         if fresh_speech:

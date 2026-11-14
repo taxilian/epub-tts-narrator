@@ -412,6 +412,10 @@ def _accept_pairs(expected_text, transcript, *, validation_errors=None):
     coverage = speech_coverage(expected_text, transcript)
     if coverage["passed"]:
         changes = coverage["alignment"]
+        if any(change["expected_end"] == change["expected_start"]
+               or change["actual_end"] == change["actual_start"] for change in changes):
+            return reject("Acceptance cannot vote on an added or omitted vocal sound, restart, hyphen or symbol; "
+                          "only the whole-passage text judge can accept those.")
     else:
         if len(expected) != len(actual):
             return reject("Acceptance failed complete word coverage: the transcript has a different word count, "

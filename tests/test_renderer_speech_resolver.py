@@ -202,7 +202,9 @@ class SpeechResolverTests(unittest.TestCase):
             ("Xzqra sat outside.", "Zekra stood indoors."),
             ("ABCS called Xzqra.", "ABC called Zekra."),
             ("ccs called Xzqra.", "cc called Zekra."),
-            ("Xzqra waited outside.", "Zee Kera waited outside."),
+            # A name heard as several words reaches sound votes only when its
+            # sounds stay close ("Zee Kera" now does); far-off pieces do not.
+            ("Xzqra waited outside.", "Zee Lomba Tull waited outside."),
         ]
         # The unrelated equal-count noun/verb substitutions are model-reviewable;
         # a negative independent vote must reject them, not a string-distance rule.

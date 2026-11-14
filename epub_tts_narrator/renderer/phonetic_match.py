@@ -76,6 +76,13 @@ _REVIEW_COLLOQUIAL_EXPANSIONS = {
     "lemme": ("let", "me"),
     "gimme": ("give", "me"),
     "gotcha": ("got", "you"),
+    "gotta": ("got", "to"),
+    "oughta": ("ought", "to"),
+    "hafta": ("have", "to"),
+    "outta": ("out", "of"),
+    "lotta": ("lot", "of"),
+    "sorta": ("sort", "of"),
+    "helluva": ("hell", "of", "a"),
 }
 _COLLOQUIAL_EXPANSIONS = {
     **_DIRECT_COLLOQUIAL_EXPANSIONS,

@@ -121,14 +121,31 @@ class SpeechRetryTests(unittest.TestCase):
                 self.take()
         self.assertEqual(len(self.calls), 2)
 
-    def test_changed_verifier_generates_a_fresh_take_instead_of_reusing_rejected_audio(self):
+    def test_changed_verifier_rechecks_word_rejected_audio_before_a_fresh_take(self):
         self.verifier.wrong_texts.add(self.text)
         with self.assertRaises(SpeechVerificationFailed):
             self.take(SpeechRetryBudget())
-        before = self.snapshot()
+        generated = len(self.calls)
         replacement_verifier = FixtureVerifier(self.fixtures, version=2)
         wav, accepted = self.take(SpeechRetryBudget(), verifier=replacement_verifier)
         self.assertEqual(wav.name, accepted["audio_file"])
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(accepted["attempt"], 1)
+        self.assertEqual(len(replacement_verifier.calls), 1)
+        self.assertEqual(len(self.calls), generated)
+
+    def test_changed_verifier_generates_a_fresh_take_after_an_acoustic_rejection(self):
+        self.verifier.wrong_texts.add(self.text)
+        with self.assertRaises(SpeechVerificationFailed):
+            self.take(SpeechRetryBudget())
+        directory = self.root / "takes"
+        for path in directory.glob("attempt-*.json"):
+            record = read_json(path)
+            record["report"]["reasons"] = ["internal_silence_stall"]
+            write_json(path, record)
+        before = self.snapshot()
+        replacement_verifier = FixtureVerifier(self.fixtures, version=2)
+        wav, accepted = self.take(SpeechRetryBudget(), verifier=replacement_verifier)
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(replacement_verifier.calls), 1)
         self.assertEqual(len(self.calls), 3)

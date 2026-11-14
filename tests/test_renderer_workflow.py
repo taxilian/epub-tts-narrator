@@ -314,16 +314,31 @@ class RendererWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.verifier.calls), 3)
         self.assertEqual(len(list((self.root / "takes").glob("attempt-001-*regenerated-*.wav"))), 2)
 
-    def test_changed_policy_does_not_reuse_unsuccessful_audio_from_an_exhausted_budget(self):
+    def test_changed_policy_rechecks_word_rejections_but_never_resets_an_exhausted_budget(self):
         self.verifier.wrong_texts.add("Hello there.")
         with self.assertRaises(RenderBlocked):
             self.take()
+        directory = self.root / "takes"
+        # An acoustic rejection is never rechecked, and no new take is made.
+        for path in directory.glob("attempt-*.json"):
+            record = read_json(path)
+            record["report"]["reasons"] = ["excessive_clipping"]
+            write_json(path, record)
         verifier = FixtureVerifier(self.fixtures, version=2)
         with patch.object(self.engine, "_write", side_effect=AssertionError("reset exhausted budget")):
             with self.assertRaises(RenderBlocked):
                 self.take(verifier=verifier)
-        self.assertFalse((self.root / "takes" / "accepted.json").exists())
+        self.assertFalse((directory / "accepted.json").exists())
         self.assertEqual(len(verifier.calls), 0)
+        # A take rejected only for its words is verified again, still without synthesis.
+        for path in directory.glob("attempt-*.json"):
+            record = read_json(path)
+            record["report"]["reasons"] = ["text_mismatch"]
+            write_json(path, record)
+        with patch.object(self.engine, "_write", side_effect=AssertionError("reset exhausted budget")):
+            wav, accepted = self.take(verifier=verifier)
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(len(verifier.calls), 1)
 
     def test_corrupt_accepted_audio_is_blocked_before_asr(self):
         wav, _ = self.take()
