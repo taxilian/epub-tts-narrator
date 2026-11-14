@@ -41,6 +41,16 @@ def plain_direction(value, label="Performance direction", *, required=False):
 
 
 PHONEME_GROUP_SEPARATOR = " | "
+# ARPAbet's punctuation marks (Wikipedia's ARPAbet table: syllable, word and
+# morpheme boundaries, and the like). Each is its own space-separated token
+# inside a group and is sent to the engine as written; whether Drama 3 does
+# anything with one is for listening to show, not for this check to decide.
+PHONEME_MARKS = frozenset(". - ! + / # :".split())
+
+
+def phoneme_symbols(value):
+    """The sounds of a reading: its phonemes without groups or marks."""
+    return [token for token in value.replace("|", " ").split() if token not in PHONEME_MARKS]
 
 
 def phoneme_groups(value):
@@ -57,6 +67,7 @@ def validate_phonemes(value):
 
     One group of space-separated symbols, or up to eight groups joined by
     `` | ``; a value without ``|`` is unchanged from before groups existed.
+    ``PHONEME_MARKS`` may stand between symbols, but every group needs a sound.
     """
     if not isinstance(value, str) or not 1 <= len(value) <= 512:
         raise ValueError("Performance phonemes must be bounded CMU Arpabet text")
@@ -64,8 +75,10 @@ def validate_phonemes(value):
     tokens = [token for group in groups for token in group.split(" ")]
     if not 1 <= len(tokens) <= 128 or len(groups) > 8:
         raise ValueError("Performance pronunciation has too many phonemes or groups")
+    if any(all(token in PHONEME_MARKS for token in group.split(" ")) for group in groups):
+        raise ValueError("Performance pronunciation needs a CMU Arpabet sound in every group, not only marks")
     for token in tokens:
-        if token in _CONSONANTS or token in _VOWELS:
+        if token in _CONSONANTS or token in _VOWELS or token in PHONEME_MARKS:
             continue
         if len(token) >= 2 and token[-1] in "012" and token[:-1] in _VOWELS:
             continue

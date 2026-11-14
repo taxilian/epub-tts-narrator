@@ -732,7 +732,7 @@ Each choice says which parts of speech get the reading: proper noun, common noun
    - `A` accepts.
    - `I more like sal-vuh-TORE-ee` asks the model to revise from your description.
    - `N` asks for a different guess.
-   - `E S AE2 L V AH0 T AO1 R` sets the phonemes yourself. Input is case-insensitive; every vowel needs a 0/1/2 stress digit. `E M AY1 L | K IY1` sets phoneme groups.
+   - `E S AE2 L V AH0 T AO1 R` sets the phonemes yourself. Input is case-insensitive; every vowel needs a 0/1/2 stress digit. `E M AY1 L | K IY1` sets phoneme groups. ARPAbet's punctuation marks `.` `-` `!` `+` `/` `#` `:` may stand between symbols as their own words (`E S EH2 . N EH1 D R AH0`, or typed `EH2.N`); they go to Drama 3 inside the tag as written, are never counted as sounds (a possessive or plural still follows the last sound), and whether the engine does anything with them is for listening to show. Each group needs at least one sound.
    - `R mile-key` says the word as that spelling instead.
    - `S proper noun, adjective` (or `S all`) changes which parts of speech get the reading.
    - `B` plays the engine's default reading for comparison.

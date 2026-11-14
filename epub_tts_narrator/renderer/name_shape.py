@@ -56,7 +56,8 @@ def _clusters(units):
 
 def reading_shape(phonemes):
     """The shape of a CMU reading: vowels carry a stress digit, everything else is one consonant."""
-    phones = phonemes.replace("|", " ").split()
+    from ..performance_plan import phoneme_symbols
+    phones = phoneme_symbols(phonemes)  # boundary marks are not sounds
     return _clusters([None if phone[-1:].isdigit() else 1 for phone in phones])
 
 
@@ -105,8 +106,9 @@ def _readings(performance):
 
 
 def reading_key(phonemes):
-    """One chosen reading, whatever its group marks and spacing: ``S EH2 N EH1 D R AH0``."""
-    return " ".join(phonemes.replace("|", " ").split())
+    """One chosen reading, whatever its group and boundary marks and spacing: ``S EH2 N EH1 D R AH0``."""
+    from ..performance_plan import phoneme_symbols
+    return " ".join(phoneme_symbols(phonemes))
 
 
 def chosen_readings(performance):

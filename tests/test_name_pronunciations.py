@@ -137,6 +137,25 @@ class FormsAndOccurrencesTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_name_phonemes(value)
 
+    def test_arpabet_boundary_marks_are_kept_and_never_count_as_sounds(self):
+        # Wikipedia's ARPAbet punctuation (. - ! + / # :) may sit between
+        # symbols; it reaches the engine as written, and endings follow the
+        # last sound, not the mark.
+        reading = normalize_phonemes("s eh2.n eh1 d r ah0 .")
+        self.assertEqual(validate_name_phonemes(reading), "S EH2 . N EH1 D R AH0 .")
+        for mark in ". - ! + / # :".split():
+            with self.subTest(mark=mark):
+                self.assertEqual(validate_name_phonemes(f"K AA1 {mark} R IY0"), f"K AA1 {mark} R IY0")
+        self.assertEqual(form_phonemes("Cenedra", reading)["cenedras"], ("plural", reading + " Z"))
+        for value in (". | S EH1", ". -", "S EH1 ?", "S EH1 ;"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_name_phonemes(value)
+        sentence = "Cenedra waited."
+        controls = sentence_controls("Cenedra", sentence, reading)
+        compiled = prepare_synthesis(sentence, performance={
+            "version": 1, "text_sha256": text_sha256(sentence), "controls": controls})[1]
+        self.assertIn("<|phoneme_start|>S EH2 . N EH1 D R AH0 .<|phoneme_end|>", compiled)
+
     def test_test_sentence_uses_the_name_several_times_with_the_books_possessive(self):
         found = occurrences("Salvatore’s map. The Salvatores.", "Salvatore")
         sentence = test_sentence("Salvatore", found)

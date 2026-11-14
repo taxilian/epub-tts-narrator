@@ -37,6 +37,12 @@ class ShapeTests(unittest.TestCase):
                 self.assertFalse(rearranged(READING, heard))
                 self.assertEqual(spelling_shape(heard), reading_shape(READING))
 
+    def test_boundary_marks_in_a_reading_are_not_sounds(self):
+        marked = READING.replace(" N ", " . N ", 1)
+        self.assertNotEqual(marked, READING)
+        self.assertEqual(reading_shape(marked), reading_shape(READING))
+        self.assertFalse(rearranged(marked, "Senedra"))
+
     def test_a_consonant_moved_across_a_vowel_is_rearranged(self):
         for heard in ("Sendera", "Sendara", "Sindera", "Sindhara", "Sendaria", "Cinderia"):
             with self.subTest(heard=heard):

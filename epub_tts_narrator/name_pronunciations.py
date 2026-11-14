@@ -39,7 +39,7 @@ from pathlib import Path
 import re
 import unicodedata
 
-from .performance_plan import phoneme_groups, validate_phonemes
+from .performance_plan import PHONEME_MARKS, phoneme_groups, phoneme_symbols, validate_phonemes
 from .pronunciations import WORD_PATTERN, validate_word
 
 
@@ -86,7 +86,10 @@ def normalize_phonemes(text):
     """Accept typed input in any case/spacing; stored values stay canonical."""
     if not isinstance(text, str):
         raise ValueError("Phonemes must be text")
-    return " ".join(text.upper().replace("|", " | ").split())
+    text = text.upper().replace("|", " | ")
+    for mark in PHONEME_MARKS:  # "EH2.N" is typed "EH2 . N"
+        text = text.replace(mark, f" {mark} ")
+    return " ".join(text.split())
 
 
 def validate_name_phonemes(value):
@@ -217,7 +220,7 @@ def word_pronunciation(name, reading, word):
 
 
 def _suffix(phonemes):
-    last = phonemes.split(" ")[-1].rstrip("012")
+    last = phoneme_symbols(phonemes)[-1].rstrip("012")
     if last in _SIBILANTS:
         return "IH0 Z"
     return "S" if last in _VOICELESS else "Z"
