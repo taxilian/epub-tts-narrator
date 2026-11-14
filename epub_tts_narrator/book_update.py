@@ -620,6 +620,15 @@ def _rebind_sidecars(directory, saved, document):
         record = deepcopy(scoped_local(directory, source=saved["source"]))
         record["source_fingerprint"] = new_source
         records[path.name] = record
+    from .chapter_ignores import FILENAME as IGNORES, rebind_validated
+    path = directory / IGNORES
+    if path.exists() or path.is_symlink():
+        try:
+            record = rebind_validated(directory, saved, document)
+        except ValueError as exc:
+            raise ValueError(f"The book update changes the layout of an ignored chapter; review the "
+                             f"chapter ignores before updating this book: {exc}") from exc
+        records[path.name] = record
     return records
 
 

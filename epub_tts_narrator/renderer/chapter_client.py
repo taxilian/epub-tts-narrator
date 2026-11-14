@@ -396,6 +396,8 @@ def validate_remote_plan(bundle, config, plan):
     """
     bindings = {voice_id: "0" * 64 for voice_id in plan["voice_ids"]}
     for chapter in plan["chapters"]:
+        if chapter.get("ignored"):
+            continue
         try:
             spec = _selection(bundle, chapter, config, bindings)
             spec["renderer_fingerprint"] = "0" * 64
@@ -1054,7 +1056,14 @@ def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only,
     bindings, assets = _voice_assets(voices, work, config["render"]["ffmpeg"])
     local_clip_ids = _partial_local_chunk_ids(work)
     cached, unfinished, local = {}, [], {}
+    from .workflow import _compose_ignored_chapter
     for chapter in plan["chapters"]:
+        if chapter.get("ignored"):
+            # Handled entirely before local cache, selection, submission, or
+            # download: only the local zero-frame record is materialized.
+            local[chapter["id"]] = {"composed": _compose_ignored_chapter(bundle, chapter, config, notify=notify),
+                                    "acceptance": []}
+            continue
         local_result = _local_chapter(bundle, chapter, config, voices, allow_stale=True)
         stale_local = local_result is not None and local_result.get("stale") is True
         if local_result is not None and not stale_local:
@@ -1202,7 +1211,12 @@ def assemble_remote(bundle, config, *, notify=print):
             raise ChapterClientError("A selected voice is missing; restore it before assembly")
         bindings, _ = _voice_assets(voices, config["render"]["work_dir"], config["render"]["ffmpeg"])
         cached, local = {}, {}
+        from .workflow import _compose_ignored_chapter
         for chapter in plan["chapters"]:
+            if chapter.get("ignored"):
+                local[chapter["id"]] = {"composed": _compose_ignored_chapter(bundle, chapter, config, notify=notify),
+                                        "acceptance": []}
+                continue
             result = _local_chapter(bundle, chapter, config, voices)
             if result is not None:
                 local[chapter["id"]] = result
@@ -1247,6 +1261,9 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify, voices):
     expected = config.get("_publication_expected", digest(previous) if previous is not None else None)
     if (digest(previous) if previous is not None else None) != expected:
         raise RenderBlocked("Published output changed during rendering; rerun to use its current state")
+    if all(chapter.get("ignored") for chapter in plan["chapters"]):
+        raise RenderBlocked("Every selected chapter is ignored, so assembly would produce no audio. "
+                            "Clear the chapter ignores before assembling, or render non-ignored chapters first.")
     with tempfile.TemporaryDirectory(prefix=".remote-audiobook-", dir=output.parent) as temporary:
         scratch = Path(temporary)
         stage = scratch / "ready"
@@ -1254,6 +1271,11 @@ def _assemble_downloads(bundle, config, plan, cached, local, *, notify, voices):
         chapters, acceptance = [], []
         engine_identity = verifier_identity = None
         for chapter in plan["chapters"]:
+            if chapter.get("ignored"):
+                # The zero-frame record joins the package, but no acceptance
+                # and no engine/verifier provenance come from ignored chapters.
+                chapters.append(dict(local[chapter["id"]]["composed"]))
+                continue
             if chapter["id"] in local:
                 composed = dict(local[chapter["id"]]["composed"])
                 acceptance.extend(local[chapter["id"]]["acceptance"])

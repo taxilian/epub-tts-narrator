@@ -127,6 +127,8 @@ For a passage that has been rendered, the metadata dialog also plays its audio (
 
 Chapters with no passages are hidden from the review list, matching their omission from M4B chapter navigation. The source chapters and cached audio keep their original numbering, so playback and saved failure links still refer to the same chapters. A chapter with passages remains visible even if it has not rendered or its render failed.
 
+To omit a chapter such as the table of contents, select it in the chapter list and press `I`, then confirm. This saves a book-local ignore choice immediately, separately from any unsaved passage edits. `H` shows ignored chapters; select one and press `I` again to restore it. The next `render` or `assemble` omits ignored chapters from the audiobook, while a render already running finishes with its loaded selection. Source text and cached speech are retained. Ignoring a chapter does not ignore the same chapter number in another book.
+
 Chapters whose render failed (`ChaptersRenderFailed`) are marked `FAILED` in the chapter list with the saved error; `F` jumps to the first failed passage when the renderer recorded exact segment linkage, and failed passages say no audio exists instead of offering playback. Editing a failed chapter still saves the usual attribution revision, but the recorded failure remains until a successful rerender.
 
 If two cast entries are really one person (a stranger later named, a nickname read as someone else), merge them so every line of one becomes the other's and only one character is cast and rendered. The cast screen's `j` does the same and is easiest when both have the same name. A character from an earlier book in the series is always the one kept:

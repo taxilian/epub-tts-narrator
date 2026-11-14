@@ -7,7 +7,7 @@ from ..pronunciation_groups import case_key
 from ..scoped_pronunciations import identity_scope, legacy_named_families, load, local
 
 
-def name_pronunciation_snapshot(bundle, legacy):
+def name_pronunciation_snapshot(bundle, legacy, *, ignored_blocks=frozenset()):
     directory = Path(bundle["directory"])
     active = (directory / FILENAME).exists() or (directory / FILENAME).is_symlink()
     special = [entry for entry in load(directory, {"class": "special"}) if entry["status"] == "confirmed"]
@@ -47,6 +47,16 @@ def name_pronunciation_snapshot(bundle, legacy):
     snapshot = load_name_script(directory, bundle) if needs_script else None
     names = {}
     if snapshot is not None:
+        if ignored_blocks:
+            # The full source must stay bound (window checks are positional),
+            # so ignored chapters are filtered from the loaded snapshot: their
+            # unresolved mentions cannot block rendering, and their mentions
+            # bind no included row. Rules and included decisions stay whole.
+            snapshot = dict(snapshot,
+                            unresolved=[item for item in snapshot["unresolved"]
+                                        if item["block_id"] not in ignored_blocks],
+                            mentions={block: spans for block, spans in snapshot["mentions"].items()
+                                      if block not in ignored_blocks})
         for key, name in snapshot["names"].items():
             entries = effective.get(name["character_id"], [])
             names[key] = {word: entry for entry in entries if entry["status"] == "confirmed"

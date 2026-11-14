@@ -313,6 +313,10 @@ Additional boundaries require a whole-block English `Chapter` label (Arabic digi
 
 The manifest's `sha256` object maps every relative data filename to its SHA-256, including every chapter script and empty file. Concatenate parsed rows in `files.scripts` order to reconstruct the full script. There is no root `script.jsonl` in version 2. Older version-1 bundles use `files.script: "script.jsonl"` and one complete script; readers must explicitly support their version instead of assuming one layout. Re-exporting an analysis changes the bundle layout without changing that analysis or its annotations.
 
+Optional book-local `chapter-ignores.json` is outside canonical bundle checksums. It has exactly `format: "epub-audiobook-chapter-ignores"`, `version: 1`, `book_id`, and `ignored`, a list of `{chapter_id, block_ids}` entries. Each entry must resolve to exactly one script partition by its source chapter ID and complete ordered block-ID list; titles and ordinal numbers are not locators. An empty block list can identify an empty source chapter. Foreign-book, malformed, missing-partition and ambiguous entries are rejected. Choices never inherit to another book. Title-only repairs preserve them; source updates revalidate their partition membership before publication.
+
+Ignoring preserves the source chapter, script file and ordinal. Its render-plan entry has `ignored: true` and no chunks; it contributes no speech, readiness demands or M4B chapter marker, but remains a skipped record in the audio manifest. Explicit `--chapters` selection alone determines whether output is partial. Render and assembly freeze the choices per invocation and preserve the chapter's earlier checkpoint for restoration.
+
 Each chapter script line is a Segment plus:
 
 - `sequence`: zero-based position in the complete book script, continuing across chapter files.

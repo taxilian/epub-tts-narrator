@@ -142,7 +142,7 @@ _REFRESH_PROVENANCE = {"voice_samples", "voice_profile_refresh"}
 _REVISION_SIDECARS = {
     "voice-profiles": frozenset({"audition-scripts.json"}),
     "source-edit": frozenset({"audition-scripts.json", "pronunciations.json", "scoped-pronunciations.json",
-                              "performance-plan.json"}),
+                              "performance-plan.json", "chapter-ignores.json"}),
     # A character merge drops the absorbed voice from every per-voice choice.
     "character-merge": frozenset({"audition-scripts.json", "voice-aliases.json", "voice-traits.json",
                                   "voice-accents.json", "voice-accent-assignments.json",

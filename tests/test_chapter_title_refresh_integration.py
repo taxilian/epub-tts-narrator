@@ -94,6 +94,22 @@ class NarratorChapterTitleRefreshTests(unittest.TestCase):
         self.assertEqual(load_bundle(self.book)["chapters"][0]["entry"]["title"], "Chapter Eight")
         self.assertEqual(after["provenance"]["chunk_identity_source_fingerprint"], fingerprint(before["source"]))
 
+    def test_title_refresh_publishes_with_a_chapter_ignore_sidecar_without_model_calls(self):
+        from epub_tts_narrator import chapter_ignores
+        bundle = load_bundle(self.book)
+        self.assertEqual(chapter_ignores.set_ignored(
+            self.book, chapter_ignores.bundle_document(bundle), 0, True,
+            expected_manifest_hash=bundle["bundle_hash"]), frozenset({0}))
+        sidecar = self.book / chapter_ignores.FILENAME
+        choice_before = sidecar.read_bytes()
+        manifest_before = (self.book / "manifest.json").read_bytes()
+
+        self.refresh()
+
+        self.assertEqual(read_json(self.book / "analysis.json")["source"]["chapters"][0]["title"], "Chapter Eight")
+        self.assertEqual(sidecar.read_bytes(), choice_before)
+        self.assertNotEqual((self.book / "manifest.json").read_bytes(), manifest_before)
+
     def test_title_refresh_does_not_label_pending_name_uses(self):
         save_definition(self.book, "valley", "V AE1 L IY0", status="confirmed", source="manual",
                         parts_of_speech=["proper_noun"])

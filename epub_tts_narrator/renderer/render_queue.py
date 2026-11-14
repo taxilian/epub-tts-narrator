@@ -77,12 +77,19 @@ def _chapter_outline(book):
     from .common import read_json
     try:
         scripts = read_json(Path(book) / "manifest.json")["files"]["scripts"]
+        from ..chapter_ignores import FILENAME, bundle_document, ignored_indices
+        ignored = frozenset()
+        sidecar = Path(book) / FILENAME
+        if sidecar.exists() or sidecar.is_symlink():
+            from .bundle import load_bundle
+            bundle = load_bundle(book)
+            ignored = ignored_indices(book, bundle_document(bundle))
         # A zero-segment chapter has no planned speech work (a chapter holding
         # only silence controls still has segments and stays listed); the
         # render's plan hides it too, and the M4B never includes it.
         return [{"number": number, "title": str(entry.get("title") or ""), "blocks": None, "saved": False}
                 for number, entry in enumerate(scripts, 1)
-                if entry.get("segment_count") != 0]
+                if entry.get("segment_count") != 0 and number - 1 not in ignored]
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
 
@@ -344,12 +351,16 @@ def _prepare_book(book, args, *, notify=print):
     if not getattr(args, "chapters_only", False):
         from .book_metadata import check_publication_source
         check_publication_source(bundle, config)
+    from ..chapter_ignores import freeze as freeze_chapter_ignores
+    ignored = freeze_chapter_ignores(bundle, config)
     from .name_pronunciation_tags import prepare_name_pronunciations
-    prepare_name_pronunciations(bundle, args.config, notify=notify)
+    prepare_name_pronunciations(bundle, args.config, notify=notify, ignored=ignored)
     from . import accent_readiness
     from .accent_assignment import prepare_accents
-    accent_readiness.require_before_render(bundle, config, error=QueueError)
-    prepare_accents(bundle, config, args.config, notify=notify)
+    included = (dict(bundle, chapters=[chapter for index, chapter in enumerate(bundle["chapters"])
+                                       if index not in ignored]) if ignored else bundle)
+    accent_readiness.require_before_render(included, config, error=QueueError)
+    prepare_accents(included, config, args.config, notify=notify)
     plan = make_plan(bundle, config)
     expected_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
     if expected_series and expected_series != config["voices"]["series_id"]:

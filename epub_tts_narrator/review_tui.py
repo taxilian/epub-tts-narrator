@@ -14,9 +14,11 @@ from typing import Any
 
 from .analysis_directory import _completed_directory
 from .analysis_revision import related_directories, revise_directories
+from . import chapter_ignores
 from .renderer.terminal import play_sample
 from .review_tui_model import (
-    apply_edits, edit_direction, edit_review, edit_speaker, metadata, palette, passages, toc,
+    apply_edits, edit_direction, edit_review, edit_speaker, ignored_empty_chapters, metadata,
+    palette, passages, toc,
 )
 from .review_tui_render import (
     ChapterIndex, ClipRef, RenderIndex, TakeRow, archive_checkpoint, format_take, playback_notice,
@@ -53,6 +55,7 @@ class ReviewApp:
         self._revise = revise_directories
         self.directories = [Path(path).resolve() for path in related_directories([self.directory])]
         self.expected_manifest_hashes = self._manifest_hashes()
+        self.canonical_manifest_hash = self._canonical_manifest_hash()
         self.player = player if player is not None else _audio_player(["/usr/bin/afplay"])
         self._play_sample = play_sample
         self._list_takes = list_takes
@@ -86,6 +89,11 @@ class ReviewApp:
         self.return_view = "toc"
         self.notice = ""
         self.progress = []
+        self.show_ignored = False
+        self.ignored_chapters = self._load_ignored_chapters()
+        self.confirm_ignore_index: int | None = None
+        self.confirm_ignore_ignored = False
+        self._sync_toc_selection()
         self.page_size = 10
         self.roles = {role["id"]: role for role in document["cast"]["roles"]}
         self.labels = _role_labels(document["cast"]["roles"],
@@ -96,8 +104,81 @@ class ReviewApp:
         return {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
                 for path in self.directories}
 
+    def _canonical_manifest_hash(self):
+        """Canonical digest of this book's manifest (chapter_ignores' staleness key)."""
+        from .renderer.common import digest, read_json, regular_file
+        return digest(read_json(regular_file(self.directory / "manifest.json")))
+
     def _effective_document(self):
         return apply_edits(self.document, self.pending) if self.pending else self.document
+
+    def _load_ignored_chapters(self):
+        try:
+            return chapter_ignores.ignored_indices(self.directory, self.document)
+        except (ValueError, OSError) as exc:
+            self.notice = "Could not load ignored chapters: " + _flat(exc)
+            return frozenset()
+
+    def _filtered_toc_rows(self):
+        """Apply the ignore filter without touching the cached render failures."""
+        document = self._effective_document()
+        rows = toc(document)
+        if self.show_ignored:
+            # Ignored chapters with no passages are hidden by toc(); surface
+            # them so an explicit ignore can be restored.
+            known = {row["id"] for row in rows}
+            rows.extend(row for row in ignored_empty_chapters(document, self.ignored_chapters)
+                        if row["id"] not in known)
+            rows.sort(key=lambda row: row["id"])
+        else:
+            rows = [row for row in rows if row["id"] not in self.ignored_chapters]
+        for row in rows:
+            row["ignored"] = row["id"] in self.ignored_chapters
+        return rows
+
+    def _sync_toc_selection(self):
+        """Keep the cursor on the same original chapter id after filtering changes."""
+        rows = self._filtered_toc_rows()
+        for position, row in enumerate(rows):
+            if row["id"] == self.chapter_index:
+                self.toc_index = position
+                return
+        self.toc_index = max(0, min(self.toc_index, len(rows) - 1))
+        if rows:
+            self.chapter_index = rows[self.toc_index]["id"]
+
+    def _request_ignore_toggle(self):
+        rows = self._toc_rows()
+        if not rows:
+            return
+        row = rows[self.toc_index]
+        self.confirm_ignore_index = row["id"]
+        self.confirm_ignore_ignored = row["id"] not in self.ignored_chapters
+        self.view = "confirm_ignore"
+
+    def _apply_ignore_toggle(self):
+        chapter_index = self.confirm_ignore_index
+        ignored = self.confirm_ignore_ignored
+        self.view = "toc"
+        if chapter_index is None:
+            return
+        try:
+            updated = chapter_ignores.set_ignored(
+                self.directory, self.document, chapter_index, ignored,
+                expected_manifest_hash=self.canonical_manifest_hash,
+            )
+        except (ValueError, OSError) as exc:
+            self.notice = "Ignore save failed: " + _flat(exc)
+            return
+        self.ignored_chapters = frozenset(updated)
+        self._sync_toc_selection()
+        number = chapter_index + 1
+        if ignored:
+            self.notice = (f"Chapter {number} ignored. The next render and assemble skip it; "
+                           "unsaved attribution edits are unchanged.")
+        else:
+            self.notice = (f"Chapter {number} restored. The next render and assemble include it; "
+                           "unsaved attribution edits are unchanged.")
 
     def _chapter_failure(self, chapter_index=None):
         """Return the persisted render failure for one chapter, if any."""
@@ -108,7 +189,7 @@ class ReviewApp:
             return None
 
     def _toc_rows(self):
-        rows = toc(self._effective_document())
+        rows = self._filtered_toc_rows()
         for row in rows:
             row["failure"] = self._chapter_failure(row["id"])
         return rows
@@ -399,6 +480,12 @@ class ReviewApp:
         elif key in {"n", "ESC", "q", "Q"}:
             self.view = "takes"
 
+    def _handle_confirm_ignore(self, key):
+        if key in {"y", "Y"}:
+            self._apply_ignore_toggle()
+        elif key in {"n", "N", "ESC", "q", "Q"}:
+            self.view = "toc"
+
     def _request_quit(self):
         if not self.pending:
             self.running = False
@@ -426,6 +513,7 @@ class ReviewApp:
         self.pending.clear()
         self.render_index.reset()
         self.expected_manifest_hashes = self._manifest_hashes()
+        self.canonical_manifest_hash = self._canonical_manifest_hash()
         self.progress.extend(messages)
         backup = result.get("backup_directory") if isinstance(result, dict) else None
         if backup:
@@ -499,6 +587,9 @@ class ReviewApp:
         if self.view == "confirm_take":
             self._handle_confirm_take(key)
             return self.running
+        if self.view == "confirm_ignore":
+            self._handle_confirm_ignore(key)
+            return self.running
         if self.view == "direction":
             self._handle_direction(key)
             return self.running
@@ -529,6 +620,11 @@ class ReviewApp:
                     self.view = "passages"
             elif key in {"f", "F"}:
                 self._jump_to_failure()
+            elif key in {"i", "I"}:
+                self._request_ignore_toggle()
+            elif key in {"h", "H"}:
+                self.show_ignored = not self.show_ignored
+                self._sync_toc_selection()
         elif self.view == "passages":
             if key in {"UP", "k"}:
                 self._move_passage(-1)
@@ -641,18 +737,23 @@ class ReviewApp:
         rows = self._toc_rows()
         self._header(screen, f"Review chapters  {self.toc_index + 1 if rows else 0}/{len(rows)}")
         if not rows:
-            screen.write(3, 0, "No chapters with passages. Press Q to quit.", 0)
+            if self.ignored_chapters and not self.show_ignored:
+                screen.write(3, 0, "All chapters are ignored. Press H to show them and restore any.", 0)
+            else:
+                screen.write(3, 0, "No chapters with passages. Press Q to quit.", 0)
         self.page_size = max(1, height - 5)
         start = max(0, min(self.toc_index - self.page_size + 1, len(rows) - self.page_size))
         start = max(0, start)
         for line, row in enumerate(rows[start:start + self.page_size], 3):
             index = start + line - 3
             marker = "> " if index == self.toc_index else "  "
-            prefix = f"FAILED {row['failure']['error_type']}  " if row.get("failure") else ""
+            prefix = "IGNORED  " if row.get("ignored") else ""
+            if row.get("failure"):
+                prefix += f"FAILED {row['failure']['error_type']}  "
             text = (f"{marker}{prefix}{row['title']}  {row['passage_count']} passages; "
                     f"{row['review_count']} review; {row['unassigned_count']} unassigned")
             screen.write(line, 0, text, _selected(index == self.toc_index))
-        self._footer(screen, "Up/Down select  Enter passages  F failed passage  S save  Q quit")
+        self._footer(screen, "Up/Down  Enter open  I ignore/restore  H ignored  F failed  S save  Q quit")
 
     def _draw_passages(self, screen):
         height, _ = screen.size()
@@ -741,6 +842,14 @@ class ReviewApp:
             screen.write(4, 0, "It did not pass ordinary verification.", None)
         self._footer(screen, "Y accept  N/Esc cancel")
 
+    def _draw_confirm_ignore(self, screen):
+        number = (self.confirm_ignore_index or 0) + 1
+        action = "Ignore" if self.confirm_ignore_ignored else "Restore"
+        self._header(screen, f"{action} chapter {number}")
+        screen.write(3, 0, f"{action} chapter {number}?", None)
+        screen.write(4, 0, "Saves now. Applies to the next render and assemble.", None)
+        self._footer(screen, "Y confirm  N/Esc cancel")
+
     def _draw_speaker(self, screen):
         height, _ = screen.size()
         self._header(screen, "Choose existing speaker(s)")
@@ -778,6 +887,8 @@ class ReviewApp:
             self._draw_takes(screen)
         elif self.view == "confirm_take":
             self._draw_confirm_take(screen)
+        elif self.view == "confirm_ignore":
+            self._draw_confirm_ignore(screen)
         elif self.view == "speaker":
             self._draw_speaker(screen)
         elif self.view == "direction":

@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 
 from epub_tts_narrator.contracts import validate_document, review_items
-from epub_tts_narrator.cli import script_partitions
+from epub_tts_narrator.chapter_partitions import script_partitions
 from epub_tts_narrator.pipeline import fingerprint
 from epub_tts_narrator.spoken_text import build_spoken, spoken_source_ranges
 from .common import digest, file_hash, read_json, regular_file
@@ -123,6 +123,16 @@ def load_bundle(directory):
             "bundle_hash": digest(manifest)}
 
 
+def ignored_block_ids(bundle, ignored):
+    """Source block IDs of ignored partitions, for readiness scans only."""
+    if not ignored:
+        return frozenset()
+    from ..chapter_ignores import bundle_document
+    from ..chapter_partitions import script_partitions
+    return frozenset(block_id for index, partition in enumerate(script_partitions(bundle_document(bundle)))
+                     if index in ignored for block_id in partition["block_ids"])
+
+
 def spoken_mapping(row):
     """Legacy character mapping for unchanged speech and bracket deletion.
 
@@ -213,9 +223,18 @@ def make_plan(bundle, config):
     if any(n > len(bundle["chapters"]) for n in selected):
         raise ValueError("Configured chapter number is outside the bundle")
     selected = set(selected)
+    # Ignored chapters are frozen per invocation (chapter_ignores.freeze);
+    # standalone planning still reads live choices on every invocation.
+    from ..chapter_ignores import SNAPSHOT_KEY, bundle_document, ignored_indices
+    ignored = config.get(SNAPSHOT_KEY)
+    if ignored is None:
+        ignored = ignored_indices(bundle["directory"], bundle_document(bundle))
     from .performance_runtime import (load_render_performance, row_performance,
                                       protected_spans, bind_chunk_performance)
-    performances = load_render_performance(bundle, settings, selected)
+    # Ignored chapters make no synthesis demand: only the chapters the plan
+    # still renders require a prepared performance plan.
+    included = {number for number in selected if number - 1 not in ignored}
+    performances = load_render_performance(bundle, settings, included) if included else None
     from .pronunciation_runtime import confirmed_pronunciations, merge_row_pronunciations
     # A render invocation freezes this policy for paragraph recovery, which can
     # rebuild the plan after a human edits this book or a continuation ancestor.
@@ -225,10 +244,11 @@ def make_plan(bundle, config):
         pronunciations = confirmed_pronunciations(bundle["directory"])
     from .name_pronunciation_runtime import name_pronunciation_snapshot, row_matches
     scoped = (config["_name_pronunciation_snapshot"] if "_name_pronunciation_snapshot" in config else
-              name_pronunciation_snapshot(bundle, pronunciations))
+              name_pronunciation_snapshot(bundle, pronunciations,
+                                          ignored_blocks=ignored_block_ids(bundle, ignored)))
     from .name_pronunciation_tags import named_pronunciation_snapshot, with_tagged_names
     named = (config["_tagged_name_snapshot"] if "_tagged_name_snapshot" in config else
-             named_pronunciation_snapshot(bundle))
+             named_pronunciation_snapshot(bundle, ignored=ignored))
     from ..character_merge import revoiced_segment_ids
     # A character merge moved these lines to another voice: their speakers are
     # part of their chunk identity, so they render again under new chunk IDs.
@@ -242,6 +262,14 @@ def make_plan(bundle, config):
     # that every selected spoken passage has an actual performer below.
     for number, item in enumerate(bundle["chapters"], 1):
         if number not in selected:
+            continue
+        if number - 1 in ignored:
+            # An ignored chapter keeps its identity and display metadata but
+            # contributes no chunks, so it joins neither missing-speaker
+            # errors, voice_ids, nor any readiness scan.
+            chapters.append({"number": number, "id": f"chapter-{number:04d}",
+                             "title": item["entry"]["title"], "script_path": item["entry"]["path"],
+                             "chunks": [], "ignored": True})
             continue
         chunks = []
         for row in item["rows"]:

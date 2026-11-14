@@ -96,7 +96,7 @@ def _chapter_spans(document):
     rendered M4B actually use, so the review UI navigates those, not the
     raw spine chapters.
     """
-    from .cli import script_partitions
+    from .chapter_partitions import script_partitions
     segments = document["segments"]
     spans = []
     cursor = 0
@@ -127,6 +127,23 @@ def toc(document):
             "review_count": sum(_needs_review(segment) for segment in chapter_segments),
             "unassigned_count": sum(not has_assigned_speakers(segment) for segment in chapter_segments),
         })
+    return rows
+
+
+def ignored_empty_chapters(document, ignored):
+    """Return rows for ignored chapters that have no passages.
+
+    ``toc`` hides zero-passage chapters, but an explicit ignore must stay
+    visible so it can be restored; the app lists these rows in show-ignored
+    mode with the same original partition ids.
+    """
+    ignored = frozenset(ignored)
+    rows = []
+    for index, (partition, _, chapter_segments) in enumerate(_chapter_spans(document)):
+        if chapter_segments or index not in ignored:
+            continue
+        rows.append({"id": index, "title": partition["title"], "passage_count": 0,
+                     "review_count": 0, "unassigned_count": 0})
     return rows
 
 
@@ -199,7 +216,6 @@ def metadata(document, segment_id) -> dict:
         result["additional"] = {key: deepcopy(value) for key, value in segment.items() if key not in core}
         return result
     raise ValueError(f"Unknown segment id: {segment_id}")
-
 
 
 

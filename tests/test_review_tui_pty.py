@@ -144,6 +144,40 @@ class ReviewTerminalTests(unittest.TestCase):
         os.write(self.master, b"q")
         self.finish()
 
+    def test_real_terminal_confirms_ignores_and_restores_at_80_columns(self):
+        from epub_tts_narrator import chapter_ignores
+        from epub_tts_narrator.analysis_directory import _completed_directory
+        self._resize(80)
+        manifest = (self.directory / "manifest.json").read_bytes()
+        document = _completed_directory(self.directory)[0]
+        self.start()
+        self.wait_for(b"Review chapters 1/2")
+        self.wait_for(b"Q quit")
+
+        os.write(self.master, b"i")
+        self.wait_for(b"Ignore chapter 1?")
+        os.write(self.master, b"n")
+        self.wait_for(b"> Chapter One")
+        self.assertFalse((self.directory / chapter_ignores.FILENAME).exists())
+
+        os.write(self.master, b"iy")
+        self.wait_for(b"Chapter 1 ignored.")
+        self.assertEqual(chapter_ignores.ignored_indices(self.directory, document), frozenset({0}))
+        os.write(self.master, b"h")
+        self.wait_for(b"IGNORED")
+        os.write(self.master, b"\x1bOA")
+        self.wait_for(b"> IGNORED")
+        os.write(self.master, b"i")
+        self.wait_for(b"Restore chapter 1?")
+        os.write(self.master, b"y")
+        self.wait_for(b"restored.")
+        os.write(self.master, b"q")
+        self.finish()
+
+        self.assertEqual(chapter_ignores.ignored_indices(self.directory, document), frozenset())
+        self.assertEqual((self.directory / "manifest.json").read_bytes(), manifest)
+        self._save_evidence("chapter-ignore-restore")
+
     def test_real_terminal_marks_failed_chapter_jumps_and_edits_without_audio(self):
         from tests.test_review_tui import add_failure_status
         add_failure_status(self.directory, 2, error="Verification exhausted", segment_ids=["s4"])
@@ -203,6 +237,7 @@ class ReviewTerminalTests(unittest.TestCase):
         os.close(self.master)
         self.master, self.slave = pty.openpty()
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, cols, 0, 0))
+        self.environment["COLUMNS"] = str(cols)
         self.pending = b""
         self.transcript = b""
 

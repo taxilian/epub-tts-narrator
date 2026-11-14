@@ -697,14 +697,18 @@ def main(argv=None, *, in_shell=False):
             report["renderer_source"] = str(Path(__file__).resolve())
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0
+        from ..chapter_ignores import freeze as freeze_chapter_ignores
+        ignored = freeze_chapter_ignores(bundle, config)
         if args.command == "render":
             from .name_pronunciation_tags import prepare_name_pronunciations
-            prepare_name_pronunciations(bundle, config_path)
+            prepare_name_pronunciations(bundle, config_path, ignored=ignored)
         if args.command == "render":
             from . import accent_readiness
             from .accent_assignment import prepare_accents
-            accent_readiness.require_before_render(bundle, config)
-            prepare_accents(bundle, config, config_path)
+            included = (dict(bundle, chapters=[chapter for index, chapter in enumerate(bundle["chapters"])
+                                               if index not in ignored]) if ignored else bundle)
+            accent_readiness.require_before_render(included, config)
+            prepare_accents(included, config, config_path)
         plan = make_plan(bundle, config)
         if args.command == "plan":
             from .workflow import make_render_plan

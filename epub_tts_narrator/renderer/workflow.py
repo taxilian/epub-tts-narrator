@@ -1572,7 +1572,11 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
         try:
             requests = accepted_requests(work)
             plan = reanchor_export_sequences(
-                plan, requests, completed=completed_chunks(work, plan["chapters"]))
+                plan, requests, completed=completed_chunks(
+                    # Ignored chapters are never read: a corrupt old checkpoint
+                    # of an ignored chapter cannot block planning, and unignoring
+                    # restores the ordinary integrity checks.
+                    work, [chapter for chapter in plan["chapters"] if not chapter.get("ignored")]))
         except (ValueError, OSError) as exc:
             raise RenderBlocked(f"Invalid saved synthesis identity: {exc}") from exc
     # Voice speech traits (pace, timbre, habits) are not sent with each line:
@@ -1633,16 +1637,28 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
         config = resolve_book_config(bundle, config)
     except ValueError as exc:
         raise RenderBlocked(str(exc)) from exc
+    from ..chapter_ignores import SNAPSHOT_KEY, freeze as freeze_chapter_ignores
+    if SNAPSHOT_KEY not in config:
+        # Every explicit invocation freezes this book's ignored partitions.
+        # Recovery and paragraph-fallback replans reuse the snapshot, so a
+        # choice saved mid-run applies to the next invocation, never mid-run.
+        try:
+            freeze_chapter_ignores(bundle, config)
+        except ValueError as exc:
+            raise RenderBlocked(str(exc)) from exc
     from .pronunciation_runtime import confirmed_pronunciations
     # Every explicit invocation reloads current choices. Recovery within this
     # invocation uses this private snapshot, including remote resubmissions.
     # Only controls actually used by a chunk enter synthesis/cache identities.
     config["_pronunciation_snapshot"] = confirmed_pronunciations(bundle["directory"])
     from .name_pronunciation_runtime import name_pronunciation_snapshot
-    config["_name_pronunciation_snapshot"] = name_pronunciation_snapshot(bundle, config["_pronunciation_snapshot"])
+    from .bundle import ignored_block_ids
+    config["_name_pronunciation_snapshot"] = name_pronunciation_snapshot(
+        bundle, config["_pronunciation_snapshot"],
+        ignored_blocks=ignored_block_ids(bundle, config[SNAPSHOT_KEY]))
     from .name_pronunciation_tags import named_pronunciation_snapshot
     try:
-        config["_tagged_name_snapshot"] = named_pronunciation_snapshot(bundle)
+        config["_tagged_name_snapshot"] = named_pronunciation_snapshot(bundle, ignored=config[SNAPSHOT_KEY])
     except ValueError as exc:
         raise RenderBlocked(str(exc)) from exc
     from .speech_traits import accent_cues, speech_trait_overrides
@@ -1834,6 +1850,26 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
         "base_seed": config["render"]["seed"], "settings": chapter_settings(
             config["render"], censorship_policy=config.get("censorship")),
     }
+
+
+_IGNORED_PROVENANCE = {"engine": "chapter-ignored", "model": "none"}
+
+
+def _compose_ignored_chapter(bundle, chapter, config, *, notify=print):
+    """Materialize an ignored chapter's zero-frame record without any synthesis.
+
+    The record carries no acceptance and never replaces the chapter's
+    checkpoint, so unignoring restores a previously verified chapter
+    unchanged. The fixed provenance keeps the zero-frame cache folder stable
+    across local render, local assemble, and remote assembly.
+    """
+    context = _chapter_context(bundle, chapter, config, {}, _IGNORED_PROVENANCE, _IGNORED_PROVENANCE)
+    return prepare_chapter(
+        dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
+        [], Path(config["render"]["work_dir"]) / "chapters", book=bundle["source"]["book"],
+        render_settings=config["render"], context=context, notify=notify, acceptance=[],
+        **({"censorship_policy": config["censorship"]}
+           if config.get("censorship", {}).get("enabled", False) else {}))
 
 
 def _same_chapter_audio_context(saved, current):
@@ -2995,6 +3031,12 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             stop_if_requested()
             chapter_started = monotonic()
             chapter_label = f"chapter {chapter['number']} / {len(bundle['chapters'])}"
+            if chapter.get("ignored"):
+                # No synthesis, no checkpoint read, and no checkpoint write:
+                # a pre-ignore checkpoint stays untouched for a later unignore.
+                completed(chapter_index, _compose_ignored_chapter(bundle, chapter, config, notify=notify),
+                          [], chapter_label, chapter_started)
+                return
             audible = bool(chapter["chunks"])
             context = _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_identity)
             saved = _read_checkpoint(work, chapter)
@@ -3187,7 +3229,11 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                 "chapters": [{"number": c["number"], "title": c["title"], "audio_file": c["encoded_path"],
                               "cache_directory": c["cache_directory"]} for c in rendered],
             }
-            notify(f"Saved {len(rendered)} chapter checkpoint(s) in {work / 'completed-chapters'}. "
+            # Ignored chapters write no checkpoint: the display count covers
+            # the chapters this run actually saved, while the machine chapter
+            # count keeps every composed record.
+            checkpointed = len([chapter for chapter in plan["chapters"] if not chapter.get("ignored")])
+            notify(f"Saved {checkpointed} chapter checkpoint(s) in {work / 'completed-chapters'}. "
                    "Use assemble to create the M4B.")
         else:
             from .progress import report_book_state
@@ -3242,8 +3288,10 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
         missing = [key for key, value in voices.items() if value is None]
         if missing:
             raise RenderBlocked("Selected voices are missing: " + ", ".join(missing))
-        records = [_read_checkpoint(work, chapter) for chapter in plan["chapters"]]
-        missing = [chapter["number"] for chapter, record in zip(plan["chapters"], records) if record is None]
+        records = [None if chapter.get("ignored") else _read_checkpoint(work, chapter)
+                   for chapter in plan["chapters"]]
+        missing = [chapter["number"] for chapter, record in zip(plan["chapters"], records)
+                   if record is None and not chapter.get("ignored")]
         if missing:
             raise RenderBlocked("Chapters have not finished rendering: " + ", ".join(map(str, missing))
                                 + ". Run render --chapters-only first.")
@@ -3253,6 +3301,12 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
         for chapter, record in zip(plan["chapters"], records):
+            if chapter.get("ignored"):
+                # No checkpoint validation and no TTS/ASR: the ignored chapter
+                # contributes a zero-frame record only, and any earlier
+                # checkpoint stays untouched for a later unignore.
+                rendered.append(_compose_ignored_chapter(bundle, chapter, config, notify=notify))
+                continue
             saved = record["context"]
             current_engine = _cache_engine_identity(saved["engine"], config)
             if current_engine.get("cache_model_alias"):
@@ -3327,7 +3381,8 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
             acceptance.extend(chapter_acceptance)
             notify(f"Verified saved chapter {chapter['number']} / {len(bundle['chapters'])}: {chapter['title']}")
         if identities is None:
-            raise RenderBlocked("No chapters selected for assembly")
+            raise RenderBlocked("Every selected chapter is ignored, so assembly would produce no audio. "
+                                "Clear the chapter ignores before assembling, or render non-ignored chapters first.")
         if chapters_only:
             result = {"format": "audiobook-chapters", "version": 1, "status": "chapters_complete",
                       "partial_book": plan["partial_book"], "chapter_count": len(rendered),

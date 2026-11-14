@@ -12,9 +12,10 @@ import re
 from ..pronunciations import WORD_PATTERN
 
 
-def prepare_name_pronunciations(bundle, config_path, *, notify=print):
+def prepare_name_pronunciations(bundle, config_path, *, notify=print, ignored=frozenset()):
+    from ..chapter_ignores import included_source
     from ..name_pronunciations import pending_tagging
-    pending = pending_tagging(bundle["directory"], bundle["source"])
+    pending = pending_tagging(bundle["directory"], included_source(bundle, ignored))
     if not any(state["pending"] for _, state in pending):
         return
     from ..config import load_config
@@ -22,9 +23,10 @@ def prepare_name_pronunciations(bundle, config_path, *, notify=print):
     tag_defined_names(bundle["directory"], load_config(config_path), progress=notify, document=bundle)
 
 
-def named_pronunciation_snapshot(bundle):
+def named_pronunciation_snapshot(bundle, *, ignored=frozenset()):
+    from ..chapter_ignores import included_source
     from ..name_pronunciations import render_snapshot
-    return render_snapshot(bundle["directory"], bundle["source"])
+    return render_snapshot(bundle["directory"], included_source(bundle, ignored))
 
 
 def with_tagged_names(row, legacy, matches, snapshot):
