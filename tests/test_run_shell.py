@@ -417,6 +417,31 @@ class RunModelTests(unittest.TestCase):
         self.assertEqual([item["state"] for key, item in self.model.visible_chapters() if key.startswith("b1")],
                          ["done", "done", "not started", "not started"])
 
+    def test_book_progress_never_drops_when_a_chapter_stops_rendering(self):
+        board = BusBoard(self.bus)
+        board.book_state("/q/b1", "rendering")
+        board.chapter_plan("/q/b1", [{"number": n, "title": f"C{n}", "blocks": 10, "saved": False}
+                                     for n in (1, 2, 3, 4)])
+        def status(key, chapter, done):
+            self.bus.publish("status", scope={"book": "b1", "chapter": chapter}, data={"key": key, "snapshot": {
+                "chapter": chapter, "total_chapters": 4, "done": done, "blocks": 10, "elapsed": 1,
+                "active": []}})
+        status("k1", 1, 10)
+        status("k2", 2, 5)
+        percent = lambda: self.model.book_rows()[0][1]
+        self.assertEqual(percent(), 37)  # (10 + 5) of 40 blocks
+        # Chapter 1 leaves the board to be assembled; chapter 2 is blocked with half its takes saved.
+        self.bus.publish("status_removed", data={"key": "k1"})
+        board.chapter_state("/q/b1", 1, "assembling")
+        self.assertEqual(percent(), 37)
+        self.bus.publish("status_removed", data={"key": "k2"})
+        board.chapter_state("/q/b1", 2, "failed")
+        self.assertEqual(percent(), 37)
+        board.chapter_state("/q/b1", 1, "done")
+        self.assertEqual(percent(), 37)
+        status("k3", 3, 4)
+        self.assertEqual(percent(), 47)
+
     def test_chapters_with_no_planned_speech_work_stay_hidden_from_every_view(self):
         board = BusBoard(self.bus)
         board.book_state("/q/b1", "rendering")

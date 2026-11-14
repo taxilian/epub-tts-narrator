@@ -969,7 +969,13 @@ class RunModel:
                 if state["state"] == "done":
                     percent = 100
                 elif total:
-                    partial = sum(row["snapshot"]["done"] / max(1, row["snapshot"]["blocks"]) for row in live)
+                    if plan is not None:
+                        # Every unfinished chapter keeps its accepted share, not only the ones
+                        # rendering now: a failed, blocked or stopped chapter's saved takes and
+                        # an assembling chapter's finished blocks never drop out of the book.
+                        partial = sum(_chapter_share(entry) for entry in plan.values() if entry["state"] != "done")
+                    else:
+                        partial = sum(row["snapshot"]["done"] / max(1, row["snapshot"]["blocks"]) for row in live)
                     percent = min(99, int(100 * (ready + partial) / total))
                 rows.append((book, percent, state["state"] or "starting", ready, total, len(live),
                              f"{done}/{blocks}" if live else "", failed))
@@ -1053,6 +1059,14 @@ class RunModel:
                 lines.append(_line(event))
         lines.extend(_line(event) for event in tail)
         return lines
+
+
+def _chapter_share(entry):
+    """How much of an unfinished chapter is done: all of it while assembling, else its accepted blocks."""
+    if entry["state"] == "assembling":
+        return 1
+    blocks = entry.get("blocks")
+    return min(1, entry.get("done", 0) / blocks) if blocks else 0
 
 
 def _short(text, limit=60):
