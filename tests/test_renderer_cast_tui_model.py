@@ -185,7 +185,8 @@ class ControllerTests(unittest.TestCase):
         [failure] = self.controller.failures()
         self.assertEqual((failure.state, failure.error), (FAILED, "Gemini quota exceeded"))
         self.assertTrue(any(severity == "error" and "quota" in text for _, severity, text in self.controller.messages))
-        self.assertEqual(self.session.calls[-1][0], "set_reference_clips")
+        # Another voice's quick save runs on its own lane, in no fixed order with the failed generation.
+        self.assertIn("set_reference_clips", [call[0] for call in self.session.calls])
         self.controller.retry(failure.job_id)
         self.settle()
         self.assertEqual(self.controller.failures(), [])
