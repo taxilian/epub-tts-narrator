@@ -29,7 +29,9 @@ class RenderPronunciationPreflightTests(unittest.TestCase):
                                '[analysis]\nattribution_workers=1\nrepair_attempts=0\n'
                                '[engine]\ncheckpoint="./tts-model"\n'
                                '[verification]\nmodel="./asr-model"\n'
-                               '[render]\nrequire_cover=false\nparagraph_synthesis=false\n')
+                               '[render]\nrequire_cover=false\nparagraph_synthesis=false\n'
+                               # These tests are about pronunciation labelling; the fixture model knows no accents.
+                               '[casting]\nassign_accents=false\n')
         self.books = [self.root / "first", self.root / "second"]
         for directory in self.books:
             export_bundle(prepare_document(rose_document()), directory)

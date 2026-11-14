@@ -555,7 +555,11 @@ def prepare_accents(bundle, config, config_path, *, notify=print):
     pending = [voice_id for voice_id in entries if voice_id not in fixed]
     if not pending:
         return None
-    requests = _requests(bundle, config_path, _book_cache(bundle, config_path), progress=notify)
+    # Only the configuration this render actually loaded decides whether a model is
+    # available; a configuration built in code (no provider section) never reaches
+    # for a TOML file of its own.
+    requests = (_requests(bundle, config_path, _book_cache(bundle, config_path), progress=notify)
+                if (config.get("provider") or {}).get("model") else None)
     if requests is None:
         notify("Accent assignment skipped: set provider.model in the TOML configuration so voices get accents "
                "(set casting.assign_accents = false to stop asking).")

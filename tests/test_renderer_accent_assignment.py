@@ -49,6 +49,7 @@ class BookTestCase(unittest.TestCase):
         shutil.copytree(EXAMPLE, self.directory)
         self.bundle = prepare_bundle(load_bundle(self.directory))
         self.config = resolve_book_config(self.bundle, deepcopy(DEFAULTS))
+        self.config["provider"] = {"model": "fixture-model"}  # as a loaded TOML file would carry it
         self.entries = voice_entries(self.bundle)
         self.voices = sorted(self.entries)
 
@@ -188,6 +189,10 @@ class AssignmentTests(BookTestCase):
         self.assertIsNone(self.prepare(requests))
         self.config["casting"]["assign_accents"] = True
         self.assertIsNone(self.prepare(None))
+        # A configuration with no model never reaches for one, even through a TOML file.
+        del self.config["provider"]
+        with patch.object(accent_assignment, "_requests", side_effect=AssertionError("no request")):
+            self.assertIsNone(prepare_accents(self.bundle, self.config, None, notify=lambda _: None))
         self.assertEqual(requests.calls, [])
         self.assertFalse((self.directory / ASSIGNMENTS_FILENAME).exists())
 
