@@ -382,6 +382,14 @@ class ContinuityTests(unittest.TestCase):
                     repaired["engine_metadata"][barrier] = {}
                     state.accept(Path("not-read-for-a-barrier"), repaired)
                 self.assertEqual(state.entries, [previous])
+        with self.subTest(barrier="silence_stall_recovery"):
+            # A take kept despite one long pause never becomes history.
+            state.entries = [previous]
+            with state.transaction(request):
+                stalled = deepcopy(record)
+                stalled["report"]["silence_stall_recovery"] = {"version": 1, "decision": "accepted"}
+                state.accept(Path("not-read-for-a-barrier"), stalled)
+            self.assertEqual(state.entries, [previous])
     def test_interrupted_chapter_replays_only_accepted_predecessors(self):
         from unittest.mock import patch
         generate = self.model.generate

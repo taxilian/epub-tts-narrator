@@ -209,7 +209,10 @@ class ChapterContinuity:
         heard = accepted.get("request", {}).get("continuity")
         drifted = (tolerate_history and isinstance(heard, dict) and heard != scope["identity"]
                    and without_history({"continuity": heard}) == without_history({"continuity": scope["identity"]}))
-        if not scope["history"] or _NOT_HISTORY.intersection(metadata):
+        from .stall_recovery import recovered
+        # A take kept despite one long pause is shortened only at assembly;
+        # as history its stalled codes could teach later takes to stall.
+        if not scope["history"] or _NOT_HISTORY.intersection(metadata) or recovered(accepted.get("report")):
             self.drifted += drifted
             return
         marker = metadata.get("continuity_codes")

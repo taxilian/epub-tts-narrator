@@ -22,8 +22,9 @@ class ReferenceTranscriptionReviewTests(unittest.TestCase):
     check = consensus.ReferenceConsensusTests.check
 
     def test_unaligned_reference_substitutions_reach_sound_review_before_rejection(self):
+        # "Dalley" / "Darly" now passes coverage as a non-rhotic candidate
+        # (speech_coverage v15), so the text judge reviews it instead.
         examples = (
-            ("Dalley checked the records.", "Darly checked the records."),
             ("Dalley checked the records.", "Darling checked the records."),
             ("I assume you're here about the records.", "I assume you hear about the records."),
             ("You and probably the captain knew.", "You I'm probably the captain knew."),

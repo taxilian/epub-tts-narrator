@@ -186,7 +186,7 @@ class WordSpacingResumeTests(unittest.TestCase):
     generate = retry.SpeechRetryTests.generate
     take = retry.SpeechRetryTests.take
 
-    def test_policy_update_generates_a_fresh_take_then_reuses_only_accepted_speech(self):
+    def test_policy_update_rechecks_the_saved_take_then_reuses_only_accepted_speech(self):
         self.text = "We were over taking the cart."
         self.request["text"] = self.text
         judge = Judge("uncertain")
@@ -202,17 +202,16 @@ class WordSpacingResumeTests(unittest.TestCase):
         first_record = read_json(first_report_path)
         first = self.root / "takes" / first_record["audio_file"]
         saved_audio = stored_audio.read_bytes(first)
-        first_report = first_report_path.read_bytes()
-        # Rejected attempts remain diagnostics even after a verification change.
-        # Only a successful new take becomes reusable speech.
+        # A take rejected only for its words is verified again under the new
+        # policy on its unchanged audio before any new take is made.
         wav, accepted = self.take(SpeechRetryBudget(), verifier=verifier)
-        self.assertEqual(accepted["attempt"], 3)
-        self.assertEqual(wav, self.root / "takes" / accepted["audio_file"])
+        self.assertEqual(accepted["attempt"], 1)
+        self.assertEqual(wav, first)
         self.assertEqual(stored_audio.read_bytes(first), saved_audio)
-        self.assertEqual(first_report_path.read_bytes(), first_report)
+        self.assertEqual(read_json(first_report_path)["policy_recheck"]["previous_report"], first_record["report"])
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(accepted["report"]["text_confirmation_method"], "word_spacing")
-        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(judge.calls), old_judge_calls)
         with patch.object(self.engine, "_write", side_effect=AssertionError("Accepted audio was regenerated")):
             self.assertEqual(self.take(SpeechRetryBudget(), verifier=verifier), (wav, accepted))

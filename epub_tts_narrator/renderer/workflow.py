@@ -27,6 +27,7 @@ from .diagnostics import configured_secrets, safe_error_text
 from .generation_failures import drama3_truncation as _drama3_truncation
 from .interrupts import stop_if_requested
 from .quality import validation_key as make_validation_key, validate_audio, text_confirmation_unavailable
+from . import stall_recovery
 from .progress import (ChapterProgress, format_duration, generation_activity,
                        report_worker_activity, set_phase)
 from .render_backlog import BacklogCancelled, BacklogClosed, begin_attempt_ticket
@@ -349,19 +350,27 @@ def _take_review(directory, config, verifier, request_hash):
     return TakeReview(Path(directory).parent.parent, config, verifier, request_hash)
 
 
-def _rechecks_under_new_policy(previous, validation_key, text):
-    """Whether a saved take rejected only for its words is checked again rather than remade.
+def _rechecks_under_new_policy(previous, validation_key, text, *, stall_limit=None):
+    """Whether a saved rejected take is checked again rather than remade.
 
     A take rejected for ``text_mismatch`` under another validation key (an
     earlier coverage or comparison policy, verifier or judge) may pass today's
-    rules. Checking its unchanged audio again costs one recognition, while a new
-    take costs a synthesis. History echoes and acoustic failures are never
-    rechecked, and a recheck under the current key is never repeated.
+    rules. So may a take rejected only for one long pause that stall recovery
+    (``stall_recovery``) has never assessed, when it is available and the pause
+    is within its limit. Checking unchanged audio again costs one recognition,
+    while a new take costs a synthesis. History echoes and other acoustic
+    failures are never rechecked, and neither recheck repeats.
     """
     from .history_echo import attempt_evidence
     report = previous.get("report")
-    return (isinstance(report, dict) and report.get("passed") is not True
-            and report.get("reasons") == ["text_mismatch"]
+    if not isinstance(report, dict) or report.get("passed") is True:
+        return False
+    if stall_limit is not None and stall_recovery.stalled_only(report):
+        longest = (report.get("metrics") or {}).get("longest_internal_silence_seconds")
+        return (isinstance(longest, (int, float)) and longest <= stall_limit
+                and isinstance(previous.get("audio_file"), str)
+                and isinstance(previous.get("audio_sha256"), str))
+    return (report.get("reasons") == ["text_mismatch"]
             and isinstance(previous.get("validation_key"), str)
             and previous.get("validation_key") != validation_key
             and isinstance(previous.get("audio_file"), str)
@@ -696,6 +705,10 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 from .direction_repair import confirm_metadata
                 confirm_metadata(request, latest["engine_metadata"])
             latest["report"] = validate_audio(directory / name, text, verifier, config["quality"], purpose=purpose, **performance_options)
+            if purpose == "speech":
+                latest["report"] = stall_recovery.recover(
+                    latest["report"], directory / name, text, verifier, config, request,
+                    performance=performance_options.get("performance"), notify=notify)
             marker = latest.get("engine_metadata", {}).get("speech_resolution")
             if marker is not None:
                 from .recurring_resolution import confirm_rewritten_report
@@ -775,7 +788,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 # changed. Preserve the failed request and append a new take.
                 last_report = previous.get("report", {})
                 continue
-            recheck = (purpose == "speech" and _rechecks_under_new_policy(previous, validation_key, text)
+            # A rejected joined recovery recording stays terminal: never rechecked.
+            recheck = (purpose == "speech" and "recovery" not in request and _rechecks_under_new_policy(
+                           previous, validation_key, text,
+                           stall_limit=stall_recovery.limit_seconds(
+                               config, request, text, performance_options.get("performance")))
                        and audio_present(wav))
             if ((purpose == "speech" or previous.get("validation_key") == validation_key)
                     and previous.get("report", {}).get("passed") is not True
@@ -791,8 +808,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 # nothing is synthesized and the generation allowance is untouched.
                 policy_recheck = {"previous_validation_key": previous.get("validation_key"),
                                   "previous_report": previous.get("report")}
-                notify(f"  Rechecking saved take {attempt}, rejected for its words under an earlier "
-                       "verification policy, before making a new take.")
+                why = ("one long pause" if stall_recovery.stalled_only(previous.get("report"))
+                       else "its words under an earlier verification policy")
+                notify(f"  Rechecking saved take {attempt}, rejected for {why}, before making a new take.")
             metadata = previous.get("engine_metadata", {})
         if (fresh_speech and attempt in saved_attempts and not audio_present(wav)
                 and attempt != missing_accepted_attempt):
@@ -948,6 +966,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 current_attempt = generation_ordinal if fresh_speech else attempt
                 set_phase(notify, f"verifying speech, attempt {current_attempt}/{attempts}")
             report = validate_audio(wav, text, verifier, config["quality"], purpose=purpose, **performance_options)
+            if purpose == "speech":
+                # One long pause between words is shortened at assembly; the
+                # words are verified in full before the take can be used.
+                report = stall_recovery.recover(report, wav, text, verifier, config, request,
+                                                performance=performance_options.get("performance"),
+                                                notify=notify)
             if "direction_repair" in metadata:
                 from .direction_repair import confirm_metadata
                 confirm_metadata(request, metadata)

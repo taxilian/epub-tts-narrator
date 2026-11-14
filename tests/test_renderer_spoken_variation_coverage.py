@@ -187,7 +187,7 @@ class PolicyRecheckTests(unittest.TestCase):
             generated = []
             record = self.rejected_take(directory, generated)
             record["validation_key"] = "0" * 64
-            record["report"]["reasons"] = ["internal_silence_stall"]
+            record["report"]["reasons"] = ["excessive_clipping"]
             write_json(Path(directory, "attempt-001.json"), record)
             result, judged = self.render(directory, .99, generated)
             self.assertIsNone(result)

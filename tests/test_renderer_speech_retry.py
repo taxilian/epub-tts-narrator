@@ -141,7 +141,7 @@ class SpeechRetryTests(unittest.TestCase):
         directory = self.root / "takes"
         for path in directory.glob("attempt-*.json"):
             record = read_json(path)
-            record["report"]["reasons"] = ["internal_silence_stall"]
+            record["report"]["reasons"] = ["excessive_clipping"]
             write_json(path, record)
         before = self.snapshot()
         replacement_verifier = FixtureVerifier(self.fixtures, version=2)
