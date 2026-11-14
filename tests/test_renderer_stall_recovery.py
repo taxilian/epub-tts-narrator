@@ -60,7 +60,7 @@ class StallRecoveryTests(unittest.TestCase):
         self.assertEqual(len(verifier.calls), 1)
         marker = report["silence_stall_recovery"]
         self.assertEqual((marker["decision"], marker["method"], marker["limit_seconds"]),
-                         ("accepted", "assembly_pause_cap", 5.0))
+                         ("accepted", "assembly_pause_cap", 7.5))
         self.assertEqual(marker["stalled_report"]["reasons"], ["internal_silence_stall"])
         self.assertTrue(stall_recovery.recovered(report))
 
@@ -71,7 +71,7 @@ class StallRecoveryTests(unittest.TestCase):
         self.assertEqual(report["silence_stall_recovery"]["decision"], "words_checked")
 
     def test_a_very_long_pause_is_not_recovered(self):
-        report, verifier = self.stalled(6.0)
+        report, verifier = self.stalled(9.0)
         self.assertEqual(report["reasons"], ["internal_silence_stall"])
         self.assertEqual(report["silence_stall_recovery"]["decision"], "too_long")
         self.assertEqual(verifier.calls, [])
@@ -128,6 +128,21 @@ class StallRecoveryWorkflowTests(unittest.TestCase):
         self.assertEqual(accepted["attempt"], 1)
         rechecked = read_json(self.directory / "attempt-001.json")
         self.assertEqual(rechecked["policy_recheck"]["previous_report"]["reasons"], ["internal_silence_stall"])
+
+    def test_a_take_judged_too_long_under_a_lower_limit_is_rechecked(self):
+        verifier = consensus.PrimaryVerifier(TEXT)
+        with self.assertRaises(SpeechVerificationFailed):
+            self.take(config(normalize_take_pauses=False), verifier)
+        for path in self.directory.glob("attempt-*.json"):
+            record = read_json(path)
+            record["report"]["silence_stall_recovery"] = {
+                "version": 1, "decision": "too_long", "limit_seconds": 2.0,
+                "longest_internal_silence_seconds": record["report"]["metrics"]["longest_internal_silence_seconds"]}
+            write_json(path, record)
+        path, accepted = self.take(config(), verifier)
+        self.assertEqual(len(self.generated), 2)  # nothing new was synthesized
+        self.assertEqual(accepted["attempt"], 1)
+        self.assertEqual(accepted["report"]["silence_stall_recovery"]["decision"], "accepted")
 
     def test_a_too_long_assessment_is_not_repeated(self):
         verifier = consensus.PrimaryVerifier(TEXT)

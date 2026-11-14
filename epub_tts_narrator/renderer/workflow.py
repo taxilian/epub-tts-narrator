@@ -423,8 +423,8 @@ def _rechecks_under_new_policy(previous, validation_key, text, *, stall_limit=No
     A take rejected for ``text_mismatch`` under another validation key (an
     earlier coverage or comparison policy, verifier or judge) may pass today's
     rules. So may a take rejected only for one long pause that stall recovery
-    (``stall_recovery``) has never assessed, when it is available and the pause
-    is within its limit. Checking unchanged audio again costs one recognition,
+    (``stall_recovery``) has never assessed, or judged too long under a lower
+    limit, when it is available and the pause is within its limit. Checking unchanged audio again costs one recognition,
     while a new take costs a synthesis. History echoes and other acoustic
     failures are never rechecked, and neither recheck repeats.
     """
@@ -432,7 +432,8 @@ def _rechecks_under_new_policy(previous, validation_key, text, *, stall_limit=No
     report = previous.get("report")
     if not isinstance(report, dict) or report.get("passed") is True:
         return False
-    if stall_limit is not None and stall_recovery.stalled_only(report):
+    if stall_limit is not None and (stall_recovery.stalled_only(report)
+                                    or stall_recovery.reassessable(report, stall_limit)):
         longest = (report.get("metrics") or {}).get("longest_internal_silence_seconds")
         return (isinstance(longest, (int, float)) and longest <= stall_limit
                 and isinstance(previous.get("audio_file"), str)
@@ -814,10 +815,13 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 return result
     secrets = configured_secrets(config)
     last_report = None
-    # A take that said the start of the passage and stopped is finished once
-    # (take_completion): its next attempt generates only the missing words.
+    # A take that said the start of the passage and stopped is finished
+    # (take_completion): its next attempt generates only the missing words. A
+    # finished take that stops again is finished from where it got to, up to
+    # MAX_COMPLETIONS times, each further along than the last.
     completion_source = None
-    completions_left = 1 if (generate_tail is not None and purpose == "speech") else 0
+    from .take_completion import MAX_COMPLETIONS
+    completions_left = MAX_COMPLETIONS if (generate_tail is not None and purpose == "speech") else 0
     if completions_left:
         # A take a person marked truncated is right as far as it goes: finish it first.
         from .take_completion import marked_truncated_source
@@ -914,6 +918,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 policy_recheck = {"previous_validation_key": previous.get("validation_key"),
                                   "previous_report": previous.get("report")}
                 why = ("one long pause" if stall_recovery.stalled_only(previous.get("report"))
+                       or stall_recovery.reassessable(previous.get("report"), stall_recovery.limit_seconds(
+                           config, request, text, performance_options.get("performance")))
                        else "its words under an earlier verification policy")
                 notify(f"  Rechecking saved take {attempt}, rejected for {why}, before making a new take.")
             metadata = previous.get("engine_metadata", {})
@@ -1208,9 +1214,9 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     attempts += 1
                 continue
         if completions_left and record.get("audio_file") is not None and policy_recheck is None:
-            from .take_completion import completable, completion_point
+            from .take_completion import completable, completion_point, got_further
             point = completion_point(report, text) if completable(metadata) else None
-            if point is not None and generate_tail.supports(point["start"]):
+            if point is not None and got_further(metadata, point) and generate_tail.supports(point["start"]):
                 completions_left -= 1
                 completion_source = {"attempt": attempt, "wav": wav, "metadata": metadata, "point": point}
                 if resolution_session is not None:

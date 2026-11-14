@@ -21,7 +21,11 @@ from __future__ import annotations
 from copy import deepcopy
 
 STALL_RECOVERY_VERSION = 1
-LIMIT_FACTOR = 2.0
+# A take whose words all verify is kept with one pause up to this many times
+# the configured limit (7.5 s by default). The silence watch
+# (``silence_stop.STOP_SECONDS``) waits longer than that, so it never cuts
+# a take during a pause this would accept.
+LIMIT_FACTOR = 3.0
 MARKER = "silence_stall_recovery"
 
 
@@ -75,6 +79,17 @@ def recover(report, wav, text, verifier, config, request, *, performance=None, n
         notify(f"  The take paused {longest:.1f} seconds but every word verified; "
                "assembly shortens the pause to the usual length.")
     return checked
+
+
+def reassessable(report, limit):
+    """A take judged ``too_long`` under a lower limit whose pause the current ``limit`` covers."""
+    marker = report.get(MARKER) if isinstance(report, dict) else None
+    if (not isinstance(marker, dict) or marker.get("decision") != "too_long" or limit is None
+            or report.get("reasons") != ["internal_silence_stall"]):
+        return False
+    longest, before = marker.get("longest_internal_silence_seconds"), marker.get("limit_seconds")
+    return (isinstance(longest, (int, float)) and isinstance(before, (int, float))
+            and before < limit and longest <= limit)
 
 
 def recovered(report):

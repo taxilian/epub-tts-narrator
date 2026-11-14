@@ -57,6 +57,13 @@ class FailedTakeRepairTests(unittest.TestCase):
         self.assertEqual(takes[0]["expected_text"], "Kvothe smiled at the fire tonight.")
         self.assertEqual(self.repair().player_command, ["fixture-player"])
 
+    def test_a_finished_take_names_the_take_it_was_finished_from(self):
+        self.failed_take(1, "Kvothe smiled.")
+        record = self.failed_take(2, "Kvothe smiled at the fire.")
+        record["engine_metadata"] = {**record.get("engine_metadata", {}), "completion": {"source_attempt": 1}}
+        write_json(self.directory / "attempt-002.json", record)
+        self.assertEqual([row["finished_from"] for row in self.repair().takes()], [None, 1])
+
     def test_accepting_and_learning_records_a_manual_selection_and_a_person_approved_variant(self):
         record = self.failed_take(1, "quote smiled at the fire tonight.")
         outcome = self.repair().accept(1, learn=True)

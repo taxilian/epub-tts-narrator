@@ -17,7 +17,7 @@ from shared_fixtures import renderer_config
 from test_renderer_speech_identity import paragraph_request, reference, speech_request
 from test_renderer_workflow import FFMPEG, FFPROBE, write_tone
 
-TEXT = "Moreover, he had seen evidence of discomfort on her face, whenever they were apart."
+TEXT = "Moreover, he had seen evidence of discomfort on her face. Whenever they were apart."
 RATE = 44100
 WORD_SECONDS, GAP_SECONDS = 0.25, 0.15
 
@@ -34,21 +34,35 @@ def words_report(heard, *, reasons=("text_mismatch",)):
 class CompletionPointTests(unittest.TestCase):
     def test_a_take_that_said_the_start_and_stopped_is_cut_after_its_last_word(self):
         point = completion_point(words_report("Moreover, he had seen evidence of discomfort on her face."), TEXT)
-        self.assertEqual(TEXT[point["start"]:], "whenever they were apart.")
+        self.assertEqual(TEXT[point["start"]:], "Whenever they were apart.")
         self.assertEqual((point["heard_words"], point["missing_words"]), (10, 4))
         self.assertAlmostEqual(point["cut_seconds"], 9 * (WORD_SECONDS + GAP_SECONDS) + WORD_SECONDS)
 
+    def test_only_a_take_that_stopped_at_a_sentence_or_clause_break_is_finished(self):
+        text = "He waited there; nothing came. She said, quietly, that it was over: they would leave."
+        for heard, rest in (("He waited there;", "nothing came. She said, quietly, that it was over: they would leave."),
+                            ("He waited there; nothing came.", "She said, quietly, that it was over: they would leave."),
+                            ("He waited there; nothing came. She said, quietly, that it was over:", "they would leave."),
+                            ("He waited there; nothing came. She said,", None),
+                            ("He waited there; nothing came. She said, quietly, that", None)):
+            with self.subTest(heard=heard):
+                point = completion_point(words_report(heard), text)
+                self.assertEqual(text[point["start"]:] if point else None, rest)
+        # A person's truncated mark does not make a mid-sentence stop a break.
+        self.assertIsNone(completion_point(words_report("He waited there; nothing came. She said,"), text, vouched=True))
+
     def test_a_misheard_word_in_the_start_still_counts_as_the_start(self):
         point = completion_point(words_report("Moreover, he had seen evidents of discomfort on her face."), TEXT)
-        self.assertEqual(TEXT[point["start"]:], "whenever they were apart.")
+        self.assertEqual(TEXT[point["start"]:], "Whenever they were apart.")
 
     def test_takes_that_are_not_a_stopped_start_are_left_to_ordinary_recovery(self):
         for heard, reasons in (
-                ("Moreover, he had seen evidence of discomfort on her face, whenever they were apart.",
+                ("Moreover, he had seen evidence of discomfort on her face. Whenever they were apart.",
                  ("text_mismatch",)),  # nothing missing
                 ("Moreover, he had seen evidence of discomfort on her place.", ("text_mismatch",)),  # unclear end
                 ("The rain fell on the town all night long on her face.", ("text_mismatch",)),
                 ("Moreover, he", ("text_mismatch",)),  # too little said to keep
+                ("Moreover, he had seen evidence of", ("text_mismatch",)),  # stopped mid-sentence
                 ("Moreover, he had seen evidence of discomfort on her face.", ("audio_too_short",)),
         ):
             with self.subTest(heard=heard):
@@ -59,7 +73,7 @@ class CompletionPointTests(unittest.TestCase):
 
     def test_only_takes_of_the_passages_own_words_are_completed(self):
         self.assertTrue(completable({"seed": 1}))
-        for key in ("speech_resolution", "completion", "recovery", "exhaustion_selection"):
+        for key in ("speech_resolution", "recovery", "exhaustion_selection"):
             self.assertFalse(completable({key: {}}))
 
 
@@ -112,9 +126,9 @@ class TwoTurnHistoryTests(unittest.TestCase):
             chapter.entries = entries
             with self.subTest(entries=len(entries)), loaded, chapter.transaction(speech_request(voice, TEXT)):
                 with continuation_turn(kept):
-                    _, history = compose("<|speaker:0|> whenever they were apart.", [voice])
+                    _, history = compose("<|speaker:0|> Whenever they were apart.", [voice])
                 self.assertEqual([text.split(" ", 1)[1] for text, _ in history], expected)
-                _, ordinary = compose("<|speaker:0|> whenever they were apart.", [voice])
+                _, ordinary = compose("<|speaker:0|> Whenever they were apart.", [voice])
                 self.assertEqual(len(ordinary), len(entries))
 
 
@@ -142,6 +156,20 @@ class HistoryTurnTests(unittest.TestCase):
         self.assertIsNone(history_turn({}, "unused", 1, 2, "x"))
 
 
+class JoinedCodesTests(unittest.TestCase):
+    def test_a_finished_take_s_codes_are_its_kept_start_then_its_tail(self):
+        from epub_tts_narrator.renderer.take_completion import _joined_codes
+        kept = {"codes": [[1, 2, 3, 4], [5, 6, 7, 8]], "codebook_size": 4096,
+                "text": "<|speaker:0|> [Mild Yorkshire accent] One two three four.", "speakers": ["voice"]}
+        tail = {"codes": [[9], [10]], "codebook_size": 4096, "text": "x", "speakers": ["voice"]}
+        joined = _joined_codes(kept, 2, tail, "One two  three.")
+        self.assertEqual(joined["codes"], [[1, 2, 9], [5, 6, 10]])
+        self.assertEqual(joined["text"], "<|speaker:0|> [Mild Yorkshire accent] One two three.")
+        self.assertIsNone(_joined_codes(kept, 2, None, "One."))
+        self.assertIsNone(_joined_codes(kept, 2, {**tail, "codebook_size": 1024}, "One."))
+        self.assertIsNone(_joined_codes(None, 0, tail, "One."))
+
+
 class ContinuationTurnTests(unittest.TestCase):
     def test_the_kept_start_is_the_latest_history_turn_the_voice_hears(self):
         from epub_tts_narrator.renderer.continuity import ChapterContinuity, compose, continuation_turn
@@ -150,11 +178,11 @@ class ContinuationTurnTests(unittest.TestCase):
         chapter = ChapterContinuity({"engine": "fixture"}, voices)
         codes = [[1, 2, 3] for _ in range(10)]
         with chapter.transaction(speech_request(voice, TEXT)):
-            references, history = compose("<|speaker:0|> whenever they were apart.", [voice])
+            references, history = compose("<|speaker:0|> Whenever they were apart.", [voice])
             self.assertEqual(history, [])
             with continuation_turn({"text": "<|speaker:0|> Moreover, he had seen evidence",
                                     "codes": codes, "speakers": [voice["asset_hash"]]}):
-                references, history = compose("<|speaker:0|> whenever they were apart.", [voice])
+                references, history = compose("<|speaker:0|> Whenever they were apart.", [voice])
         self.assertEqual(history, [("<|speaker:0|> Moreover, he had seen evidence", codes)])
         self.assertEqual([item["speaker"] for item in references], [0])
 
@@ -266,11 +294,11 @@ class CompletionWorkflowTests(unittest.TestCase):
         engine = StoppingEngine(stop_after=10)
         result, accepted = self.render(engine)
         self.assertTrue(accepted["report"]["passed"])
-        self.assertEqual(engine.calls, [TEXT, "whenever they were apart."])
+        self.assertEqual(engine.calls, [TEXT, "Whenever they were apart."])
         record = read_json(Path(result["wav_path"]).parent / "accepted.json")
         completion = record["engine_metadata"]["completion"]
         self.assertEqual((record["attempt"], completion["source_attempt"]), (2, 1))
-        self.assertEqual(completion["tail_text"], "whenever they were apart.")
+        self.assertEqual(completion["tail_text"], "Whenever they were apart.")
         self.assertLess(completion["kept_seconds"], 10 * (WORD_SECONDS + GAP_SECONDS) + 0.3)
         self.assertTrue(any("said the first 10 words and stopped" in line for line in self.messages))
 
@@ -286,19 +314,19 @@ class CompletionWorkflowTests(unittest.TestCase):
         engine = Refusing(stop_after=10)
         _, accepted = self.render(engine)
         self.assertTrue(accepted["report"]["passed"])
-        self.assertEqual(engine.calls, [TEXT, "whenever they were apart.", TEXT])
+        self.assertEqual(engine.calls, [TEXT, "Whenever they were apart.", TEXT])
         self.assertTrue(any("Finishing the stopped take failed" in line for line in self.messages))
 
     def test_a_narration_paragraph_that_stopped_keeps_its_start_across_turns(self):
         first, second = "It was still snowing lightly that evening. ", "She had just reached the point of launching herself."
         request = paragraph_request([(first, self.voice, ""), (second, self.voice, "")])
-        engine = StoppingEngine(stop_after=10)
+        engine = StoppingEngine(stop_after=7)
         engine.whole = first + second
         _, accepted = _render_chunk(request["chunk"], 1, 1, {self.voice["voice_id"]: self.voice}, engine,
                                     engine.identity, PitchVerifier(), self.config, self.work, {}, Lock(),
                                     notify=self.messages.append, retry_budget=SpeechRetryBudget())
         self.assertTrue(accepted["report"]["passed"])
-        self.assertEqual(engine.calls, [first + second, "reached the point of launching herself."])
+        self.assertEqual(engine.calls, [first + second, second])
 
     def test_a_paragraph_of_several_voices_is_never_completed(self):
         from epub_tts_narrator.renderer.take_completion import paragraph_tail
@@ -337,10 +365,44 @@ class CompletionWorkflowTests(unittest.TestCase):
         self.messages.clear()
         result, accepted = self.render(engine)
         self.assertTrue(accepted["report"]["passed"])
-        self.assertEqual(engine.calls, ["whenever they were apart."])
+        self.assertEqual(engine.calls, ["Whenever they were apart."])
         completion = read_json(Path(result["wav_path"]).parent / "accepted.json")["engine_metadata"]["completion"]
         self.assertEqual(completion["source_attempt"], 1)
         self.assertTrue(any("You marked take 1 truncated" in line for line in self.messages))
+
+    def test_a_finished_take_that_stops_again_is_finished_from_where_it_got_to(self):
+        text = "Moreover, he had seen it. There was discomfort on her face. Whenever they were apart."
+        stops = iter([5, 6])  # the whole line stops after its first sentence, the first tail after its second
+
+        class StopsTwice(StoppingEngine):
+            def synthesize(self, said, voice, path, *, seed, direction=""):
+                self.calls.append(said)
+                words = said.split()
+                write_words(path, words[:next(stops, len(words))], trailing=1.5)
+                return {"fixture": True, "seed": seed}
+        self.chunk = speech_request(self.voice, text)["chunk"]
+        engine = StopsTwice()
+        result, accepted = self.render(engine)
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(engine.calls, [text, "There was discomfort on her face. Whenever they were apart.",
+                                        "Whenever they were apart."])
+        record = read_json(Path(result["wav_path"]).parent / "accepted.json")
+        self.assertEqual((record["attempt"], record["engine_metadata"]["completion"]["source_attempt"]), (3, 2))
+
+    def test_a_take_cut_off_mid_sentence_is_made_again_rather_than_finished(self):
+        engine = StoppingEngine(stop_after=5)
+        _, accepted = self.render(engine)
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(engine.calls, [TEXT, TEXT])
+        self.assertNotIn("completion", accepted.get("engine_metadata", {}))
+
+    def test_a_finished_take_is_finished_again_only_if_it_got_further(self):
+        from epub_tts_narrator.renderer.take_completion import got_further
+        finished = {"completion": {"tail_start": 40}}
+        self.assertTrue(completable(finished))
+        self.assertTrue(got_further(finished, {"start": 52}))
+        self.assertFalse(got_further(finished, {"start": 40}))
+        self.assertTrue(got_further({}, {"start": 10}))
 
     def test_a_take_that_spoke_every_word_never_starts_a_completion(self):
         engine = StoppingEngine()

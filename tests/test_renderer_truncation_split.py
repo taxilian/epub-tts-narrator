@@ -172,22 +172,23 @@ class SilenceStoppedTakeTests(unittest.TestCase):
         self.assertEqual(self.markers(), [])
 
     def test_a_stopped_take_missing_words_is_a_truncation_that_splits(self):
-        # The completion is spent on the first stopped take and fails too.
+        # Every completion's ending says the wrong word, so none of them passes or gets further.
         self.engine = SilentStopEngine(self.registry, FIRST)
         heard = self.engine.heard
-        self.engine.heard = lambda text, number: "Everyone" if text == SECOND and number == 2 else heard(text, number)
+        self.engine.heard = lambda text, number: "Nobody" if text == SECOND and number in (2, 4, 6) else heard(text, number)
         result, accepted = self.render_chunk()
-        self.assertEqual(self.call_texts(), [TEXT, SECOND, TEXT, FIRST, SECOND])
+        # Each stopped take is finished once (MAX_COMPLETIONS in all); every ending fails, so it splits.
+        self.assertEqual(self.call_texts(), [TEXT, SECOND, TEXT, SECOND, TEXT, SECOND, FIRST, SECOND])
         self.assertTrue(accepted["report"]["passed"])
         self.assertEqual(len(self.markers()), 1)
         whole = [read_json(path) for path in sorted((self.work / "clips").glob("*/attempt-*.json"))
                  if read_json(path)["request"]["kind"] == "speech" and "recovery" not in read_json(path)["request"]
                  and read_json(path)["request"]["chunk"]["spoken_text"] == TEXT]
         stopped = [record["report"] for record in whole if "completion" not in record["engine_metadata"]]
-        self.assertEqual([report.get("generation_stopped") for report in stopped], ["silence", "silence"])
+        self.assertEqual([report.get("generation_stopped") for report in stopped], ["silence"] * 3)
         self.assertTrue(all(record["report"]["passed"] is False for record in whole))
         self.assertEqual([record["engine_metadata"]["completion"]["source_attempt"] for record in whole
-                          if "completion" in record["engine_metadata"]], [1])
+                          if "completion" in record["engine_metadata"]], [1, 3, 5])
 
     def test_a_stopped_take_is_never_a_best_effort_choice(self):
         from epub_tts_narrator.renderer.exhaustion_selection import select_retained

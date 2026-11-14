@@ -13,7 +13,10 @@ a seam that changes or loses words is rejected and ordinary recovery follows.
 A completed take is accepted speech but not one generation of its text, so it
 never becomes chapter history (``continuity._NOT_HISTORY``); its record keeps
 ``engine_metadata.completion`` naming the take it finished, where it was cut,
-the words generated and the seed.
+the words generated and the seed. Its codes are the kept start's up to the
+cut followed by the tail's, so a finished take that stops again can itself be
+finished from where it got to (up to ``MAX_COMPLETIONS`` per passage, each
+one further than the last).
 """
 
 from __future__ import annotations
@@ -24,6 +27,9 @@ import re
 import tempfile
 
 COMPLETION_VERSION = 1
+# A passage's takes may be finished this many times in one render, each from
+# a take that got further than the one before it.
+MAX_COMPLETIONS = 3
 # A take must have said at least this many words for its start to be kept.
 MIN_HEARD_WORDS = 3
 # Recognizer word ends are approximate: the cut moves forward to the first
@@ -34,7 +40,11 @@ WINDOW_SECONDS = 0.025
 CUT_TAIL_SECONDS = 0.08
 # Metadata of generations whose text is not the passage's own wording.
 _NOT_COMPLETABLE = {"speech_resolution", "delivery_recovery", "direction_repair", "recovery",
-                    "clip_repair", "fragment_recovery", "exhaustion_selection", "completion"}
+                    "clip_repair", "fragment_recovery", "exhaustion_selection"}
+# A take is finished only where it stopped at a natural break: after a word
+# ending a sentence or a clause set off by a semicolon or colon (closing
+# quotes and brackets aside). A take cut off mid-sentence is made again.
+_PAUSE_END = re.compile(r"[.!?…;:][\"'”’»)\]]*$")
 _APOSTROPHES = str.maketrans({mark: "'" for mark in "’‘ʼ`´′＇"})
 _LEADING_CONTROLS = re.compile(r"^(<\|speaker:\d+\|>\s*)((?:\[[^\[\]]*\]\s*)*)")
 
@@ -45,8 +55,20 @@ def _word(token):
 
 
 def completable(metadata):
-    """Whether a take's generation spoke the passage's own text (not a rewrite, join or completion)."""
+    """Whether a take's generation spoke the passage's own text (not a rewrite or join).
+
+    A take that was itself finished from an earlier start counts: it spoke
+    the passage's own words, and may stop again before the end.
+    """
     return not _NOT_COMPLETABLE.intersection(metadata or {})
+
+
+def got_further(metadata, point):
+    """Whether a stopped take said more than the start it was finished from (always, if it was not)."""
+    record = (metadata or {}).get("completion")
+    if not isinstance(record, dict):
+        return True
+    return type(record.get("tail_start")) is int and point["start"] > record["tail_start"]
 
 
 def completion_point(report, text, *, vouched=False):
@@ -58,6 +80,9 @@ def completion_point(report, text, *, vouched=False):
     A take a person marked truncated is ``vouched``: what it said is right
     whatever verification found, so only the words where it stopped must
     be found in ``text``.
+    Either way it must have stopped at a natural break (``_PAUSE_END``:
+    the last word kept ends a sentence, or a clause at a semicolon or
+    colon), never mid-sentence.
     Returns ``{"start", "cut_seconds", "heard_words", "missing_words"}``.
     """
     if (not isinstance(report, dict) or report.get("word_timing_status") != "available"
@@ -70,8 +95,9 @@ def completion_point(report, text, *, vouched=False):
              and isinstance(word.get("end"), (int, float))]
     if len(heard) < MIN_HEARD_WORDS:
         return None
-    expected = [(match.start(), _word(match.group())) for match in re.finditer(r"\S+", text)]
-    expected = [item for item in expected if item[1]]
+    tokens = [(match.start(), _word(match.group()), match.group()) for match in re.finditer(r"\S+", text)]
+    tokens = [item for item in tokens if item[1]]
+    expected = [(start, word) for start, word, _ in tokens]
     heard_words = [_word(word["word"]) for word in heard]
     last = tuple(heard_words[-2:])
     ends = [index for index in range(2, len(expected))
@@ -84,6 +110,8 @@ def completion_point(report, text, *, vouched=False):
         return None
     same = sum(a == b for a, b in zip(heard_words, (word for _, word in expected[:first_missing])))
     if not vouched and same < 0.6 * min(count, first_missing):
+        return None
+    if not _PAUSE_END.search(tokens[first_missing - 1][2]):
         return None
     return {"start": expected[first_missing][0], "cut_seconds": float(heard[-1]["end"]),
             "heard_words": first_missing, "missing_words": len(expected) - first_missing}
@@ -159,15 +187,33 @@ def cut_sample(pcm, rate, cut_seconds):
     return min(len(samples), position + round(CUT_TAIL_SECONDS * rate))
 
 
-def history_turn(source_metadata, directory, cut, total, text_prefix):
-    """The kept start as a history turn: ``(tagged text, codes cut at the same point, speakers)``."""
+def _kept_codes(source_metadata, directory, cut, total):
+    """The source take's saved codes and how many frames cover its kept start, or ``(None, 0)``."""
     from .continuity_codes import load_codes
     marker = (source_metadata or {}).get("continuity_codes")
     if not isinstance(marker, dict):
-        return None
+        return None, 0
     payload = load_codes(Path(directory) / marker["file"], marker)
     frames = len(payload["codes"][0])
-    keep = max(1, min(frames, math.ceil(cut * frames / max(1, total))))
+    return payload, max(1, min(frames, math.ceil(cut * frames / max(1, total))))
+
+
+def _joined_codes(kept, keep, tail, text):
+    """Codes for the joined take: the kept start's frames, then the tail's (``None`` if either is missing)."""
+    if (kept is None or not isinstance(tail, dict) or not isinstance(tail.get("codes"), list)
+            or len(tail["codes"]) != len(kept["codes"]) or tail.get("codebook_size") != kept.get("codebook_size")):
+        return None
+    tag, controls = _LEADING_CONTROLS.match(kept["text"]).groups()
+    return {"codes": [list(head[:keep]) + list(rest) for head, rest in zip(kept["codes"], tail["codes"])],
+            "codebook_size": kept["codebook_size"], "text": f"{tag}{controls}{' '.join(text.split())}".rstrip(),
+            "speakers": list(kept["speakers"])}
+
+
+def history_turn(source_metadata, directory, cut, total, text_prefix):
+    """The kept start as a history turn: ``(tagged text, codes cut at the same point, speakers)``."""
+    payload, keep = _kept_codes(source_metadata, directory, cut, total)
+    if payload is None:
+        return None
     tag, controls = _LEADING_CONTROLS.match(payload["text"]).groups()
     words = " ".join(text_prefix.split())
     return {"text": f"{tag}{controls}{words}".rstrip(), "codes": [row[:keep] for row in payload["codes"]],
@@ -207,7 +253,11 @@ def complete(source, generate_tail, raw, seed, *, text, directory, config):
             output.setsampwidth(2)
             output.setframerate(rate)
             output.writeframes(pcm[:cut * 2] + tail_pcm)
-    metadata.pop("generated_codes", None)
+    kept, keep = _kept_codes(source["metadata"], directory, cut, total)
+    joined = _joined_codes(kept, keep, metadata.pop("generated_codes", None), text)
+    if joined is not None:
+        # Never chapter history (``_NOT_HISTORY``); the start of a further completion if this one stops too.
+        metadata["generated_codes"] = joined
     metadata["completion"] = {
         "version": COMPLETION_VERSION, "source_attempt": source["attempt"],
         "source_audio_sha256": audio_hash(source["wav"]), "kept_seconds": round(cut / rate, 3),

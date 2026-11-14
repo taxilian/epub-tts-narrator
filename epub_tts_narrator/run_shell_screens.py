@@ -177,7 +177,9 @@ class TakesScreen(Dialog):
                     "truncated": Text("truncated", style="yellow"), None: ""}
         sync_table(table, [(str(row["attempt"]), (
             str(row["attempt"]), Text("●", style="bold green") if row["accepted"] else "",
-            "passed" if row["passed"] else "rejected", _seconds(row["duration_seconds"]),
+            ("passed" if row["passed"] else "rejected")
+            + (f" · finished take {row['finished_from']}" if row.get("finished_from") else ""),
+            _seconds(row["duration_seconds"]),
             ", ".join(row["reasons"]) or "—", verdicts.get(row.get("verdict"), ""),
             "yes" if row["eligible"] else f"no: {row['ineligible_reason']}")) for row in self.rows])
         if self.highlight is not None:

@@ -31,6 +31,14 @@ from pathlib import Path
 NOTE = "Accepted by a person listening in the run shell"
 
 
+
+def _finished_from(record):
+    """The take a completion finished (``take_completion``), else ``None``."""
+    completion = (record.get("engine_metadata") or {}).get("completion")
+    source = completion.get("source_attempt") if isinstance(completion, dict) else None
+    return source if type(source) is int else None
+
+
 class TakeReview:
     """Takes of one passage, and a person's decisions about them. Safe to call from a UI thread."""
 
@@ -69,7 +77,7 @@ class TakeReview:
                 "reasons": list(row["reasons"]), "duration_seconds": row["duration_seconds"],
                 "transcript": row["transcript"], "expected_text": report.get("expected_text") or "",
                 "audio_path": str(row["audio_path"]), "learnable": self._learnable(report) is not None,
-                "verdict": marks.get(row["attempt"]),
+                "verdict": marks.get(row["attempt"]), "finished_from": _finished_from(record),
             })
         if used is not None and not any(row["accepted"] for row in rows):
             # The used take is not one of the listed attempts' audio (a repaired or
@@ -85,7 +93,7 @@ class TakeReview:
                     "reasons": list(report.get("reasons") or []), "duration_seconds": None,
                     "transcript": report.get("transcript") or "", "expected_text": report.get("expected_text") or "",
                     "audio_path": str(self.directory / used["audio_file"]), "learnable": False,
-                    "verdict": marks.get(used.get("attempt")),
+                    "verdict": marks.get(used.get("attempt")), "finished_from": _finished_from(used),
                 })
                 rows.sort(key=lambda row: row["attempt"] if type(row["attempt"]) is int else 0)
         return rows

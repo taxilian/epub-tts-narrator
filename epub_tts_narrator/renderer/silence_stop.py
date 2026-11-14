@@ -10,8 +10,8 @@ verification's own measure (25 ms windows below -60 dBFS RMS), for
 raises the usual unfinished-take error, which the render records as a rejected
 attempt and retries at once.
 
-A take may pause once for up to twice verification's internal-silence limit
-(2.5 seconds by default) and still be accepted, because assembly shortens the
+A take may pause once for up to three times verification's internal-silence
+limit (2.5 seconds by default) and still be accepted, because assembly shortens the
 pause (``stall_recovery``). The watch therefore waits longer than that
 (``STOP_SECONDS``) before it stops a take, so a take that would have resumed
 after such a pause and passed is never cut off. Takes that
@@ -31,10 +31,10 @@ import math
 
 import re
 
-# Longer than the longest single pause stall recovery accepts (2 x 2.5 s): a
+# Longer than the longest single pause stall recovery accepts (3 x 2.5 s): a
 # take that resumes after a pause it would accept must never be stopped. At
 # 3 s the watch cut such takes off, and they failed for their missing words.
-STOP_SECONDS = 5.5
+STOP_SECONDS = 8.0
 SILENCE_DBFS = -60.0
 WINDOW_SECONDS = 0.025
 # Frames decoded before the new ones so the codec has left context; a window
