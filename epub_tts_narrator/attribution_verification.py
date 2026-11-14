@@ -65,7 +65,8 @@ def findings(original, audited):
     originals = {segment["id"]: segment for segment in original["segments"]}
     chapters = {block["id"]: block["chapter_id"] for block in original["source"]["blocks"]}
     characters = {character["id"]: character for character in original["cast"]["characters"]}
-    labels = _role_labels(original["cast"]["roles"], characters, original["source"]["book"])
+    labels = _role_labels(original["cast"]["roles"], characters, original["source"]["book"],
+                          original["cast"]["voices"])
 
     def label(segment):
         role_ids = _role_ids(segment)

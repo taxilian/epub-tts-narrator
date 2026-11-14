@@ -47,7 +47,7 @@ def _manual_edit(document, proposal):
     roles = list(document["cast"]["roles"])
     roles_by_id = {role["id"]: role for role in roles}
     labels = _role_labels(roles, {row["id"]: row for row in document["cast"]["characters"]},
-                          document["source"]["book"])
+                          document["source"]["book"], document["cast"]["voices"])
     staged = deepcopy(proposal)
 
     while True:
@@ -193,9 +193,12 @@ class FindingReview:
         self.roles = list(document["cast"]["roles"])
         self.roles_by_id = {role["id"]: role for role in self.roles}
         self.characters = {row["id"]: row for row in document["cast"]["characters"]}
-        self.labels = _role_labels(self.roles, self.characters, document["source"]["book"])
+        voices = document["cast"]["voices"]
+        self.labels = _role_labels(self.roles, self.characters, document["source"]["book"], voices)
         from .speaker_decisions import _role_label
-        self.names = {role["id"]: _role_label(role, self.characters, document["source"]["book"]) for role in self.roles}
+        # A changed-voice state names its state, so "Belgarath" never becomes "Belgarath".
+        self.names = {role["id"]: _role_label(role, self.characters, document["source"]["book"], voices)
+                      for role in self.roles}
         self.decisions = {}
 
     def segment_id(self, index):

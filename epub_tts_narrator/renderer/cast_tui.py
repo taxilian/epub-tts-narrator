@@ -115,6 +115,9 @@ def _described(error):
         f"{type(error).__name__}: {text}" if text else type(error).__name__)
 
 
+VOICE_COLUMN = 44  # characters of a voice's name shown in the cast table
+
+
 class CastApp(CapturePrintMixin, App):
     """The casting screen. ``controller`` owns all state; this class only displays it."""
 
@@ -266,7 +269,10 @@ class CastApp(CapturePrintMixin, App):
         self.sub_title = summary
         rows = []
         for row, status, note in controller.visible():
-            rows.append((row["voice_id"], (label(row), Text(status, style=STATUS_STYLES.get(status, "")),
+            # A long label (a changed-voice state) is cut here so the table stays usable; the detail shows it whole.
+            name = label(row)
+            name = name if len(name) <= VOICE_COLUMN else name[:VOICE_COLUMN - 1].rstrip() + "…"
+            rows.append((row["voice_id"], (name, Text(status, style=STATUS_STYLES.get(status, "")),
                                             note.splitlines()[0][:80] if note else "")))
         sync_table(self.query_one("#voices", DataTable), rows)
         self.render_detail()

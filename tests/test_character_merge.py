@@ -449,6 +449,31 @@ class CastMergeActionTests(unittest.TestCase):
 
 
 class CastScreenMergeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_a_long_changed_voice_name_is_cut_in_the_table_and_shown_whole_in_the_detail(self):
+        import asyncio
+        from cast_tui_fixtures import FakePlayer, FakeSession, voice_row
+        from epub_tts_narrator.renderer.cast_tui import VOICE_COLUMN, CastApp
+        from epub_tts_narrator.renderer.cast_tui_model import CastController
+        from textual.widgets import DataTable
+        asyncio.get_running_loop().slow_callback_duration = 10
+        long_name = "Belgarath (condition: Weakened, rushed, unfocused from exhaustion, barely awake)"
+        session = FakeSession([voice_row("v-bel", "Belgarath"),
+                               voice_row("v-bel-tired", long_name,
+                                         derived={"voice_id": "v-bel", "kind": "condition", "instruction": "x"})])
+        controller = CastController(session, FakePlayer(), describe_error=str)
+        self.addCleanup(controller.close)
+        app = CastApp(controller, title="Fixture Book", startup=False)
+        async with app.run_test(size=(160, 45)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#voices", DataTable)
+            shown = str(table.get_row("v-bel-tired")[0])
+            self.assertEqual(len(shown), VOICE_COLUMN)
+            self.assertTrue(shown.endswith("…"))
+            table.focus()
+            table.move_cursor(row=1)
+            await pilot.pause()
+            self.assertIn(long_name, str(app.query_one("#detail").render()))
+
     async def test_j_picks_the_same_character_and_its_survivor_confirms_and_reopens_the_cast(self):
         plans, apply = await self.merge_in_cast_screen(fixed="")
         self.assertEqual(plans, [("v-ava", "v-ben", None), ("v-ava", "v-ben", "v-ben")])

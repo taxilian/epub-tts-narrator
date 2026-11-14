@@ -55,7 +55,7 @@ def _apply_decisions(expected, speaker_input, receipt):
     roles = expected["cast"]["roles"]
     characters = {row["id"]: row for row in expected["cast"]["characters"]}
     available = {role["id"]: role for role in roles}
-    labels = _role_labels(roles, characters, expected["source"]["book"])
+    labels = _role_labels(roles, characters, expected["source"]["book"], expected["cast"]["voices"])
     known_ids = {row["id"] for collection in expected["cast"].values() if isinstance(collection, list)
                  for row in collection if isinstance(row, dict) and isinstance(row.get("id"), str)}
     seen = set()

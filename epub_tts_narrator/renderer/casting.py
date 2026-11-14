@@ -451,8 +451,10 @@ class CastingSession:
                 base_names = [character["name"] for character in cast["characters"]
                               if character.get("voice_id") == derived.get("voice_id")]
                 base_label = ", ".join(base_names) or derived.get("voice_id")
-                label = (f"{base_label} ({derived['kind']} variant, cloned from {base_label}'s voice: "
-                         f"{derived['instruction'][:60]})")
+                # The same words the speaker lists use for this state; "cloned from" is the status note.
+                from ..speaker_decisions import _role_label
+                label = _role_label({"kind": "dialogue", "character_id": "base", "voice_id": voice_id},
+                                    {"base": {"name": base_label}}, self.bundle["source"]["book"], [profile])
             else:
                 narrators = list(dict.fromkeys(
                     character_names[role["character_id"]] for role in roles

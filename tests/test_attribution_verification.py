@@ -130,6 +130,22 @@ class AttributionVerificationTests(unittest.TestCase):
         self.assertTrue(result[1]["review_only"])
         self.assertEqual(result[1]["from_label"], result[1]["to_label"])
 
+    def test_a_changed_voice_state_is_labelled_by_its_state_not_as_the_same_character(self):
+        from epub_tts_narrator.attribution_manual_review import FindingReview
+        original = valid_document()
+        original["cast"]["voices"].append({"id": "v1_tired", "description": "Mara, exhausted.", "traits": [],
+            "derived_from": {"voice_id": "v1", "kind": "condition", "evidence": [{"block_id": "b1", "quote": "softly"}],
+                             "instruction": "Weakened, rushed, unfocused from exhaustion, barely able to keep going."}})
+        original["cast"]["roles"].append({"id": "mara_tired", "kind": "dialogue", "character_id": "c1",
+                                          "voice_id": "v1_tired", "description": "Mara speaking."})
+        audited = deepcopy(original)
+        audited["segments"][1].update(role_id="mara_tired", voice_id="v1_tired")
+        result = findings(original, audited)
+        state = "Mara (condition: Weakened, rushed, unfocused from exhaustion, barely able to…)"
+        self.assertEqual((result[0]["from_label"], result[0]["to_label"]), ("Mara", state))
+        review = FindingReview(original, audited, result)
+        self.assertEqual((review.names["mara"], review.names["mara_tired"]), ("Mara", state))
+
     def test_findings_display_unassigned_and_comma_joined_simultaneous_labels(self):
         original = add_tom(valid_document())
         audited = deepcopy(original)

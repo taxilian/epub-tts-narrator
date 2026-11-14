@@ -127,7 +127,8 @@ def passage_view(document, item, *, number, total, labels, suggestions, roles, p
             "roles": [{"role_id": role["id"], "label": _display(labels[role["id"]]), "kind": role["kind"],
                        "voice_id": role["voice_id"]} for role in roles],
             "labels": {role_id: _display(label) for role_id, label in labels.items()},
-            "names": {role["id"]: _display(_role_label(role, characters, document["source"]["book"]))
+            "names": {role["id"]: _display(_role_label(role, characters, document["source"]["book"],
+                                                       document["cast"]["voices"]))
                       for role in roles if role["id"] in labels},
             "error": None}
 
@@ -145,17 +146,33 @@ def _screen_chooser():
     return choose
 
 
-def _role_label(role, characters, book):
+_STATE_CHARACTERS = 60
+
+
+def _role_label(role, characters, book, voices=()):
+    """A person's name for a role. ``voices`` (the cast's voice records) lets a
+    character's changed-voice state (aging, a condition) read as that state,
+    e.g. "Belgarath (condition: weakened from exhaustion)", not as the character."""
     character = characters.get(role.get("character_id"))
     author = author_narrator_name(role, book)
     if author is not None:
         return f"{author} (author)"
     name = character["name"] if character else "Narrator" if role["kind"] == "narration" else role["description"]
-    return f"{name} (narrator)" if character and role["kind"] == "narration" else name
+    if character and role["kind"] == "narration":
+        return f"{name} (narrator)"
+    voice = next((row for row in voices if row.get("id") == role.get("voice_id")), None)
+    derived = voice.get("derived_from") if isinstance(voice, dict) else None
+    if character and isinstance(derived, dict):
+        state = " ".join(str(derived.get("instruction") or "").split()).rstrip(".")
+        if len(state) > _STATE_CHARACTERS:
+            state = state[:_STATE_CHARACTERS - 1].rstrip() + "…"
+        kind = derived.get("kind") or "changed voice"
+        return f"{name} ({kind}: {state})" if state else f"{name} ({kind})"
+    return name
 
 
-def _role_labels(roles, characters, book):
-    labels = {role["id"]: _role_label(role, characters, book) for role in roles}
+def _role_labels(roles, characters, book, voices=()):
+    labels = {role["id"]: _role_label(role, characters, book, voices) for role in roles}
     for describe in (lambda role: role.get("description", ""),
                      lambda role: characters.get(role.get("character_id"), {}).get("description", "")):
         groups = {}
@@ -333,7 +350,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
     characters = {row["id"]: row for row in result["cast"]["characters"]}
     roles = result["cast"]["roles"]
     roles_by_id = {role["id"]: role for role in roles}
-    labels = _role_labels(roles, characters, result["source"]["book"])
+    labels = _role_labels(roles, characters, result["source"]["book"], result["cast"]["voices"])
     blocks = result["source"]["blocks"]
     positions = {block["id"]: index for index, block in enumerate(blocks)}
     segments_by_block = {}
@@ -529,7 +546,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                 characters = {row["id"]: row for row in result["cast"]["characters"]}
                 roles = result["cast"]["roles"]
                 roles_by_id = {role["id"]: role for role in roles}
-                labels = _role_labels(roles, characters, result["source"]["book"])
+                labels = _role_labels(roles, characters, result["source"]["book"], result["cast"]["voices"])
                 decisions = []
             pending = unassigned_segments(result)
     if pending and chooser is None and not getattr(input_stream, "isatty", lambda: False)():

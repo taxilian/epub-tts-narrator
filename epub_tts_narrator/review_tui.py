@@ -88,7 +88,7 @@ class ReviewApp:
         self.roles = {role["id"]: role for role in document["cast"]["roles"]}
         self.labels = _role_labels(document["cast"]["roles"],
                                    {row["id"]: row for row in document["cast"]["characters"]},
-                                   document["source"]["book"])
+                                   document["source"]["book"], document["cast"]["voices"])
 
     def _manifest_hashes(self):
         return {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()

@@ -80,7 +80,7 @@ def _role_ids(segment):
 def _labels(document):
     return _role_labels(document["cast"]["roles"],
                         {row["id"]: row for row in document["cast"]["characters"]},
-                        document["source"]["book"])
+                        document["source"]["book"], document["cast"]["voices"])
 
 
 def _needs_review(segment):
