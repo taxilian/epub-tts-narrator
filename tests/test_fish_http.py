@@ -53,7 +53,7 @@ def echo(request):
 
 
 def wire_body(*, audio=None, codes=_DEFAULT, codebook_size=1024, history_turns=0, request=None,
-              sampling=None, seed=None):
+              sampling=None, seed=None, finish_reason=None):
     """A serve-protocol response body: WAV, generated codes, history and sampling used."""
     import msgpack
     body = {"audio": wav_bytes() if audio is None else audio, "codebook_size": codebook_size,
@@ -67,6 +67,8 @@ def wire_body(*, audio=None, codes=_DEFAULT, codebook_size=1024, history_turns=0
         body["codes"] = codes
     if history_turns is not None:
         body["history_turns"] = history_turns
+    if finish_reason is not None:
+        body["finish_reason"] = finish_reason
     return msgpack.packb(body, use_bin_type=True)
 
 
@@ -118,7 +120,8 @@ class FakeEngine:
                 raise EngineError(self.error)
             path.write_bytes(wav_bytes())
             return {"seed": seed, "codes": [[len(self.calls) % 1024] * 3 for _ in range(10)],
-                    "codebook_size": 1024, "history_turns": len(history), "history_sha256": "0" * 64}
+                    "codebook_size": 1024, "history_turns": len(history), "history_sha256": "0" * 64,
+                    **({"finish_reason": self.finish_reason} if getattr(self, "finish_reason", None) else {})}
         finally:
             self.active -= 1
 
@@ -285,11 +288,13 @@ class HistoryWireTransportTests(unittest.TestCase):
         self.applied = None  # a misbehaving worker's own sampling/seed, if set
         opener = Mock()
 
+        self.finish_reason = None  # a worker's reported finish reason, if set
+
         def respond(request, **kwargs):
             self.requests.append(request)
             if self.applied is not None:
                 return wire_response(headers=self.response_headers, **self.applied)
-            return wire_response(headers=self.response_headers, request=request)
+            return wire_response(headers=self.response_headers, request=request, finish_reason=self.finish_reason)
 
         opener.open.side_effect = respond
         patcher = patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener)
@@ -405,6 +410,22 @@ class HistoryWireTransportTests(unittest.TestCase):
                 self.assertEqual(payload["references"][0]["text"], "(A saved reference).")
                 self.assertEqual(payload["references"][0]["audio"], wav_bytes())
                 self.assertEqual(voice, original)
+
+    def test_a_take_the_worker_cut_after_going_silent_is_kept_only_for_chapter_speech(self):
+        self.finish_reason = "silence"
+        output = self.root / "chapter-take.wav"
+        metadata, codes, size = self.client()._generate_wire("<|speaker:0|> Hello.", [dict(self.voice, speaker=0)],
+                                                              [], output, seed=1)
+        self.assertEqual(metadata["finish_reason"], "silence")
+        self.assertTrue(output.exists())
+        # A preview or casting take has no chapter to verify it: still a failure.
+        preview = self.root / "preview-take.wav"
+        with self.assertRaisesRegex(EngineError, "did not finish the text: 'silence'"):
+            self.client().synthesize("Hello.", self.voice, preview, seed=1)
+        self.assertFalse(preview.exists())
+        self.finish_reason = "exploded"
+        with self.assertRaisesRegex(FishHTTPError, "unknown finish reason"):
+            self.client().synthesize("Hello.", self.voice, self.root / "odd-take.wav", seed=1)
 
     def test_dialogue_keeps_individual_reference_speaker_bindings(self):
         client = self.client()
@@ -575,6 +596,15 @@ class FishHTTPTests(unittest.TestCase):
         reference_paths = self.engine.calls[0]["reference_paths"]
         self.assertRegex(reference_paths[0], r"^request-\d{6}-speaker-0-reference\.wav$")
         self.assertRegex(reference_paths[1], r"^request-\d{6}-speaker-1-reference\.wav$")
+
+    def test_a_take_cut_after_going_silent_is_returned_with_its_finish_reason(self):
+        import msgpack
+        with self.post(self.json_body()) as response:
+            self.assertEqual(msgpack.unpackb(response.read(), raw=False)["finish_reason"], "eos")
+        self.engine.finish_reason = "silence"
+        with self.post(self.json_body()) as response:
+            result = msgpack.unpackb(response.read(), raw=False)
+        self.assertEqual((result["finish_reason"], result["audio"]), ("silence", wav_bytes()))
 
     def test_speakerless_reference_names_fall_back_to_their_index(self):
         with self.post(self.json_body()) as response:

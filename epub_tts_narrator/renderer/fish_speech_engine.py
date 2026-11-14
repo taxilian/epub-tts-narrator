@@ -277,12 +277,21 @@ class FishSpeechCudaEngine(HistorySynthesis):
                             model, prompt, max_new_tokens=max_new_tokens,
                             temperature=temperature, top_k=top_k, top_p=top_p,
                             watch=self._silence_watch(text, codec))
-                if finish_reason != "eos" or not len(frames):
+                if finish_reason not in {"eos", "silence"} or not len(frames):
                     raise EngineError(f"Drama 3 did not finish the text: {finish_reason!r}")
                 with self._codec_lock, torch.inference_mode():
                     generated = frames[:, 1:].T.contiguous()
                     audio = codec.from_indices(generated.to(codec.device)[None])[0].squeeze()
                 audio = audio.float().cpu().numpy().astype(np.float32)
+                if finish_reason == "silence":
+                    # Keep what it said before going silent; verification decides it.
+                    from .silence_stop import spoken_frames
+                    count = len(frames)
+                    keep = spoken_frames(audio, codec.sample_rate, count)
+                    if keep < 1:
+                        raise EngineError("Drama 3 did not finish the text: 'silence'")
+                    audio = audio[:round(len(audio) * keep / count)].copy()
+                    generated = generated[:, :keep].contiguous()
                 break
             else:
                 raise EngineError("Drama 3 prompt is too long even without chapter history")
@@ -306,7 +315,7 @@ class FishSpeechCudaEngine(HistorySynthesis):
             raise
         except Exception as exc:
             raise EngineError(f"Fish Speech Drama 3 generation failed: {exc}") from exc
-        metadata = {"finish_reason": "eos", "sample_rate": rate, "sample_count": len(audio),
+        metadata = {"finish_reason": finish_reason, "sample_rate": rate, "sample_count": len(audio),
                     "duration_seconds": len(audio) / rate, "seed": seed, "synthesis_text": text,
                     "history_turns": len(kept), "history_available": len(history),
                     "history_sha256": history_digest(kept)}

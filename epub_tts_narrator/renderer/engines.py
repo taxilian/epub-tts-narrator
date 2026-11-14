@@ -9,6 +9,7 @@ retries, and publication to the renderer.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import copy
 from copy import deepcopy
 from dataclasses import replace
 import gc
@@ -300,6 +301,11 @@ class HistorySynthesis:
         options = {"layout": layout} if layout != "directing" else {}
         metadata, codes, codebook_size = self._generate_wire(text, references, history, output_path,
                                                              seed=seed, **options)
+        if metadata.get("finish_reason") == "silence" and scope is None:
+            # Outside a chapter (casting, previews) nothing verifies a take
+            # that went silent before ending, so it stays a failure.
+            Path(output_path).unlink(missing_ok=True)
+            raise EngineError("Drama 3 did not finish the text: 'silence'")
         if requested is not None:
             metadata = {**metadata, "history_recovery": {"version": VERSION, "requested": requested,
                                                          "applied": applied}}
@@ -704,11 +710,14 @@ class Drama3MLXEngine(HistorySynthesis):
                         continue
                     if segment is None:
                         raise EngineError("Drama 3 must return exactly one audio segment")
+                if segment.finish_reason == "silence":
+                    # Keep what it said before going silent; verification decides it.
+                    segment = self._spoken_segment(segment, model)
                 codes = segment.codes
                 if (getattr(codes, "ndim", None) != 2 or getattr(codes.dtype, "kind", None) not in ("i", "u")
                         or codes.shape[0] != model.model.config.audio_decoder.num_codebooks):
                     raise EngineError("Drama 3 returned invalid generated codec tokens")
-                metadata = self._save_segment(segment, model, text, output_path)
+                metadata = self._save_segment(segment, model, text, output_path, allow_silence=True)
                 metadata.update(seed=seed, synthesis_text=text, history_turns=len(kept),
                                 history_available=len(history), history_sha256=history_digest(kept))
                 batch = getattr(self._batch_stats, "value", None) if self._scheduler is not None else None
@@ -725,10 +734,31 @@ class Drama3MLXEngine(HistorySynthesis):
             raise EngineError(f"Drama 3 generation failed: {exc}") from exc
         raise EngineError(f"Drama 3 prompt is too long even without chapter history: {overflow}")
 
+    def _spoken_segment(self, segment: Any, model: Any) -> Any:
+        """A silence-stopped segment cut after its last speech (``silence_stop.spoken_frames``)."""
+        from .silence_stop import spoken_frames
+        frames = segment.codes.shape[1]
+        keep = spoken_frames(segment.audio, model.sample_rate, frames)
+        if keep < 1:
+            raise EngineError("Drama 3 did not finish the text: 'silence'")
+        samples = round(len(segment.audio) * keep / frames)
+        cut = {"codes": segment.codes[:, :keep].copy(), "audio": segment.audio[:samples].copy()}
+        from dataclasses import is_dataclass
+        if is_dataclass(segment):
+            return replace(segment, **cut)
+        trimmed = copy.copy(segment)
+        for name, value in cut.items():
+            setattr(trimmed, name, value)
+        return trimmed
+
     def _save_segment(self, segment: Any, model: Any, expected_text: str,
-                      output_path: Path) -> dict[str, Any]:
-        """Shared design/clone failure contract before exclusive publication."""
-        if segment.finish_reason != "eos":
+                      output_path: Path, *, allow_silence: bool = False) -> dict[str, Any]:
+        """Shared design/clone failure contract before exclusive publication.
+
+        Only chapter synthesis (``allow_silence``) keeps a silence-stopped take,
+        already cut after its last speech; voice design and casting never do.
+        """
+        if segment.finish_reason != "eos" and not (allow_silence and segment.finish_reason == "silence"):
             raise EngineError(
                 f"Drama 3 did not finish the text: {segment.finish_reason!r}"
             )

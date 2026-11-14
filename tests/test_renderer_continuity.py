@@ -558,3 +558,50 @@ class ChosenReadingPolicyTests(unittest.TestCase):
         chunk = chosen(passages(["They saw Ce’Nedra’s face."])[0], "Ce’Nedra’s", READING + " Z")
         self.assertEqual(_chosen_readings({"kind": "speech", "chunk": chunk}), {READING})
         self.assertEqual(_chosen_readings({"kind": "speech", "chunk": passages(["Plain words."])[0]}), frozenset())
+
+
+
+class SilentModel(Model):
+    """Its ``silent`` call speaks one second, then goes silent until the watch stops it."""
+
+    def __init__(self, silent):
+        super().__init__()
+        self.silent = silent
+
+    def generate(self, text, **options):
+        import numpy as np
+        for result in super().generate(text, **options):
+            if len(self.calls) == self.silent:
+                index = len(self.calls)
+                tone = (0.15 * np.sin(2 * np.pi * (200 + 20 * index) * np.arange(44100) / 44100)).astype(np.float32)
+                result = SimpleNamespace(text=result.text, codes=np.full((10, 20), index, dtype=np.int64),
+                                         audio=np.concatenate([tone, np.zeros(3 * 44100, dtype=np.float32)]),
+                                         finish_reason="silence")
+            yield result
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required")
+class SilenceStoppedHistoryTests(unittest.TestCase):
+    setUp = ContinuityTests.setUp
+    run_chapter = ContinuityTests.run_chapter
+
+    def test_a_kept_stopped_take_is_cut_used_and_never_heard_as_history(self):
+        import soundfile
+        self.model = self.engine._model = SilentModel(silent=2)
+        self.verifier = Verifier(self.model)
+        self.run_chapter(self.chunks[:3])
+        # The third line hears the first, not the take that went silent.
+        self.assertEqual(histories(self.model)[2], [tagged("First words.")])
+        accepted = [read_json(path) for path in (self.root / "work" / "clips").glob("*/accepted.json")]
+        stopped = [record for record in accepted if record["engine_metadata"].get("finish_reason") == "silence"]
+        self.assertEqual(len(stopped), 1)
+        self.assertTrue(stopped[0]["report"]["passed"])
+        self.assertLess(stopped[0]["engine_metadata"]["duration_seconds"], 1.6)
+
+    def test_outside_a_chapter_a_stopped_take_is_still_a_failure(self):
+        from epub_tts_narrator.renderer.engines import EngineError
+        self.model = self.engine._model = SilentModel(silent=1)
+        path = self.root / "preview-take.wav"
+        with self.assertRaisesRegex(EngineError, "did not finish the text: 'silence'"):
+            self.engine.synthesize("Preview words.", self.voices["v1"], path, seed=1)
+        self.assertFalse(path.exists())

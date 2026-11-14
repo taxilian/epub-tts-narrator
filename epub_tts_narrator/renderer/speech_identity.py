@@ -304,6 +304,11 @@ def single_speech_recovery_part(request, part):
     actual = deepcopy(dict(request))
     actual.pop("synthesis_identity", None)
     actual["chunk"]["spoken_text"] = part["text"]
+    if "expressive_performance" in actual["chunk"]:
+        # The part keeps exactly its own slice of the line's scoped controls.
+        from ..performance_plan import slice_performance
+        actual["chunk"]["expressive_performance"] = slice_performance(
+            request["chunk"]["expressive_performance"], request["chunk"]["spoken_text"], part["start"], part["end"])
     return actual
 
 

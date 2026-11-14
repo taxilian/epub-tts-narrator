@@ -157,6 +157,11 @@ def _failure_passage(bundle, chapter, linkage):
 _TRUNCATION_SPLIT_THRESHOLD = 2
 
 
+def _rewrite_callback(synthesize_part):
+    """A part callback usable for a rewritten line, or None when it binds scoped controls by span."""
+    return None if getattr(synthesize_part, "needs_span", False) else synthesize_part
+
+
 def _seed(base, key, attempt):
     return (base + int(digest(key)[:8], 16) + attempt) % 2**32
 
@@ -448,9 +453,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
     resolver = getattr(verifier, "speech_resolver", None)
     from .performance_runtime import is_expressive
     if request.get("kind") == "speech" and is_expressive(request.get("chunk", {})):
-        # Text-only sentence recovery cannot safely rebind scoped controls.
+        # Sentence recovery gives each part its exact slice of the scoped
+        # controls; a line whose split would cut a pronunciation cannot split.
         # Paragraph fallback may still use its original, fully bound turns.
-        allow_split = False
+        from .speech_recovery import scoped_split_parts
+        if scoped_split_parts(request.get("chunk")) is None:
+            allow_split = False
     adaptive = (allow_resolution and resolver is not None and purpose == "speech"
                 and "recovery" not in request
                 and request.get("kind") in {"speech", "speech_recovery_part", "paragraph_speech"})
@@ -1082,6 +1090,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             report = _heard_variant_check(report, config, verifier, request_hash, wav, purpose, notify)
             if "history_echo" not in report:
                 report = _skipped_word_check(report, verifier, request_hash, wav, directory, purpose, notify, metadata)
+        if (purpose == "speech" and report.get("passed") is not True
+                and (metadata or {}).get("finish_reason") == "silence"):
+            # A take that went silent before ending and did not pass is a
+            # truncation (split recovery), never a best-effort candidate.
+            report = {**report, "generation_stopped": "silence"}
         record = {
             "request_hash": digest(request), "request": request, "attempt": attempt, "seed": seed,
             "validation_key": validation_key, "report": report, "engine_metadata": metadata,
@@ -2520,7 +2533,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                         return verified_take(
                             text, generate, directory, request, verifier, config,
                             notify=notify, retry_budget=retry_budget, seed_identity=identity,
-                            generate_repaired=generate_repaired or synthesize_part,
+                            generate_repaired=generate_repaired or _rewrite_callback(synthesize_part),
                             generate_plain=generate_plain, resolution_episode=resolution_episode,
                             generate_direction=generate_direction,
                             generate_plan_part=generate_plan_part,
@@ -2546,7 +2559,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                         result = verified_take(text, generate, directory, request,
                                                verifier, config, notify=notify, retry_budget=retry_budget,
                                                seed_identity=identity,
-                                               generate_repaired=generate_repaired or synthesize_part,
+                                               generate_repaired=generate_repaired or _rewrite_callback(synthesize_part),
                                                generate_plain=generate_plain,
                                                generate_direction=generate_direction,
                                                generate_plan_part=generate_plan_part,
@@ -2696,7 +2709,21 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                 return {'synthesis_text': prepared, **metadata}
             return metadata
 
-        recovery = ({'generate_plan_part': synthesize_plan_part} if is_expressive(chunk) else {
+        def synthesize_scoped_part(text, path, seed, v=voice, span=None):
+            # One sentence of a line with scoped controls, with exactly its slice of them.
+            from ..performance_plan import slice_performance
+            if span is None or chunk["spoken_text"][span[0]:span[1]] != text:
+                raise ValueError("A sentence part of speech with scoped controls needs its exact span")
+            performance = slice_performance(chunk["expressive_performance"], chunk["spoken_text"], *span)
+            return engine.synthesize(text, v, path, seed=seed, direction=direction, performance=performance,
+                                     traits=expressive_options.get("traits", ""))
+        synthesize_scoped_part.needs_span = True
+
+        from .speech_recovery import scoped_split_parts
+        recovery = ({'generate_plan_part': synthesize_plan_part,
+                     **({'synthesize_part': synthesize_scoped_part}
+                        if len(speakers) == 1 and scoped_split_parts(chunk) is not None else {})}
+                    if is_expressive(chunk) else {
             "synthesize_part": synthesize_part, "generate_plain": synthesize_plain,
             "generate_direction": synthesize_direction, "generate_plan_part": synthesize_plan_part})
         wav, accepted = take(chunk["spoken_text"], generate, request, **recovery)

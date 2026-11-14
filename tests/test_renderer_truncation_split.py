@@ -130,5 +130,63 @@ class TruncationSplitTests(unittest.TestCase):
         self.assertFalse((joined / "accepted.json").exists())
 
 
+
+
+class SilentStopEngine(ResolutionEngine):
+    """Whole takes come back cut after the silence watch stopped them, saying ``heard``."""
+
+    def __init__(self, registry, heard):
+        super().__init__(registry)
+        self.heard = lambda text, number: heard if text == TEXT else text
+
+    def synthesize(self, text, voice, path, *, seed, direction=""):
+        metadata = super().synthesize(text, voice, path, seed=seed, direction=direction)
+        return {**metadata, "finish_reason": "silence"} if text == TEXT else metadata
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe required for truncation recovery")
+class SilenceStoppedTakeTests(unittest.TestCase):
+    """A take the silence watch stopped is kept and verified, not thrown away."""
+
+    setUp = TruncationSplitTests.setUp
+    render_chunk = TruncationSplitTests.render_chunk
+    call_texts = TruncationSplitTests.call_texts
+    markers = TruncationSplitTests.markers
+
+    def test_a_stopped_take_that_said_every_word_is_used(self):
+        self.engine = SilentStopEngine(self.registry, TEXT)
+        result, accepted = self.render_chunk()
+        self.assertEqual(self.call_texts(), [TEXT])
+        self.assertTrue(accepted["report"]["passed"])
+        record = read_json(Path(result["wav_path"]).parent / "accepted.json")
+        self.assertEqual(record["engine_metadata"]["finish_reason"], "silence")
+        self.assertEqual(self.markers(), [])
+
+    def test_a_stopped_take_missing_words_is_a_truncation_that_splits(self):
+        self.engine = SilentStopEngine(self.registry, FIRST)
+        result, accepted = self.render_chunk()
+        self.assertEqual(self.call_texts(), [TEXT, TEXT, FIRST, SECOND])
+        self.assertTrue(accepted["report"]["passed"])
+        self.assertEqual(len(self.markers()), 1)
+        stopped = [read_json(path)["report"] for path in (self.work / "clips").glob("*/attempt-*.json")
+                   if read_json(path)["request"]["kind"] == "speech" and "recovery" not in read_json(path)["request"]
+                   and read_json(path)["request"]["chunk"]["spoken_text"] == TEXT]
+        self.assertEqual([report.get("generation_stopped") for report in stopped], ["silence", "silence"])
+        self.assertTrue(all(report["passed"] is False for report in stopped))
+
+    def test_a_stopped_take_is_never_a_best_effort_choice(self):
+        from epub_tts_narrator.renderer.exhaustion_selection import select_retained
+        self.engine = SilentStopEngine(self.registry, FIRST)
+        # Every take stops short, parts included, so recovery runs out.
+        self.engine.heard = lambda text, number: "Arrgh the pain"
+        with self.assertRaises(SpeechVerificationFailed):
+            self.render_chunk()
+        directory = next(path.parent for path in (self.work / "clips").glob("*/attempt-001.json")
+                         if read_json(path)["request"]["kind"] == "speech")
+        request = read_json(directory / "attempt-001.json")["request"]
+        with self.assertRaisesRegex(ValueError, "went silent before finishing"):
+            select_retained(directory, request, self.client)
+
+
 if __name__ == "__main__":
     unittest.main()

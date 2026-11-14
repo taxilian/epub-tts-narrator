@@ -15,9 +15,17 @@ silence that is not a requested pause, so a take that resumes after the watch
 would have stopped it is never one that could have been accepted. Takes that
 end on their own are bit-identical with and without the watch: it only reads
 frames, never the sampler, which is why it is not part of any engine or cache
-identity. The rare take that ends in more than 3 seconds of trailing silence
-is retried instead of accepted.
+identity.
+
+A chapter take the watch stopped is not thrown away: ``spoken_frames`` cuts it
+after its last speech (plus ``TRAILING_KEEP_SECONDS``), and the engine returns
+that audio with ``finish_reason: "silence"``. Verification then decides it like
+any take: when it said every word it is a complete rendition that only failed
+to end, and when it stopped mid-line it is rejected as a truncation (it never
+becomes chapter history or a best-effort candidate).
 """
+
+import math
 
 import re
 
@@ -35,6 +43,8 @@ CONTEXT_FRAMES = 4
 CHECK_FRAMES = 44
 SILENT_CHECK_FRAMES = 11
 
+TRAILING_KEEP_SECONDS = 0.25
+
 _PAUSE = re.compile(r"\[pause for ([0-9]+(?:\.[0-9]+)?) seconds\]")
 
 
@@ -43,6 +53,28 @@ def stop_seconds(text: str) -> float:
     if not isinstance(text, str):
         raise TypeError("text must be a string")
     return STOP_SECONDS + sum(float(value) for value in _PAUSE.findall(text))
+
+
+def spoken_frames(audio, sample_rate, frames):
+    """Frames of a silence-stopped take through its last speech plus a short tail; 0 if it never spoke.
+
+    Speech is verification's measure again: a 25 ms window at or above
+    -60 dBFS RMS. ``audio`` is the decoded take of ``frames`` codec frames.
+    """
+    import numpy as np
+    samples = np.asarray(audio, dtype=np.float64).reshape(-1)
+    if type(frames) is not int or frames < 1 or not len(samples):
+        return 0
+    window = max(1, round(sample_rate * WINDOW_SECONDS))
+    count = len(samples) // window
+    if not count:
+        return 0
+    power = (samples[:count * window].reshape(count, window) ** 2).mean(axis=1)
+    loud = np.nonzero(power >= (10 ** (SILENCE_DBFS / 20)) ** 2)[0]
+    if not len(loud):
+        return 0
+    end = min(len(samples), (int(loud[-1]) + 1) * window + round(sample_rate * TRAILING_KEEP_SECONDS))
+    return min(frames, math.ceil(end * frames / len(samples)))
 
 
 class SilenceWatch:

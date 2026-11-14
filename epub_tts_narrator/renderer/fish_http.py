@@ -483,6 +483,9 @@ class FishHTTPEngine(HistorySynthesis):
                 turns = result.get("history_turns")
                 if type(turns) is not int or not 0 <= turns <= len(history):
                     raise FishHTTPError("Fish HTTP response must report the history turns it used")
+                finish_reason = result.get("finish_reason", "eos")
+                if finish_reason not in {"eos", "silence"}:
+                    raise FishHTTPError("Fish HTTP response reported an unknown finish reason", retryable=False)
                 if result.get("history_layout", "directing") != layout:
                     raise FishHTTPError(f"Render worker {self.name} did not apply the requested "
                                         f"{layout!r} history layout", retryable=False)
@@ -506,7 +509,7 @@ class FishHTTPEngine(HistorySynthesis):
                                 seed_requested=seed,
                                 seed_applied=True,
                                 history_turns=turns, history_available=len(history),
-                                history_sha256=result.get("history_sha256"))
+                                history_sha256=result.get("history_sha256"), finish_reason=finish_reason)
                 if layout != "directing":
                     metadata["history_layout"] = layout
                 return metadata, result["codes"], result["codebook_size"]

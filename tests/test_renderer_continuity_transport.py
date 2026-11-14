@@ -278,9 +278,16 @@ class FishSpeechCudaEngineTests(unittest.TestCase):
         self.assertIsInstance(watch, SilenceWatch)
         self.assertEqual(watch.limit, stop_seconds("<|speaker:0|> New line."))
 
-    def test_a_take_ended_by_silence_is_an_unfinished_take_and_is_never_published(self):
+    def test_a_take_ended_by_silence_keeps_what_it_said_for_verification(self):
+        calls, (metadata, codes, size) = self.run_wire([], finish="silence")
+        self.assertEqual(metadata["finish_reason"], "silence")
+        self.assertEqual(len(list(self.root.glob("take-*.wav"))), 1)
+
+    def test_a_take_that_went_silent_without_speaking_is_never_published(self):
         from epub_tts_narrator.renderer.engines import EngineError
-        with self.assertRaisesRegex(EngineError, "did not finish the text: 'silence'"):
+        quiet = __import__("numpy").zeros(44100, dtype="float32")
+        with patch("numpy.full", lambda *args, **kwargs: quiet), \
+                self.assertRaisesRegex(EngineError, "did not finish the text: 'silence'"):
             self.run_wire([], finish="silence")
         self.assertEqual(list(self.root.glob("take-*.wav")), [])
 

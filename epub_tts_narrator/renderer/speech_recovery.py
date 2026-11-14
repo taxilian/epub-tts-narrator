@@ -53,6 +53,29 @@ def split_recovery_text(text):
     return _split_at_boundaries(text, candidates)
 
 
+def scoped_split_parts(chunk):
+    """Sentence parts of a single-speech chunk whose scoped controls each part can carry, or None.
+
+    A chunk without performance controls splits as ``split_recovery_text``
+    does. With controls, every part must take its own exact slice of them
+    (``performance_plan.slice_performance``): a split point inside a chosen
+    pronunciation makes the split unavailable rather than losing the control.
+    """
+    if not isinstance(chunk, dict):
+        return None
+    text = chunk.get("spoken_text")
+    parts = split_recovery_text(text)
+    if parts is None or "expressive_performance" not in chunk:
+        return parts
+    from ..performance_plan import slice_performance
+    try:
+        for part in parts:
+            slice_performance(chunk["expressive_performance"], text, part["start"], part["end"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return parts
+
+
 def _split_at_boundaries(text, candidates):
     """Choose bounded exact slices without leaving single-word fragments."""
     from .quality import normalize_words
@@ -235,6 +258,12 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
         bind_single_inputs = bind_single_inputs or supported_request(parent_request) is not None
     if parent_request['kind'] == 'speech' and callable(synthesize_plan_part):
         bind_single_inputs = True
+    # A line with scoped controls: each part is synthesized and verified with
+    # its exact slice of them (``speech_identity.single_speech_recovery_part``).
+    scoped = getattr(synthesize_part, "needs_span", False)
+    if scoped and (parent_request["kind"] != "speech" or not bind_single_inputs
+                   or scoped_split_parts(parent_request["chunk"]) is None):
+        raise RenderBlocked("Speech with scoped controls has no split that keeps every control")
 
     def assemble(path, seed):
         verified, audit = [], []
@@ -251,7 +280,10 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
                 if not _legacy_accepted_part(legacy_directory, child_request):
                     child_request["synthesis_request"] = single_speech_recovery_part(parent_request, part)
             child_directory = _directory(directory / "parts" / digest(child_request))
-            def generate_part(output, child_seed, piece=part["text"]):
+            def generate_part(output, child_seed, piece=part["text"], span=(part["start"], part["end"])):
+                if scoped:
+                    # A part of a line with scoped controls carries its own slice of them.
+                    return synthesize_part(piece, output, child_seed, span=span)
                 return synthesize_part(piece, output, child_seed)
             notify(f"  Recovery part {number}/{len(request['recovery']['parts'])}: checking saved audio.")
             from .fragment_recovery import fragment_part_take
@@ -263,7 +295,7 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
                 generate_plan_part=(synthesize_plan_part if "synthesis_request" in child_request else None),
                 resolution_episode=resolution_episode,
                 episode_reserve=len(request["recovery"]["parts"]) - number,
-                allow_fragments=parent_request["kind"] == "speech")
+                allow_fragments=parent_request["kind"] == "speech" and not scoped)
             verified.append((wav, record))
             audit.append({**part, "request_hash": record["request_hash"],
                           "audio_sha256": record["audio_sha256"],

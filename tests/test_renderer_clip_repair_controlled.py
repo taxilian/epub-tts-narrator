@@ -1,3 +1,4 @@
+from pathlib import Path
 from copy import deepcopy
 import hashlib
 import unittest
@@ -401,3 +402,73 @@ class ControlledClipRepairTests(unittest.TestCase):
         self.assertEqual(len(self.client.repair_calls), 1)
         self.assertEqual(len(self.client.review_calls), 2)
         self.assertTrue(self.accepted_record(result)['report']['passed'])
+
+
+
+SCOPED = 'Arrgh the pain has returned. Ce’Nedra waited outside.'
+FIRST_SENTENCE, SECOND_SENTENCE = 'Arrgh the pain has returned. ', 'Ce’Nedra waited outside.'
+READING = 'S EH2 N EH1 D R AH0'
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, 'FFmpeg and ffprobe required')
+class ScopedSentenceSplitTests(unittest.TestCase):
+    """A silent line with a chosen pronunciation splits, each part carrying its own controls."""
+
+    setUpFixture = clip_repair_tests.BroadRepairTests.setUpFixture
+    render_chunk = clip_repair_tests.BroadRepairTests.render_chunk
+    accepted_record = clip_repair_tests.BroadRepairTests.accepted_record
+
+    def setUp(self):
+        self.setUpFixture()
+        self.client = clip_repair_tests.BroadClient()
+        self.verifier = RecurringSpeechVerifier(self.base, SpeechResolver(self.client))
+        text = SCOPED
+        start = text.index('Ce’Nedra')
+        self.chunk = speech_request(self.voice, text)['chunk']
+        self.chunk['segment'].update(text=text, start=0, end=len(text), delivery={'direction': '', 'evidence': []})
+        self.chunk.update(spoken_text=text, spoken_start=0, spoken_end=len(text),
+                          source_ranges=[{'start': 0, 'end': len(text)}], chunk_id='scoped-split',
+                          expressive_direction='', expressive_traits={},
+                          expressive_performance={'version': 1, 'text_sha256': text_sha256(text), 'controls': [
+                              {'kind': 'pronunciation', 'start': start, 'end': start + 8, 'text': 'Ce’Nedra',
+                               'alphabet': 'cmu_arpabet', 'phonemes': READING}]})
+
+        def synthesize(text, voice, path, *, seed, direction='', performance=None, traits=''):
+            prepared, compiled, metadata = prepare_synthesis(text, direction, performance=performance, traits=traits)
+            self.engine.calls.append({'text': text, 'compiled': compiled, 'performance': deepcopy(performance)})
+            if text == SCOPED:
+                raise EngineError("Drama 3 did not finish the text: 'silence'")
+            write_tone(path, frequency=220 + len(self.engine.calls) * 31)
+            self.registry[hashlib.sha256(pcm(path)).hexdigest()] = text.strip()
+            return {'fixture': True, **metadata, 'synthesis_text': compiled}
+
+        self.engine.synthesize = synthesize
+
+    def test_silent_whole_takes_split_into_parts_with_their_own_controls(self):
+        result, acceptance = self.render_chunk()
+        self.assertTrue(acceptance['report']['passed'])
+        self.assertEqual([call['text'] for call in self.engine.calls],
+                         [SCOPED, SCOPED, FIRST_SENTENCE, SECOND_SENTENCE])
+        self.assertEqual(self.engine.calls[2]['performance']['controls'], [])
+        self.assertEqual(self.engine.calls[3]['performance']['controls'], [
+            {'kind': 'pronunciation', 'start': 0, 'end': 8, 'text': 'Ce’Nedra', 'alphabet': 'cmu_arpabet',
+             'phonemes': READING}])
+        self.assertIn(f'<|phoneme_start|>{READING}<|phoneme_end|>', self.engine.calls[3]['compiled'])
+        self.assertEqual(self.client.repair_calls, [])
+        record = self.accepted_record(result)
+        self.assertEqual(record['request']['recovery']['strategy'], 'sentence_split')
+        # Each part was verified against its own slice of the controls.
+        parts = {read_json(path)['request']['synthesis_request']['chunk']['spoken_text']:
+                 read_json(path)['request']['synthesis_request']['chunk']['expressive_performance']
+                 for path in Path(result['wav_path']).parent.glob('parts/*/accepted.json')}
+        self.assertEqual(parts[SECOND_SENTENCE], self.engine.calls[3]['performance'])
+        # A rerun reuses the join without new takes.
+        self.assertEqual(self.render_chunk(), (result, acceptance))
+        self.assertEqual(len(self.engine.calls), 4)
+
+    def test_a_split_that_would_cut_a_pronunciation_is_not_offered(self):
+        from epub_tts_narrator.renderer.speech_recovery import scoped_split_parts
+        self.assertEqual([part['text'] for part in scoped_split_parts(self.chunk)], [FIRST_SENTENCE, SECOND_SENTENCE])
+        control = self.chunk['expressive_performance']['controls'][0]
+        control.update(start=20, end=len(SCOPED) - 3, text=SCOPED[20:len(SCOPED) - 3])
+        self.assertIsNone(scoped_split_parts(self.chunk))

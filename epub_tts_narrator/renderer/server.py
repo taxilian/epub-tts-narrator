@@ -625,6 +625,9 @@ class _Handler(BaseHTTPRequestHandler):
                     "history_turns": generated["history_turns"],
                     "history_sha256": generated["history_sha256"],
                     "history_layout": generated.get("history_layout", "directing"),
+                    # "silence": the take went silent before ending and was cut
+                    # after its last speech; the client verifies it.
+                    "finish_reason": generated.get("finish_reason", "eos"),
                     "sampling": sampling, "seed": seed}, use_bin_type=True)
                 size = len(payload)
                 self.send_response(200)
@@ -641,6 +644,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self.request_id,
                     f"completed in {time.monotonic() - self.request_started:.2f}s: "
                     f"{audio['duration_seconds']:.2f}s audio, {audio['sample_rate']} Hz, {size} bytes"
+                    + ("; the take went silent and was cut after its last speech"
+                       if generated.get("finish_reason") == "silence" else "")
                     + batch_summary(generated.get("batch")),
                 )
         except (BrokenPipeError, ConnectionResetError, TimeoutError):

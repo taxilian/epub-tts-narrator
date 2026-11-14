@@ -114,5 +114,23 @@ class SilenceWatchTests(unittest.TestCase):
             stop_seconds(None)
 
 
+class SpokenFramesTests(unittest.TestCase):
+    """A stopped take is cut after its last speech, at a frame boundary."""
+
+    def test_a_take_is_cut_after_its_last_speech_with_a_short_tail(self):
+        from epub_tts_narrator.renderer.silence_stop import TRAILING_KEEP_SECONDS, spoken_frames
+        speech, silence = 40, 70
+        audio = np.concatenate([np.full(speech * HOP, 0.3), np.zeros(silence * HOP)]).astype(np.float32)
+        keep = spoken_frames(audio, RATE, speech + silence)
+        tail = round(TRAILING_KEEP_SECONDS * RATE / HOP)
+        self.assertGreaterEqual(keep, speech)
+        self.assertLessEqual(keep, speech + tail + 1)
+
+    def test_a_take_that_never_spoke_keeps_nothing(self):
+        from epub_tts_narrator.renderer.silence_stop import spoken_frames
+        self.assertEqual(spoken_frames(np.zeros(50 * HOP, dtype=np.float32), RATE, 50), 0)
+        self.assertEqual(spoken_frames(np.zeros(0, dtype=np.float32), RATE, 0), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

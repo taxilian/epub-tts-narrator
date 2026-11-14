@@ -231,7 +231,10 @@ class ChapterContinuity:
         from .stall_recovery import recovered
         # A take kept despite one long pause is shortened only at assembly;
         # as history its stalled codes could teach later takes to stall.
-        if not scope["history"] or _NOT_HISTORY.intersection(metadata) or recovered(accepted.get("report")):
+        # A take that went silent before ending (kept, cut after its last
+        # speech) would teach later takes to stop.
+        if (not scope["history"] or _NOT_HISTORY.intersection(metadata) or recovered(accepted.get("report"))
+                or metadata.get("finish_reason") == "silence"):
             self.drifted += drifted
             return
         marker = metadata.get("continuity_codes")
