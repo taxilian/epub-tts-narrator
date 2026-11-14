@@ -256,6 +256,24 @@ class RendererBundleTests(unittest.TestCase):
             {"start": 1, "end": 3}, {"start": 4, "end": 6}, {"start": 7, "end": 8},
         ])
 
+    def test_a_long_passage_is_cut_at_a_sentence_then_a_clause_then_a_phrase_then_a_word(self):
+        def pieces(text, maximum):
+            return [text[a:b] for a, b in split_text(text, maximum)]
+        # A sentence end anywhere in the piece wins, even early.
+        self.assertEqual(pieces("No. He went on and on about the long road ahead of them all.", 40),
+                         ["No. ", "He went on and on about the long road ", "ahead of them all."])
+        # Within one long sentence: a semicolon or colon, then a comma or dash, then a space.
+        self.assertEqual(pieces("He waited there for her; she came back late with the others.", 40)[0],
+                         "He waited there for her; ")
+        self.assertEqual(pieces("He waited there for her, and she came back late with the rest.", 40)[0],
+                         "He waited there for her, ")
+        self.assertEqual(pieces("He held the image\u2014the Orb in his hand\u2014and felt panic rise.", 40)[0],
+                         "He held the image\u2014the Orb in his hand\u2014")
+        self.assertEqual(pieces("He walked along the road toward the distant town.", 30)[0], "He walked along the road ")
+        # Closing quotes stay with the sentence they close.
+        self.assertEqual(pieces("\u201cGo now.\u201d She stayed by the door for a long while.", 30)[0],
+                         "\u201cGo now.\u201d ")
+
     def test_meaningful_symbol_only_segments_are_not_silently_discarded(self):
         for text in ("%", "+", "&", "=", "$"):
             with self.subTest(text=text):

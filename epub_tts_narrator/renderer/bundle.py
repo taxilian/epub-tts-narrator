@@ -152,15 +152,35 @@ def spoken_mapping(row):
     raise ValueError("Unsupported spoken_text transformation; explicit source mapping is required")
 
 
+# Where a too-long passage is cut, best first: after a sentence (anywhere in
+# the piece: paragraph grouping joins short pieces again), else after a
+# clause at a semicolon or colon, else after a comma or dash, else between
+# words. Closing quotes and brackets stay with what they close.
+_CLOSERS = "[\"'\u201d\u2019\u00bb)\\]]*"
+_SENTENCE_CUT = re.compile(rf"[.!?\u2026]{_CLOSERS}\s+")
+_CLAUSE_CUT = re.compile(rf"[;:]{_CLOSERS}\s+")
+_PHRASE_CUT = re.compile(rf",{_CLOSERS}\s+|[\u2014\u2013]\s*|\s--\s*")
+
+
+def _cut(piece, maximum):
+    """Where to end ``piece`` (a full-length slice), or 0 when it has no break at all."""
+    sentences = [match.end() for match in _SENTENCE_CUT.finditer(piece)]
+    if sentences:
+        return sentences[-1]
+    for pattern in (_CLAUSE_CUT, _PHRASE_CUT):
+        breaks = [match.end() for match in pattern.finditer(piece) if match.end() >= maximum // 4]
+        if breaks:
+            return breaks[-1]
+    return piece.rfind(" ") + 1
+
+
 def split_text(text, maximum):
-    """Contiguous, exact slices; prefer sentence/word boundaries."""
+    """Contiguous, exact slices of at most ``maximum`` characters, cut at the best break (``_cut``)."""
     start = 0
     while start < len(text):
         end = min(start + maximum, len(text))
         if end < len(text):
-            piece = text[start:end]
-            boundaries = [m.end() for m in re.finditer(r'[.!?][”"\']?\s+', piece)]
-            cut = boundaries[-1] if boundaries and boundaries[-1] >= maximum // 3 else piece.rfind(" ") + 1
+            cut = _cut(text[start:end], maximum)
             if cut > 0:
                 end = start + cut
         yield start, end
