@@ -89,8 +89,8 @@ class RenderProgressWorkflowTests(unittest.TestCase):
             self.assertFalse(any(hidden in line for line in self.messages), hidden)
         self.assertFalse(any("empty" in line.lower() for line in self.messages))
         self.assertTrue(any("Processing chapter 2 / 2:" in line for line in self.messages))
-        # The live progress row counts visible work: source chapter 2 is the 1st of 1 spoken.
-        self.assertTrue(any("Chapter 1 / 1 (book" in line for line in self.messages))
+        # The live progress row names the chapter by its own number, then its place among the spoken ones.
+        self.assertTrue(any("Chapter 2, 1 of 1 (book" in line for line in self.messages))
         completion = next(line for line in self.messages if "Completed chapter 2 / 2" in line)
         self.assertIn("1 / 1 selected chapters ready", completion)
         self.assertFalse(any("chapter 2 / 1" in line.lower() for line in self.messages))

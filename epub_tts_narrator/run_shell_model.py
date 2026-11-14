@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import itertools
 import re
 import threading
 import time
@@ -155,7 +156,8 @@ class RunModel:
         self.rows = {}            # board key -> {"scope", "snapshot", "text", "updated"}
         self.completed = {}       # book (or None) -> chapters whose row closed
         self.books = {}           # book -> True/False final outcome
-        self.failures = []        # {"kind", "scope", "error", "record", "attempt"}
+        self.failures = []        # {"id", "kind", "scope", "error", "record", "attempt"}
+        self._failure_ids = itertools.count(1)  # a failure's stable id: the Errors table's row key
         self.attempt = 1
         self.state = "running"    # running | finished | failed | interrupted
         self.exit_code = None
@@ -310,7 +312,8 @@ class RunModel:
                             and item["scope"].get("chapter") == event.scope.get("chapter")
                             and item.get("state", "failed") in ("failed", "retrying")):
                         item["state"] = "superseded"
-                self.failures.append({"kind": "chapter", "scope": dict(event.scope), "error": event.text,
+                self.failures.append({"id": next(self._failure_ids),
+                                      "kind": "chapter", "scope": dict(event.scope), "error": event.text,
                                       "record": dict(data.get("record") or {}), "retry": data.get("retry"),
                                       "repair": data.get("repair"), "passage": data.get("passage"),
                                       "state": "failed", "attempt": self.attempt})
@@ -418,7 +421,7 @@ class RunModel:
                 existing.update(state="failed", error=last or existing["error"],
                                 retry=retry if retry is not None else existing.get("retry"))
             return
-        self.failures.append({"kind": "book", "scope": {"book": book}, "error": last,
+        self.failures.append({"id": next(self._failure_ids), "kind": "book", "scope": {"book": book}, "error": last,
                               "record": {"book": key}, "retry": retry, "state": "failed", "attempt": self.attempt})
 
     def _count_log(self, event):
@@ -562,6 +565,18 @@ class RunModel:
         with self._lock:
             return [item for item in self.failures
                     if item["attempt"] == self.attempt and item.get("state", "failed") == "failed"]
+
+    def failure_by_id(self, failure_id):
+        """The failure with this id (the Errors table's row key), or None."""
+        with self._lock:
+            return next((item for item in self.failures if item.get("id") == failure_id), None)
+
+    def chapter_name(self, book, number):
+        """How a notice names a chapter: its number, the same one every view shows, and its title when known."""
+        with self._lock:
+            title = ((self.chapter_plans.get(book) or {}).get(number) or {}).get("title") or ""
+        name = f"chapter {number}" if number is not None else "this chapter"
+        return f"{name} ({title})" if title and title.casefold() != name.casefold() else name
 
     def current_failure(self, item):
         """The newest failure of the same chapter (an older one was replaced when the chapter failed again)."""

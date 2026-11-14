@@ -362,9 +362,10 @@ class RunApp(CapturePrintMixin, App):
         self._draw_glance()
         self._draw_profile()
         failures = []
-        for index, item in enumerate(model.visible_failures()):
+        for item in model.visible_failures():
             scope = item["scope"]
-            failures.append((str(index), (str(item["attempt"]), item.get("state", "failed"),
+            # Keyed by the failure's own id: a row that leaves the list never shifts the highlight to another.
+            failures.append((str(item["id"]), (str(item["attempt"]), item.get("state", "failed"),
                                           scope.get("book") or "", str(scope.get("chapter") or ""),
                                           item["record"].get("error_type") or item["kind"],
                                           _failure_takes_cell(model.failure_takes(item)),
@@ -689,16 +690,53 @@ class RunApp(CapturePrintMixin, App):
     # Failures and repairs ------------------------------------------------------
 
     def _failure_at(self, key):
-        failures = self.model.visible_failures()
         try:
-            index = int(key)
+            return self.model.failure_by_id(int(key))
         except (TypeError, ValueError):
             return None
-        return failures[index] if 0 <= index < len(failures) else None
 
     def _highlighted_failure(self):
         errors = self.query_one("#errors", DataTable)
         return self._failure_at(highlighted_key(errors))
+
+    def _target_failure(self):
+        """``(failure, why_not)`` for the highlighted row of the view in use, never another view's highlight.
+
+        Errors: its failure. Chapters: that chapter's failure. Summary: that
+        book's failure (or its first failed chapter). Rejected: the failure of
+        that take's chapter. ``why_not`` says why there is none.
+        """
+        tab = self.query_one("#tabs", TabbedContent).active
+        if tab == "errors-tab":
+            item = self._highlighted_failure()
+            return item, None if item is not None else "Highlight a failure in Errors first."
+        if tab == "chapters":
+            key = highlighted_key(self.query_one("#rows", DataTable))
+            chapter = next((item for row_key, item in self.model.visible_chapters() if row_key == key), None)
+            if chapter is None:
+                return None, "Highlight a chapter first."
+            item = self.model.chapter_failure(chapter["book"], chapter["chapter"])
+            name = self.model.chapter_name(chapter["book"], chapter["chapter"])
+            return item, None if item is not None else (
+                f"{name[0].upper()}{name[1:]} has not failed ({_state_label(chapter)}), so there is nothing to retry.")
+        if tab == "summary":
+            key = highlighted_key(self.query_one("#books", DataTable))
+            if key is None:
+                return None, "Highlight a book first."
+            book = None if key == "None" else key
+            failure, chapters = self.model.book_failure(book)
+            item = failure or (chapters[0] if chapters else None)
+            return item, None if item is not None else f"{book or 'This book'} has no failure now."
+        if tab == "rejected-tab":
+            rejection = self._highlighted_rejection()
+            if rejection is None:
+                return None, "Highlight a rejected take first."
+            scope = rejection["scope"]
+            item = self.model.chapter_failure(scope.get("book"), scope.get("chapter"))
+            return item, None if item is not None else (
+                f"{self.model.chapter_name(scope.get('book'), scope.get('chapter')).capitalize()} has not failed; "
+                "this take was rejected and the passage tried again.")
+        return None, "Highlight a failed chapter in Chapters (2) or Errors (5), or a failed book in Summary (1)."
 
     def _open_failure(self, item):
         """A failure's full error, its passage and every attempt, and the repairs that apply; never a dead end."""
@@ -813,6 +851,7 @@ class RunApp(CapturePrintMixin, App):
 
     def _retry(self, item, *, fresh=False):
         scope = item["scope"]
+        name = self.model.chapter_name(scope.get("book"), scope.get("chapter"))
         if (fresh and callable(getattr(item.get("repair"), "reset_for_fresh_takes", None))
                 and item.get("state", "failed") == "failed"):
             try:
@@ -822,7 +861,7 @@ class RunApp(CapturePrintMixin, App):
                             "as it is.", severity="warning", timeout=10)
             else:
                 if set_aside:
-                    self.bus.log(f"Set aside the saved recovery of chapter {scope.get('chapter')}'s failed passage "
+                    self.bus.log(f"Set aside the saved recovery of {name}'s failed passage "
                                  f"for fresh takes: {', '.join(set_aside)}", scope=dict(scope), severity="warning")
         route = self.model.retry(item)
         item = self.model.current_failure(item)
@@ -831,14 +870,13 @@ class RunApp(CapturePrintMixin, App):
                         "books listed after it as soon as their current chapters are done; finished chapters are "
                         "restored and failed ones render with fresh takes.")
         elif route == "chapter":
-            self.notify(f"Retrying chapter {scope.get('chapter')} first, with a new allowance of attempts; "
-                        "other chapters keep going.")
+            self.notify(f"Retrying {name} first, with a new allowance of attempts; other chapters keep going.")
         elif route == "later":
-            self.notify(f"Chapter {scope.get('chapter')} renders again as soon as its book's render can take it: "
+            self.notify(f"{name[0].upper()}{name[1:]} renders again as soon as its book's render can take it: "
                         "when that render ends (in a queue the book goes back in line), or, at the latest, when "
                         "this run ends.", timeout=12)
         elif item.get("state") == "retrying":
-            self.notify(f"{'This book' if item['kind'] == 'book' else 'Chapter ' + str(scope.get('chapter'))} "
+            self.notify(f"{'This book' if item['kind'] == 'book' else name[0].upper() + name[1:]} "
                         "is already being rendered again.")
         elif not self.model.running and self.resumable:
             # The run has ended: resuming is how it renders again, so do that.
@@ -879,9 +917,9 @@ class RunApp(CapturePrintMixin, App):
         self.notify("Highlight a row in Summary, Chapters, Errors or Rejected first.", severity="information")
 
     def action_retry(self):
-        item = self._highlighted_failure()
+        item, why_not = self._target_failure()
         if item is None:
-            self.notify("Highlight a failed chapter or book in Errors (5) to retry it", severity="warning")
+            self.notify(why_not, severity="warning")
             return
         self._retry(item)
 
@@ -892,9 +930,9 @@ class RunApp(CapturePrintMixin, App):
             if item is not None:
                 self._open_rejection(item)
             return
-        item = self._highlighted_failure()
+        item, why_not = self._target_failure()
         if item is None or item.get("repair") is None:
-            self.notify("Highlight a chapter that failed on one passage in Errors (5), or a take in Rejected (6)",
+            self.notify(why_not or "This failure is not tied to one passage's takes; Enter shows what failed.",
                         severity="warning")
             return
         self._takes(item)

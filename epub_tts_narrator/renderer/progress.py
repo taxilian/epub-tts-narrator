@@ -880,10 +880,23 @@ class ChapterProgress:
                 "elapsed": now - self._started, "remaining": remaining,
                 "active": active, "row": self._row()}
 
+    def _label(self, compact=True):
+        """``Ch 16/40``, or ``Ch 16, 10/40`` when hidden chapters put it at another place among those shown.
+
+        The chapter's own number leads, the same one its log lines, failures,
+        ``--chapters`` and the run shell use; the place among the chapters
+        being rendered follows only when it differs.
+        """
+        if self.ordinal == self.number:
+            return (f"Ch {self.number}/{self.total_chapters}" if compact
+                    else f"Chapter {self.number} / {self.total_chapters}")
+        return (f"Ch {self.number}, {self.ordinal}/{self.total_chapters}" if compact
+                else f"Chapter {self.number}, {self.ordinal} of {self.total_chapters}")
+
     def _row(self):
         """This chapter's live board row: no book percentage or shared segment."""
         now = self._clock()
-        parts = [f"Ch {self.ordinal}/{self.total_chapters}",
+        parts = [self._label(),
                  f"{len(self._done)}/{len(self._weights)} blocks "
                  f"({round(100 * len(self._done) / max(1, len(self._weights)))}%)",
                  format_duration(now - self._started)]
@@ -933,7 +946,7 @@ class ChapterProgress:
                 else:
                     label = "cache" if "saved" in task.phase else "ready"
                 active.append(f"{label} #{index + 1}")
-            parts = [f"Ch {self.ordinal}/{self.total_chapters} ({book_percent}%) | " + "; ".join(active),
+            parts = [f"{self._label()} ({book_percent}%) | " + "; ".join(active),
                      f"{len(self._done)}/{len(self._weights)} blocks ({chapter_percent}%)",
                      f"{elapsed} elapsed"]
             segment = _scheduling_segment()
@@ -941,11 +954,11 @@ class ChapterProgress:
                 parts.append(segment)
             return " | ".join(parts)
         if compact:
-            parts = [f"Ch {self.ordinal}/{self.total_chapters} ({book_percent}%)",
+            parts = [f"{self._label()} ({book_percent}%)",
                      f"{len(self._done)}/{len(self._weights)} blocks ({chapter_percent}%)",
                      f"{elapsed} elapsed"]
         else:
-            parts = [f"Chapter {self.ordinal} / {self.total_chapters} (book {book_percent}%)",
+            parts = [f"{self._label(compact=False)} (book {book_percent}%)",
                      f"Blocks {len(self._done)} / {len(self._weights)} complete ({chapter_percent}%)",
                      f"elapsed {elapsed}"]
         if final is not None:

@@ -765,6 +765,84 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
         # The first run ended with the retry still waiting, so the shell rendered that book again.
         self.assertEqual(attempts, [1, ("b1",)])
 
+    async def test_r_in_chapters_retries_the_highlighted_chapter_and_names_it_by_the_number_shown(self):
+        # The case a person hit: the row "10 | Chapter Two" answered about chapter 16, Errors' highlight.
+        requests, done = [], threading.Event()
+
+        def command():
+            with live_board(print) as notify:
+                board = notify.__self__
+                board.book_state("/q/b4", "rendering")
+                board.chapter_plan("/q/b4", [
+                    {"number": 1, "title": "Illustration", "blocks": 0, "saved": False},  # hidden: no speech
+                    *({"number": number, "title": title, "blocks": 456, "saved": False}
+                      for number, title in ((10, "Chapter Two"), (16, "Chapter Eight")))])
+                prefixed = PrefixedBoardNotify(board, "[b4] ")
+                report_chapter_failure(prefixed, {"number": 16, "error_type": "SpeechVerificationFailed",
+                                                  "error": "silence"}, retry=lambda: requests.append(16) or True)
+                report_chapter_failure(prefixed, {"number": 10, "error_type": "RenderBlocked", "error": "blocked"},
+                                       retry=lambda: requests.append(10) or True)
+                done.wait(10)
+            return 0
+
+        app = self.make_app(command)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await self.wait_for(pilot, lambda: len(self.model.current_failures()) == 2)
+            await pilot.press("5")
+            errors = app.query_one("#errors")
+            errors.focus()
+            errors.move_cursor(row=0)  # chapter 16, the first failure
+            await pilot.press("r")
+            self.assertEqual(requests, [16])
+            await pilot.press("2")
+            rows = app.query_one("#rows")
+            await self.wait_for(pilot, lambda: rows.row_count == 2)
+            self.assertEqual([str(rows.get_row_at(row)[1]) for row in range(2)], ["10", "16"])
+            rows.focus()
+            rows.move_cursor(row=0)
+            notices = []
+            app.notify = lambda message, **kwargs: notices.append(message)
+            await pilot.press("r")
+            # The highlighted chapter, named by the number its row shows (and its title).
+            self.assertEqual(requests, [16, 10])
+            self.assertTrue(notices and notices[-1].startswith("Retrying chapter 10 (Chapter Two) first"), notices)
+            await pilot.press("r")
+            self.assertEqual(notices[-1], "Chapter 10 (Chapter Two) is already being rendered again.")
+            done.set()
+            await self.wait_for(pilot, lambda: not self.model.running)
+
+    async def test_errors_keep_their_highlight_when_an_earlier_row_is_replaced(self):
+        board_ready = threading.Event()
+        release = threading.Event()
+        handles = {}
+
+        def command():
+            with live_board(print) as notify:
+                handles["notify"] = PrefixedBoardNotify(notify.__self__, "[b1] ")
+                for number in (3, 7):
+                    report_chapter_failure(handles["notify"], {"number": number, "error_type": "RenderBlocked",
+                                                               "error": f"failed {number}"}, retry=lambda: True)
+                board_ready.set()
+                release.wait(10)
+            return 0
+
+        app = self.make_app(command)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await self.wait_for(pilot, board_ready.is_set)
+            await pilot.press("5")
+            errors = app.query_one("#errors")
+            await self.wait_for(pilot, lambda: errors.row_count == 2)
+            errors.focus()
+            errors.move_cursor(row=1)  # chapter 7
+            # Chapter 3 fails again: its older row is replaced by a new one at the end.
+            report_chapter_failure(handles["notify"], {"number": 3, "error_type": "RenderBlocked",
+                                                       "error": "failed 3 again"}, retry=lambda: True)
+            app.refresh_view(force=True)
+            await pilot.pause()
+            self.assertEqual(app._highlighted_failure()["scope"]["chapter"], 7)
+            release.set()
+            await self.wait_for(pilot, lambda: not self.model.running)
+
     async def test_enter_on_a_failed_book_in_summary_shows_why_and_resumes_it(self):
         from epub_tts_narrator.renderer.progress import report_book_state
         retried = threading.Event()
