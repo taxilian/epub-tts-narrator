@@ -65,6 +65,12 @@ VOWELS = frozenset("AA AE AH AO AW AY EH ER EY IH IY OW OY UH UW".split())
 _VOICELESS = frozenset({"P", "T", "K", "F", "TH"})
 _SIBILANTS = frozenset({"S", "Z", "SH", "ZH", "CH", "JH"})
 _APOSTROPHES = "'’"
+# Every apostrophe-like character a book or a person may use (typographic right
+# and left quotes, the modifier-letter apostrophe, grave/acute accents and
+# primes used as apostrophes, the full-width apostrophe) is the same spelling.
+# One character maps to one, so offsets into the original text stay exact.
+APOSTROPHE_LIKE = "'’‘‛ʼ`´′＇"
+_APOSTROPHE_FOLD = str.maketrans({apostrophe: "'" for apostrophe in APOSTROPHE_LIKE})
 _HYPHENS = "-‐‑"
 _RESPELLING = re.compile(r"[^\W\d_]+(?:[ '’\-‐‑][^\W\d_]+)*", re.UNICODE)
 _SAY_AS = re.compile(r"[^\W\d_]+(?:['’\-‐‑][^\W\d_]+)*", re.UNICODE)
@@ -72,8 +78,8 @@ MAX_SAY_AS = 80
 
 
 def name_key(name):
-    """One definition per spelling regardless of case: shouted names share it."""
-    return validate_word(name).casefold()
+    """One definition per spelling regardless of case or apostrophe: ``Ce'Nedra`` and ``CE’NEDRA`` share it."""
+    return validate_word(name.translate(_APOSTROPHE_FOLD)).casefold()
 
 
 def normalize_phonemes(text):
@@ -224,7 +230,7 @@ def plural_spelling(name):
 
 def form_spellings(name):
     """Casefolded whole-word inflections that take a derived reading."""
-    validate_word(name)
+    validate_word(name.translate(_APOSTROPHE_FOLD))
     forms = {name.casefold(): "base", plural_spelling(name).casefold(): "plural"}
     for apostrophe in _APOSTROPHES:
         forms[(name + apostrophe + "s").casefold()] = "possessive"
@@ -249,13 +255,15 @@ def _parts(token, offset):
             start = index + 1
 
 
-_HYPHEN_FOLD = str.maketrans({hyphen: "-" for hyphen in _HYPHENS})
+# Any hyphen or apostrophe character the book uses is the same spelling.
+_HYPHEN_FOLD = str.maketrans({**{hyphen: "-" for hyphen in _HYPHENS},
+                              **{apostrophe: "'" for apostrophe in APOSTROPHE_LIKE}})
 
 
 def occurrences(text, name):
     """Every span in ``text`` that could be the name, without judging meaning.
 
-    Case-insensitive; matches the whole name, its possessive or plural, or the
+    Case- and apostrophe-insensitive (``APOSTROPHE_LIKE``); matches the whole name, its possessive or plural, or the
     name part of an apostrophe/hyphen continuation (``Salvatore'll``,
     ``Salvatore-like``). Longer words that merely start with it never match.
     A hyphenated name (``Cho-Hag``) matches as a whole: the same number of
@@ -266,13 +274,16 @@ def occurrences(text, name):
     forms = {spelling.translate(_HYPHEN_FOLD): form for spelling, form in form_spellings(name).items()}
     width = key.count("-") + 1
     result = []
-    for token in WORD_PATTERN.finditer(text):
+    # Tokenize a copy with every apostrophe-like character folded (same length),
+    # so "Ce‘Nedra" is one word; reported words keep the book's own characters.
+    folded = text.translate(_APOSTROPHE_FOLD)
+    for token in WORD_PATTERN.finditer(folded):
         parts = list(_parts(token.group(), token.start()))
         for index in range(len(parts) - width + 1):
             start = parts[index][0]
             last_start, last = parts[index + width - 1]
             part = text[start:last_start + len(last)]
-            lower = part.casefold().translate(_HYPHEN_FOLD)
+            lower = folded[start:last_start + len(last)].casefold().translate(_HYPHEN_FOLD)
             if lower in forms:
                 result.append({"start": start, "end": start + len(part), "word": part, "form": forms[lower]})
             elif lower.startswith(key) and len(lower) > len(key) and lower[len(key)] in _APOSTROPHES:
@@ -410,6 +421,7 @@ def load_local(directory):
         raise ValueError("Name pronunciation record is invalid or belongs to a different book")
     if record["version"] == 1:
         record = _upgrade(record)
+    record = _fold_keys(record)
     for section in ("definitions", "drafts"):
         for key, value in record[section].items():
             _validate_definition(key, value)
@@ -424,6 +436,29 @@ def load_local(directory):
                 raise ValueError("Name pronunciation mentions repeat one occurrence")
             seen.add(mention_key(value))
     return record
+
+
+def _fold_keys(record):
+    """Key every entry by the current ``name_key`` (one entry per spelling, apostrophes folded)."""
+    folded = dict(record)
+    for section in ("definitions", "drafts"):
+        entries = {}
+        for key, value in record[section].items():
+            # Only an older key for the same spelling moves; any other mismatch stays for validation to refuse.
+            if isinstance(key, str) and key.translate(_APOSTROPHE_FOLD) != key:
+                key = key.translate(_APOSTROPHE_FOLD)
+            if key in entries:
+                raise ValueError("Name pronunciation record defines one spelling twice (straight and curly apostrophe)")
+            entries[key] = value
+        folded[section] = entries
+    mentions = {}
+    for key, values in record["mentions"].items():
+        key = key.translate(_APOSTROPHE_FOLD) if isinstance(key, str) else key
+        if key in mentions:
+            raise ValueError("Name pronunciation record lists one spelling's uses twice (straight and curly apostrophe)")
+        mentions[key] = values
+    folded["mentions"] = mentions
+    return folded
 
 
 def _owners(directory):

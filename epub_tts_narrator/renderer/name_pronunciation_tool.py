@@ -37,7 +37,6 @@ from ..name_pronunciations import (PART_LABELS, book_occurrences, default_parts,
                                    parse_parts, parts_for, plural_spelling, save_decisions, save_definition,
                                    tagging_state, validate_name_phonemes, describe_reading, normalize_say_as,
                                    reading_of, validate_reading, word_pronunciation)
-from ..pronunciations import validate_word
 from .audition import AudioPlayer, display
 
 
@@ -602,7 +601,9 @@ def run_pronounce_name(bundle, config, args, *, analysis_config, input_fn=None, 
                        verifier_factory=None):
     name = getattr(args, "name", None)
     if name is not None:
-        validate_word(name)
+        # Any apostrophe the person types (Ce'Nedra, Ce’Nedra, Ce‘Nedra) is the same spelling.
+        from ..name_pronunciations import name_key
+        name_key(name)
     if getattr(args, "remove", False):
         if name is None:
             raise ValueError("Name the pronunciation to remove, e.g. pronounce-name BOOK Salvatore --remove")

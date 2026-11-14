@@ -106,6 +106,21 @@ class FormsAndOccurrencesTests(unittest.TestCase):
         for item in occurrences(text, "Salvatore"):
             self.assertEqual(text[item["start"]:item["end"]], item["word"])
 
+    def test_a_straight_and_a_curly_apostrophe_are_the_same_spelling(self):
+        # A name typed with ' matches the book's ’ and the other way round, possessives included.
+        text = ("Princess Ce’Nedra sat; Ce'Nedra's cabin; Ce’Nedra’s maid; CE’NEDRA! Ce‘Nedra, Ceʼnedra, "
+                "CE＇NEDRA`s. A Ce’Nedran ship; Ce Nedra.")
+        expected = [("Ce’Nedra", "base"), ("Ce'Nedra's", "possessive"), ("Ce’Nedra’s", "possessive"),
+                    ("CE’NEDRA", "base"), ("Ce‘Nedra", "base"), ("Ceʼnedra", "base"), ("CE＇NEDRA`s", "possessive")]
+        for typed in ("Ce'Nedra", "Ce’Nedra", "Ce‘Nedra", "Ceʼnedra"):
+            with self.subTest(typed=typed):
+                self.assertEqual([(item["word"], item["form"]) for item in occurrences(text, typed)], expected)
+                self.assertEqual(name_pronunciations.name_key(typed), "ce'nedra")
+                for item in occurrences(text, typed):
+                    self.assertEqual(text[item["start"]:item["end"]], item["word"])
+        self.assertEqual(name_pronunciations.word_pronunciation("Ce'Nedra", {"phonemes": ROSE}, "Ce’Nedra’s"),
+                         {"alphabet": "cmu_arpabet", "value": ROSE + " Z"})
+
     def test_a_hyphenated_name_matches_whole_never_by_its_parts(self):
         text = "King Cho-Hag's horse; Cho‐Hag rode, two Cho-Hags, Cho-Hag'll go, a Cho-Hag-like grin. Cho alone, Hag too."
         found = [(item["word"], item["form"]) for item in occurrences(text, "Cho-Hag")]
@@ -340,6 +355,24 @@ class StorageTaggingAndRenderTests(unittest.TestCase):
         self.assertEqual(record["mentions"]["rose"], [dict(spans[1], basis="user", use=False)])
         state = tagging_state(self.directory, self.bundle["source"], "Rose")
         self.assertEqual((len(state["decided"]), len(state["pending"])), (1, 4))
+
+    def test_a_word_saved_with_any_apostrophe_tags_the_books_spelling(self):
+        save_definition(self.directory, "Ro‘se", ROSE, status="confirmed", source="manual")
+        self.assertEqual(name_pronunciations.local_definition(self.directory, "Ro’se")["name"], "Ro‘se")
+        self.assertEqual(list(load_local(self.directory)["definitions"]), ["ro'se"])
+
+    def test_a_record_saved_with_a_curly_apostrophe_key_is_found_by_either_spelling(self):
+        definition = {"name": "Ro’se", "phonemes": ROSE, "respelling": None, "parts_of_speech": ["proper_noun"],
+                      "history": [{"phonemes": ROSE, "source": "manual"}]}
+        record = {"format": "epub-tts-name-pronunciations", "version": 2, "book_id": self.bundle["source"]["book"]["id"],
+                  "definitions": {"ro’se": definition}, "drafts": {}, "mentions": {}}
+        (self.directory / FILENAME).write_text(json.dumps(record))
+        self.assertEqual(name_pronunciations.local_definition(self.directory, "Ro'se")["name"], "Ro’se")
+        # The same spelling saved twice, once per apostrophe, is refused rather than guessed.
+        record["definitions"]["ro'se"] = dict(definition, name="Ro'se")
+        (self.directory / FILENAME).write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "twice"):
+            load_local(self.directory)
 
     def test_book_sentences_use_only_sentences_whose_every_use_gets_the_reading(self):
         save_definition(self.directory, "Rose", ROSE, status="confirmed", source="manual")
