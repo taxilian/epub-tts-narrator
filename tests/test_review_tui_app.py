@@ -194,6 +194,23 @@ class ReviewTuiAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(app.playing)
             self.assertIn("Playback stopped", self.logged())
 
+    async def test_greater_than_switches_playback_speed_and_restarts_the_take_playing(self):
+        from epub_tts_narrator.renderer.playback_speed import PlaybackSpeed
+        app = self.make(rendered=True)
+        self.player.speed, restarts = PlaybackSpeed(), []
+        self.player.restart = lambda: restarts.append(self.player.speed.label)
+        async with app.run_test(size=(150, 45)) as pilot:
+            await self.open_mara(pilot)
+            self.assertIn("> speed (1x)", app.sub_title)
+            self.player.polls = 1000
+            await pilot.press("p", "greater_than_sign")
+            self.assertEqual(restarts, ["2x"])  # The take playing starts again at 2x.
+            self.assertIn("> speed (2x)", app.sub_title)
+            self.assertIn("Playback speed is now 2x", self.logged())
+            self.assertIsNotNone(app.playing)
+            await pilot.press("question_mark")
+            self.assertIn("Speed", " ".join(description for _, description in app.screen.rows))
+
     async def test_takes_open_the_shared_take_dialog_and_using_one_archives_the_checkpoint(self):
         from epub_tts_narrator.run_shell_screens import TakesScreen
         app = self.make(rendered=True)

@@ -134,6 +134,7 @@ class TakesScreen(Dialog):
         Binding("b", "mark('bad')", "Bad"),
         Binding("t", "mark('truncated')", "Truncated"),
         Binding("c", "mark(None)", "Clear mark"),
+        Binding("greater_than_sign", "speed", "Speed", tooltip="Play at 2x or 1x (pitch unchanged), here and everywhere"),
     ]
 
     def __init__(self, title, review, player, *, highlight=None, on_retired=None):
@@ -155,10 +156,7 @@ class TakesScreen(Dialog):
             yield DataTable(id="takes-table", cursor_type="row")
             yield Static("", id="takes-heard")
             yield Static("", id="takes-error", classes="dialog-error")
-            yield Static(Text("Enter/p plays · Space stops · u uses this take · g marks it good (wrongly rejected) · "
-                              "b marks it bad (the used take is then rendered again) · t marks it truncated "
-                              "(right but cut short: the rest is generated after it) · c clears the mark · "
-                              "Escape closes"), classes="dialog-help")
+            yield Static(self._help(), id="takes-help", classes="dialog-help")
 
     def on_mount(self):
         self.query_one("#takes-table", DataTable).add_columns("Take", "Used", "Verification", "Length",
@@ -225,6 +223,21 @@ class TakesScreen(Dialog):
             self.player.stop()
         except (ValueError, OSError):
             pass
+
+    def _help(self):
+        from .renderer import playback_speed
+        return Text("Enter/p plays · Space stops · u uses this take · g marks it good (wrongly rejected) · "
+                    "b marks it bad (the used take is then rendered again) · t marks it truncated "
+                    "(right but cut short: the rest is generated after it) · c clears the mark · "
+                    f"{playback_speed.help_text(self.player)} · Escape closes")
+
+    def action_speed(self):
+        from .renderer import playback_speed
+        try:
+            playback_speed.toggle(self.player)  # A playing take starts again at the new speed.
+        except (ValueError, OSError) as error:
+            self._error(f"Could not play: {error}")
+        self.query_one("#takes-help", Static).update(self._help())
 
     def action_use(self):
         row = self.current()

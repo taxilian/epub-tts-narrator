@@ -20,6 +20,7 @@ from epub_tts_narrator.tui_widgets import (
     BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, DetailScreen, Dialog, JobsTable, KeysScreen, MessageLog, TextEditScreen, highlighted_key, sync_table,
 )
 
+from . import playback_speed
 from .cast_tui_model import DESIGNERS, FIELDS, STATUS_FILTERS, CastController, candidate_rows, label, next_status_filter
 
 
@@ -169,6 +170,8 @@ class CastApp(CapturePrintMixin, App):
         Binding("o", "sort", "Sort", tooltip="Sort by status (what needs attention first) or cast order"),
         Binding("enter,p", "play", "Play", tooltip="Play the highlighted take in Takes, else the accepted take"),
         Binding("space", "stop", "Stop", show=False, tooltip="Stop playback"),
+        Binding("greater_than_sign", "speed", "Speed",
+                tooltip="Play at 2x or 1x (pitch unchanged); also in every other listening screen"),
         Binding("g", "generate", "Generate", tooltip="Generate a new voice; choose the designer"),
         Binding("a", "accept", "Accept", tooltip="Accept the highlighted take"),
         Binding("m", "mark", "Mark A", show=False, tooltip="Mark the highlighted take as A for comparison"),
@@ -294,6 +297,7 @@ class CastApp(CapturePrintMixin, App):
             summary += " · sorted by status"
         if controller.playing is not None:
             summary += " · playing (space stops)"
+        summary += " · " + playback_speed.help_text(controller.player)
         self.sub_title = summary
         visible = [(row, label(row), status, note.splitlines()[0] if note else "")
                    for row, status, note in controller.visible()]
@@ -449,6 +453,14 @@ class CastApp(CapturePrintMixin, App):
 
     def action_stop(self):
         self.controller.stop()
+        self.render_all()
+
+    def action_speed(self):
+        try:
+            playback_speed.toggle(self.controller.player)  # A playing take starts again at the new speed.
+        except (OSError, ValueError) as error:
+            self.controller.log(f"Could not play: {_described(error)}", "error")
+        self.controller.log(playback_speed.toggled_notice(self.controller.player))
         self.render_all()
 
     def action_mark(self):

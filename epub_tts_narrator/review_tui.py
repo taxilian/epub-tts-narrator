@@ -21,6 +21,7 @@ from typing import Any
 from .analysis_directory import _completed_directory
 from .analysis_revision import related_directories, revise_directories
 from . import chapter_ignores
+from .renderer import playback_speed
 from .renderer.terminal import play_sample
 from .review_tui_model import (
     apply_edits, edit_direction, edit_review, edit_speaker, ignored_empty_chapters, metadata,
@@ -524,6 +525,14 @@ class ReviewApp:
             outcome = exc
         self.notice = playback_notice(outcome)
 
+    def _speed_help(self):
+        return f"{playback_speed.KEY} speed {playback_speed.label(self.player)}"
+
+    def _toggle_speed(self):
+        """Switch every playback between 1x and 2x (pitch unchanged); applies from the next play."""
+        playback_speed.toggle(self.player)
+        self.notice = playback_speed.toggled_notice(self.player)
+
     def _play_info_accepted(self, screen):
         accepted = self.accepted_take()
         if accepted is not None:
@@ -577,6 +586,8 @@ class ReviewApp:
             row = self._current_take()
             if row is not None:
                 self._play_audio(row, screen)
+        elif key == playback_speed.KEY:
+            self._toggle_speed()
         elif key in {"a", "A"}:
             self._request_take_acceptance()
 
@@ -763,6 +774,8 @@ class ReviewApp:
                 self._open_takes()
             elif key in {"p", "P"}:
                 self._play_info_accepted(screen)
+            elif key == playback_speed.KEY:
+                self._toggle_speed()
             elif key == "ESC":
                 self.view = "passages"
         return self.running
@@ -904,7 +917,8 @@ class ReviewApp:
             index = self.info_scroll + line - 3
             marker = "> " if index == self.info_cursor and field else "  "
             screen.write(line, 0, marker + _flat(text), _selected(index == self.info_cursor and field is not None))
-        self._footer(screen, "Enter edit/action  P play  T takes  F2 speaker  F3 direction  F4/R review  Esc back  S save")
+        self._footer(screen, "Enter edit/action  P play  T takes  F2 speaker  F3 direction  F4/R review  "
+                     + self._speed_help() + "  Esc back  S save")
 
     def _draw_takes(self, screen):
         height, _ = screen.size()
@@ -933,7 +947,7 @@ class ReviewApp:
             selected = index == self.takes_index
             screen.write(line, 0, ("> " if selected else "  ") + format_take(row), _selected(selected))
         chunks = "  Left/Right chunk" if len(self.takes_clips) > 1 else ""
-        self._footer(screen, "Up/Down take  Enter/P play  A accept" + chunks + "  Esc passage")
+        self._footer(screen, "Up/Down take  Enter/P play  A accept" + chunks + "  " + self._speed_help() + "  Esc passage")
 
     def _draw_confirm_take(self, screen):
         self._header(screen, "Accept rendered take")

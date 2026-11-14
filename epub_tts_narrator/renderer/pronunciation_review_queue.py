@@ -16,6 +16,7 @@ import shutil
 import sys
 
 from ..pronunciation_groups import entry_words, family_words, find_pronunciation
+from . import playback_speed
 from .audition import display
 from .pronunciation_review import _preferred, _pronunciation, _show
 from .pronunciation_review_state import ReviewState
@@ -253,7 +254,8 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
         if observer is None:  # A full-screen UI shows its own choices.
             say("S [N]: listen and auto-accept, starting at entry N (default: saved position or first queued word)")
             say("Number: play that entry's excerpt preview   L: compact list   O <all|N|N-M>: mark for re-listening")
-            say("B/E/P/C/I/R [N]: baseline / readable hint / CMU phonemes / confirm / keep default / reset   Q: quit")
+            say("B/E/P/C/I/R [N]: baseline / readable hint / CMU phonemes / confirm / keep default / reset   "
+                f">: playback speed (now {playback_speed.label(player)})   Q: quit")
             say("During playback or the gap after it, any key interrupts and returns to the last five words.")
         return True
 
@@ -307,6 +309,10 @@ def run_pronunciation_queue(session, player, playback_fn, *, input_fn, output=pr
         if command.casefold() == "q":
             state.save()
             return 0
+        notice = playback_speed.line_command(command, player)
+        if notice is not None:
+            say(notice)
+            continue
         try:
             parts = command.split(maxsplit=2)
             verb = "play" if parts[0].isdecimal() else parts[0].casefold()

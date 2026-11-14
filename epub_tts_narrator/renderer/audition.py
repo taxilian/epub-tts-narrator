@@ -7,8 +7,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unicodedata
 
+from . import playback_speed
 from .workflow import VerificationUnavailable
 from .model_setup import ModelSetup, ModelSetupError
 
@@ -20,11 +23,29 @@ def display(value):
 
 
 class AudioPlayer:
-    def __init__(self, command, *, normalizer=None):
+    """Plays one file at a time with the configured player, at the shared 1x/2x speed.
+
+    The speed (``playback_speed.SHARED`` unless ``speed`` is given) changes
+    tempo, never pitch: ``afplay`` gets its own time-pitch rate options, and
+    any other player gets a temporary FFmpeg ``atempo`` copy (``ffmpeg``, else
+    the one on PATH) with a descriptive name, removed when playback ends.
+    Calls are serialized, so ``restart`` from a UI thread never lets a worker
+    thread's ``poll`` see a gap between the old and the new process.
+    """
+
+    def __init__(self, command, *, normalizer=None, speed=None, ffmpeg=None):
+        from .playback_speed import PlaybackSpeed, SHARED
+        if speed is not None and not isinstance(speed, PlaybackSpeed):
+            raise ValueError("Playback speed must be a PlaybackSpeed")
         self.command = list(command)
         self.normalizer = normalizer
+        self.speed = speed if speed is not None else SHARED
+        self.ffmpeg = ffmpeg
         self.process = None
         self.errors = None
+        self.source = None
+        self._tempo_dir = None
+        self._lock = threading.RLock()
 
     def prepare(self, path):
         """Prepare a playback copy without changing the saved clone reference."""
@@ -34,25 +55,63 @@ class AudioPlayer:
             return tool_path(self.normalizer.prepare(source))
         return tool_path(source)
 
+    def _uses_afplay(self):
+        return Path(self.command[0]).name == "afplay"
+
+    def _tempo_copy(self, path, rate):
+        """A temporary pitch-preserving copy at ``rate`` for players without their own rate option."""
+        ffmpeg = self.ffmpeg or shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise ValueError("Playing at 2x needs afplay or FFmpeg on PATH; press > to return to 1x")
+        self._tempo_dir = tempfile.TemporaryDirectory(prefix="epub-tts-narrator-listening-speed-")
+        copy = Path(self._tempo_dir.name) / f"{path.stem}-{rate:g}x-speed-listening-copy.wav"
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-nostats", "-nostdin", "-loglevel", "error", "-n",
+             "-i", str(path), "-map", "0:a:0", "-vn", "-af", f"atempo={rate:g}",
+             "-c:a", "pcm_s16le", "-f", "wav", str(copy)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            timeout=120, check=False, shell=False)
+        if result.returncode or not copy.is_file():
+            report = result.stderr.decode("utf-8", errors="replace").strip()[-500:]
+            self._drop_tempo_copy()
+            raise ValueError(f"Could not prepare {rate:g}x playback: {display(report)}")
+        return copy
+
+    def _drop_tempo_copy(self):
+        if self._tempo_dir is not None:
+            self._tempo_dir.cleanup()
+            self._tempo_dir = None
+
     def start(self, path):
-        self.stop()
-        path = self.prepare(path)
-        if not path.is_file():
-            raise ValueError("The voice sample is missing")
-        executable = shutil.which(self.command[0])
-        if executable is None:
-            raise ValueError("Audio player not found; set casting.player in the TOML configuration")
-        self.errors = tempfile.TemporaryFile()
-        try:
-            self.process = subprocess.Popen(
-                [executable, *self.command[1:], str(path)],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=self.errors,
-                shell=False,
-            )
-        except BaseException:
-            self.errors.close()
-            self.errors = None
-            raise
+        with self._lock:
+            self.stop()
+            source = path
+            path = self.prepare(path)
+            if not path.is_file():
+                raise ValueError("The voice sample is missing")
+            executable = shutil.which(self.command[0])
+            if executable is None:
+                raise ValueError("Audio player not found; set casting.player in the TOML configuration")
+            rate = self.speed.rate
+            options = []
+            if rate != 1:
+                if self._uses_afplay():
+                    options = ["-r", f"{rate:g}", "-q", "1"]  # Apple's spectral time-pitch keeps pitch.
+                else:
+                    path = self._tempo_copy(path, rate)
+            self.errors = tempfile.TemporaryFile()
+            try:
+                self.process = subprocess.Popen(
+                    [executable, *self.command[1:], *options, str(path)],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=self.errors,
+                    shell=False,
+                )
+            except BaseException:
+                self.errors.close()
+                self.errors = None
+                self._drop_tempo_copy()
+                raise
+            self.source = source
 
     def _finish(self, status, *, stopped=False):
         self.errors.seek(0)
@@ -60,32 +119,45 @@ class AudioPlayer:
         self.errors.close()
         self.errors = None
         self.process = None
+        self.source = None
+        self._drop_tempo_copy()
         if status and not stopped:
             raise ValueError(f"Audio playback failed ({status}): {display(error)}")
 
     def poll(self):
-        if self.process is None:
+        with self._lock:
+            if self.process is None:
+                return False
+            status = self.process.poll()
+            if status is None:
+                return True
+            self._finish(status)
             return False
-        status = self.process.poll()
-        if status is None:
-            return True
-        self._finish(status)
-        return False
 
     def wait(self):
-        if self.process is not None:
-            self._finish(self.process.wait())
+        # Polled rather than blocking, so a restart at a new speed is waited for too.
+        while self.poll():
+            time.sleep(0.05)
+
+    def restart(self):
+        """Play the current file again from its start (at the current speed); False when nothing plays."""
+        with self._lock:
+            if self.process is None or self.source is None or self.process.poll() is not None:
+                return False
+            self.start(self.source)
+            return True
 
     def stop(self):
-        if self.process is not None:
-            if self.process.poll() is None:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait()
-            self._finish(self.process.returncode, stopped=True)
+        with self._lock:
+            if self.process is not None:
+                if self.process.poll() is None:
+                    self.process.terminate()
+                    try:
+                        self.process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait()
+                self._finish(self.process.returncode, stopped=True)
 
 
 def _label(row):
@@ -181,11 +253,11 @@ def _menu_lines(rows, width):
     return output
 
 
-def _menu_help_lines(width):
+def _menu_help_lines(width, speed="1x"):
     commands = (
         "Number: play", "E [number]: edit", "D [source] [target]: share target's voice",
         "G [number]: regenerate locally", "GG [number]: regenerate with Gemini",
-        "G11 [number]: regenerate with ElevenLabs", "Q: quit",
+        "G11 [number]: regenerate with ElevenLabs", f">: playback speed (now {speed})", "Q: quit",
     )
     lines, line = [], ""
     for command in commands:
@@ -381,7 +453,7 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             width = shutil.get_terminal_size(fallback=(80, 24)).columns
             for line in _menu_lines(rows, width):
                 say(line)
-            for line in _menu_help_lines(max(8, width)):
+            for line in _menu_help_lines(max(8, width), playback_speed.label(player)):
                 say(line)
             if last_voice_id is not None:
                 last = next((row for row in rows if row["voice_id"] == last_voice_id), None)
@@ -391,6 +463,10 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             try:
                 if action == "q":
                     return
+                notice = playback_speed.line_command(action, player)
+                if notice is not None:
+                    say(notice)
+                    continue
                 if action.startswith("d"):
                     numbers = action[1:].split()
                     if len(numbers) > 2:

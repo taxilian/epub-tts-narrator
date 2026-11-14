@@ -605,6 +605,28 @@ class ReviewAppTests(unittest.TestCase):
         self.assertEqual(app.view, "info")
         self.assertEqual(app.notice, "Playback finished")
 
+    def test_greater_than_switches_playback_speed_in_the_passage_and_its_takes(self):
+        from types import SimpleNamespace
+        from epub_tts_narrator.renderer.playback_speed import PlaybackSpeed
+        app, _, _, playback = self.rendered_app()
+        app.player = SimpleNamespace(speed=PlaybackSpeed())
+        self.open_second_passage(app)
+        screen = FakeScreen()
+        app.draw(screen)
+        self.assertIn("> speed 1x", screen.text)
+
+        app.handle_key(">")
+
+        self.assertEqual(app.player.speed.label, "2x")
+        self.assertIn("Playback speed is now 2x", app.notice)
+        app.handle_key("t")
+        app.draw(screen)
+        self.assertIn("> speed 2x", screen.text)
+        app.handle_key(">")
+        self.assertEqual(app.player.speed.label, "1x")
+        app.handle_key("ENTER", screen=FakeScreen())
+        self.assertIs(playback.calls[-1][0], app.player)  # Plays through the same player and its speed.
+
     def test_multi_chunk_passage_can_change_the_selected_chunk(self):
         app, _, takes, _ = self.rendered_app(long_passage=True)
         app.handle_key("ENTER")

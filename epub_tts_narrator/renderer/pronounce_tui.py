@@ -24,6 +24,7 @@ from textual.widgets import Label, OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
 
 from ..tui_widgets import BASE_CSS, Dialog, MessageLog, TextEditScreen
+from . import playback_speed
 
 
 DEFINE_ACTIONS = [
@@ -101,6 +102,7 @@ class PronounceApp(App):
     #pron-help { color: $text-muted; height: auto; padding: 0 1; }
     """
     BINDINGS = [Binding("space", "stop_audio", "Stop audio"), Binding("escape", "quit_word", "Quit"),
+                Binding("greater_than_sign", "speed", "Speed"),
                 *[Binding(key, f"command('{key}')", show=False) for key in "pbainers"],
                 Binding("y", "command('y')", show=False), Binding("q", "quit_word", show=False)]
 
@@ -110,6 +112,7 @@ class PronounceApp(App):
         self.answers = queue.Queue()
         self.stop_playback = threading.Event()
         self.state, self.waiting, self.result, self.raised = None, False, 0, None
+        self.player, self.help_base = None, ""
 
     def compose(self) -> ComposeResult:
         yield Static(Text(self.title_text), id="pron-heading")
@@ -164,6 +167,7 @@ class PronounceApp(App):
     def _play(self, player, path):
         """Play until done or Space; True only when it played to the end."""
         self.stop_playback.clear()
+        self.player = player  # So the speed key can restart what plays.
         self.call_from_thread(self.set_status, self.PLAYING)
         try:
             player.start(path)
@@ -208,7 +212,20 @@ class PronounceApp(App):
             actions.add_options([Option(Text(label), id=f"cmd:{key}") for key, label in TAG_ACTIONS])
             help_text = "↑↓ choose · Enter does it · Y yes · N no · Q stop tagging"
         actions.highlighted = 0
-        self.query_one("#pron-help", Static).update(Text(help_text))
+        self.help_base = help_text
+        self.show_help()
+
+    def show_help(self):
+        self.query_one("#pron-help", Static).update(Text(self.help_base + " · " + playback_speed.help_text(self.player)))
+
+    def action_speed(self):
+        """Switch every playback between 1x and 2x; a word playing now starts again at the new speed."""
+        try:
+            playback_speed.toggle(self.player)
+        except (OSError, ValueError) as error:
+            self.log_line(f"Playback stopped: {error}")
+        self.log_line(playback_speed.toggled_notice(self.player))
+        self.show_help()
 
     def _show_define(self, state):
         forms = ", ".join(f"{count} {form}" for form, count in state["forms"].items())
@@ -282,7 +299,7 @@ class PronounceApp(App):
 
     def check_action(self, action, parameters):
         # While a dialog is open its own keys apply (typing, Escape to cancel).
-        if action in {"command", "quit_word", "stop_audio"} and len(self.screen_stack) > 1:
+        if action in {"command", "quit_word", "stop_audio", "speed"} and len(self.screen_stack) > 1:
             return False
         return True
 
@@ -339,6 +356,7 @@ class PronunciationQueueApp(PronounceApp):
     """
     PLAYING = "▶ Listening… any key interrupts and goes back five words."
     BINDINGS = [Binding("escape,q", "command('q')", "Quit"), Binding("s", "command('s')", "Listen"),
+                Binding("greater_than_sign", "speed", "Speed"),
                 *[Binding(key, f"command('{key}')", show=False) for key in "becirop"],
                 Binding("O", "command('o all')", show=False)]
 
@@ -352,11 +370,13 @@ class PronunciationQueueApp(PronounceApp):
                 yield OptionList(*[Option(Text(label), id=f"cmd:{key}") for key, label in QUEUE_ACTIONS],
                                  id="pron-actions")
         yield MessageLog(id="pron-log")
-        yield Static(Text("↑↓ entries · Tab to actions · S listen from here · P phonemes · E spelling · B engine's "
-                          "reading · C confirm · I keep default · R reset · O listen again (Shift+O all) · Q quit · "
-                          "while listening, any key interrupts"), id="pron-help")
+        yield Static(id="pron-help")
 
     def on_mount(self):
+        self.help_base = ("↑↓ entries · Tab to actions · S listen from here · P phonemes · E spelling · B engine's "
+                          "reading · C confirm · I keep default · R reset · O listen again (Shift+O all) · Q quit · "
+                          f"while listening, any key but {playback_speed.KEY} interrupts")
+        self.show_help()
         self.set_status("Starting…")
         self.query_one("#queue-entries", OptionList).focus()
         self.run_worker(self._run, thread=True, exclusive=True)
@@ -432,7 +452,8 @@ class PronunciationQueueApp(PronounceApp):
 
     def on_key(self, event):
         # While a word plays or in the pause after it, any key interrupts the walk.
-        if not self.waiting and len(self.screen_stack) == 1:
+        # The speed key only changes the speed (a word playing restarts at it), so listening goes on.
+        if not self.waiting and len(self.screen_stack) == 1 and event.character != playback_speed.KEY:
             self.stop_playback.set()
             event.stop()
 

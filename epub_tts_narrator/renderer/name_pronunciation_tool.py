@@ -37,6 +37,7 @@ from ..name_pronunciations import (PART_LABELS, book_occurrences, default_parts,
                                    parse_parts, parts_for, plural_spelling, save_decisions, save_definition,
                                    tagging_state, validate_name_phonemes, describe_reading, normalize_say_as,
                                    reading_of, validate_reading, word_pronunciation)
+from . import playback_speed
 from .audition import AudioPlayer, display
 
 
@@ -354,8 +355,12 @@ class NameTool:
                          "uses": len(found), "forms": dict(sorted(counts.items())),
                          "phonemes": current.get("phonemes"), "say_as": current.get("say_as")})
             if self.observer is None:  # A full-screen UI shows its own choices.
-                self.say(MENU)
+                self.say(MENU + f"   {playback_speed.KEY}: playback speed (now {playback_speed.label(self.player)})")
             command = self.input_fn("> ").strip()
+            notice = playback_speed.line_command(command, self.player)
+            if notice is not None:
+                self.say(notice)
+                continue
             verb, _, rest = command.partition(" ")
             verb, rest = verb.casefold(), rest.strip()
             try:
@@ -426,7 +431,7 @@ class NameTool:
                     last_source = "manual"
                     play_next = True
                 elif verb:
-                    raise ValueError("Use A, P, B, I, N, E, R, S or Q")
+                    raise ValueError("Use A, P, B, I, N, E, R, S, > or Q")
             except (ValueError, RuntimeError, OSError) as exc:
                 from .diagnostics import configured_secrets, safe_error_text
                 self.say("Action stopped: " + safe_error_text(exc, secrets=configured_secrets(self.config)))

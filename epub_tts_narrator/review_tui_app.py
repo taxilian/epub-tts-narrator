@@ -65,6 +65,8 @@ class ReviewTuiApp(CapturePrintMixin, App):
         Binding("r,f4", "review", "Review flag", tooltip="Turn the passage's review flag on or off"),
         Binding("p", "play", "Play", tooltip="Play the passage's accepted take"),
         Binding("space", "stop", "Stop", show=False, tooltip="Stop playback"),
+        Binding("greater_than_sign", "speed", "Speed",
+                tooltip="Play at 2x or 1x (pitch unchanged); also in Takes and every other listening screen"),
         Binding("t", "takes", "Takes", tooltip="Listen to every take of the passage and change which one is used"),
         Binding("f,F", "failed", "Failed", tooltip="Go to the chapter's first failed passage"),
         Binding("i,I", "ignore", "Ignore", tooltip="Ignore the chapter in the next render and assemble, or restore it"),
@@ -141,6 +143,8 @@ class ReviewTuiApp(CapturePrintMixin, App):
             parts.append("showing ignored chapters")
         if self.playing is not None:
             parts.append("playing (space stops)")
+        from .renderer import playback_speed
+        parts.append(playback_speed.help_text(self.controller.player))
         self.sub_title = " · ".join(parts)
 
     def render_chapters(self):
@@ -419,6 +423,16 @@ class ReviewTuiApp(CapturePrintMixin, App):
         self.playing = None
         if not quiet:
             self._log("Playback stopped")
+        self._subtitle()
+
+    def action_speed(self):
+        from .renderer import playback_speed
+        try:
+            playback_speed.toggle(self.controller.player)  # A playing take starts again at the new speed.
+        except (ValueError, OSError) as error:
+            self.playing = None
+            self._log("Playback failed: " + _flat(error), "error")
+        self._log(playback_speed.toggled_notice(self.controller.player))
         self._subtitle()
 
     def _poll_playback(self):
