@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 import math
+import os
 from pathlib import Path
 import re
 import secrets
@@ -265,6 +266,8 @@ class _RenderServer(ThreadingHTTPServer):
 
     def __init__(self, address, config, engine, *, recognizers=None, notify=_print_activity):
         self.settings = config["server"]
+        # Wall-clock start: /health reports it, and code changed after it is older code.
+        self.started_at = time.time()
         self.engine = engine
         # (primary, reference-or-None) speech recognizers, or None for TTS only.
         self.recognizers = recognizers
@@ -537,10 +540,32 @@ class _Handler(BaseHTTPRequestHandler):
                   "concurrent_requests": getattr(self.server.engine, "concurrent_requests", 1),
                   # What this worker is doing now (all clients): requests it has
                   # accepted, and for a batching engine its rows' live state.
-                  "work": self.server.work_status(asking=1)}
+                  "work": self.server.work_status(asking=1),
+                  # Which process this is and whether its code is still the checkout's:
+                  # renderer source files it loaded that changed on disk after it started.
+                  "pid": os.getpid(),
+                  "started_at": datetime.fromtimestamp(self.server.started_at).astimezone().isoformat(timespec="seconds"),
+                  "code_changed": _changed_code(self.server.started_at),
+                  "idle_seconds": round(self.server.idle_seconds(), 1)}
         if self.server.recognizers is not None:
             health.update(recognition_protocol=RECOGNITION_PROTOCOL, recognition=self.server.recognition)
         self._json(200, health)
+
+    def _shutdown(self):
+        """Stop this server (``audiobook-render local-server stop``): refused while it is working unless forced.
+
+        Requests already accepted still finish (``server_close`` joins their
+        threads); new connections are refused once it stops listening.
+        """
+        force = self.headers.get("X-Audiobook-Force") == "1"
+        work = self.server.work_status(asking=1)
+        if work["requests"] and not force:
+            self._json(409, {"error": {"message": f"The server is working on {work['requests']} request(s)"},
+                             "work": work})
+            return
+        self.server.activity(self.request_id, "stop requested" + (" (forced while working)" if work["requests"] else ""))
+        self._json(200, {"status": "stopping", "pid": os.getpid()})
+        threading.Thread(target=self.server.shutdown, name="serve-stop", daemon=True).start()
 
     def do_POST(self):
         self.request_id = self.server.next_request_id()
@@ -557,8 +582,11 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/recognize":
             self._recognize()
             return
+        if self.path == "/v1/shutdown":
+            self._shutdown()
+            return
         if self.path != "/v1/tts":
-            self._json(404, {"error": {"message": "Use POST /v1/tts or POST /v1/recognize"}})
+            self._json(404, {"error": {"message": "Use POST /v1/tts, POST /v1/recognize or POST /v1/shutdown"}})
             return
         try:
             if self.headers.get("Transfer-Encoding"):
@@ -756,6 +784,11 @@ def make_server(config, engine=None, *, recognizers=None, notify=_print_activity
             notify(f"Speech recognition is not offered: {exc}")
     return _RenderServer((host, settings.get("port", DEFAULT_SERVE_PORT)), config, engine,
                          recognizers=recognizers, notify=notify)
+
+
+def _changed_code(started):
+    from .code_freshness import changed_since
+    return changed_since(started)
 
 
 def _idle_watchdog(server, timeout, notify):

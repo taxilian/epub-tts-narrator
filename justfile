@@ -43,6 +43,10 @@ runpod-cleanup *args:
 test *args:
     @"{{ python }}" tests/run_detached.py "$@"
 
+# Local speech server shared by render and pronounce: status (default), stop or restart
+server *args:
+    @"{{ python }}" -m epub_tts_narrator.renderer local-server "$@"
+
 pronounce *args:
     @"{{ python }}" -m epub_tts_narrator.renderer pronounce "$@"
 

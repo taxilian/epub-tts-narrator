@@ -86,7 +86,8 @@ class ResolverTests(unittest.TestCase):
 
     def health(self, **overrides):
         return {"status": "ready", "model": "drama-3", "protocol": PROTOCOL,
-                "reference_reuse": True, "roles": ["tts"], "concurrent_requests": 1, **overrides}
+                "reference_reuse": True, "roles": ["tts"], "concurrent_requests": 1, "code_changed": [],
+                **overrides}
 
     def test_renderer_and_pronunciation_reuse_the_same_server_and_keep_pool_capacity(self):
         from epub_tts_narrator.renderer.auto_serve import shared_worker_config

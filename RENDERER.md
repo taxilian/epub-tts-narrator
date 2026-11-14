@@ -613,6 +613,18 @@ Configured local render workers and interactive pronunciation jobs reuse a
 local `serve` worker on `server.port` by default (`server.auto_start = true`).
 They share the TTS model rather than loading competing copies.
 
+`just server` (`audiobook-render local-server`) says whether that server is
+running: its process, when it started, its batch rows, what it is working on
+or how long it has been idle, whether its code is still this checkout's, and
+its log. `just server stop` stops it (refused while it is working; `--force`
+stops it anyway, and a running render starts it again) and `just server
+restart` replaces it. The server outlives the commands that start it, so a
+code change does not reach it until it restarts: its `/health` lists the
+renderer files it loaded that changed on disk after it started
+(`code_changed`), and render and pronounce replace a server running older
+code once it has been idle for a minute. One that is in use keeps running, and
+they say so.
+
 - The job probes `http://127.0.0.1:{server.port}/health` and, when a worker
   with the expected protocol and model answers, sends its synthesis there as a
   client. Saved voices keep working: the client reports the Drama 3 binding

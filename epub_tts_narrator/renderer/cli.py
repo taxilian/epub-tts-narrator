@@ -239,6 +239,11 @@ def parser():
     serve.add_argument("--port", type=int, help="Listen port (default: server.port, normally 8080)")
     serve.add_argument("--batch-rows", type=int, help="Concurrent decode rows for this server invocation")
     serve.add_argument("--idle-timeout", type=float, help="Idle seconds before this server invocation exits")
+    local_server = commands.add_parser(
+        "local-server", help="Show, stop or restart the local speech server that render and pronounce share")
+    local_server.add_argument("action", nargs="?", choices=("status", "stop", "restart"), default="status")
+    local_server.add_argument("--force", action="store_true", help="Stop it even while it is working")
+    local_server.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     chapters = commands.add_parser("serve-chapters", help="Serve resumable chapter jobs with compressed audio artifacts")
     chapters.add_argument("--config", type=Path, help="Global TOML file containing [chapter_server] and renderer settings")
     chapters.add_argument("--maintenance", action="store_true",
@@ -433,11 +438,12 @@ def main(argv=None, *, in_shell=False):
         elif args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations", "pronounce", "pronounce-name",
                             "history-echoes", "take-feedback", "accents", "convert-flac"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
-        elif args.command in {"serve", "cache-report", "prune"}:
+        elif args.command in {"serve", "cache-report", "prune", "local-server"}:
             config = load_config(config_path, require_verifier=False)
         else:
             config = load_config(config_path)
-        if args.command in {"render", "compare-performance", "pronunciations", "pronounce", "pronounce-name"}:
+        if args.command in {"render", "compare-performance", "pronunciations", "pronounce", "pronounce-name",
+                            "local-server"}:
             # auto_serve spawns `serve --config` from this file; the config
             # dict alone does not carry its own path.
             from epub_tts_narrator.config import resolve_config_path
@@ -481,6 +487,9 @@ def main(argv=None, *, in_shell=False):
             report = doctor(config)
             print(json.dumps(report, indent=2))
             return 0 if report["ready"] else 2
+        if args.command == "local-server":
+            from .local_server_command import run
+            return run(args, config)
         if args.command == "prune":
             from .prune import prune_command
             return prune_command(args, config)

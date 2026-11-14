@@ -12,7 +12,11 @@ that exits itself after ``server.idle_timeout_seconds`` (see
 Caveat: ``/health`` advertises the wire protocol and the model family but not
 the full engine identity, so protocol + model is the accepted compatibility
 check here. A port owned by any other process fails closed; nothing is ever
-killed.
+killed. A server whose loaded renderer code changed on disk after it started
+(``/health`` ``code_changed``) is asked to stop (``POST /v1/shutdown``) and
+started fresh when it has been idle for ``REPLACE_IDLE_SECONDS``; a busy one
+is used as it is. ``server_status``/``stop_server`` back
+``audiobook-render local-server``.
 """
 
 from __future__ import annotations
@@ -32,6 +36,10 @@ from .engines import EngineError
 
 
 SPAWN_READY_SECONDS = 300.0  # a cold model load and quantization can take minutes
+STOP_WAIT_SECONDS = 120.0  # requests already accepted finish before the process exits
+# A server idle this long is not between two requests of a running render, so
+# it can be replaced when it runs older code.
+REPLACE_IDLE_SECONDS = 60.0
 SPAWN_POLL_SECONDS = 1.0
 _PROBE_TIMEOUT_SECONDS = 5.0
 _MAX_HEALTH_BYTES = 1024 * 1024
@@ -245,6 +253,105 @@ def _port_and_key(config):
     return port, api_key
 
 
+def older_code(health):
+    """Whether our ready serve worker runs older code than this checkout (one too old to say counts too).
+
+    A foreign answer on the port is never "older": the compatibility check refuses it instead.
+    """
+    from .fish_http import PROTOCOL
+    if health.get("protocol") != PROTOCOL:
+        return False
+    changed = health.get("code_changed")
+    return not isinstance(changed, list) or bool(changed)
+
+
+def server_status(config):
+    """Read-only facts about the local auto-start server; never starts or stops anything."""
+    port, api_key = _port_and_key(config)
+    root = _cache_root()
+    status = {"port": port, "log": str(root / f"serve-{port}.log"),
+              "idle_timeout_seconds": (config.get("server") or {}).get("idle_timeout_seconds") or 600}
+    health = _probe(port, api_key=api_key)
+    if isinstance(health, dict):
+        status.update(state="ready", health=health)
+    else:
+        status["state"] = "loading" if health == _WARMING else "absent"
+    try:
+        status["spawned"] = json.loads((root / f"auto-serve-{port}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    return status
+
+
+def stop_server(config, *, force=False, wait=STOP_WAIT_SECONDS, notify=None):
+    """Ask the local server to stop and wait until its port is free; returns False when nothing was running.
+
+    A server that is working refuses unless ``force`` (its accepted requests
+    still finish). Nothing is killed: a server too old to accept a stop says so.
+    """
+    port, api_key = _port_and_key(config)
+    if not isinstance(_probe(port, api_key=api_key), dict):
+        if _probe(port, api_key=api_key) == _ABSENT:
+            return False
+        raise AutoServeError(f"The server on port {port} is still loading; stop it once it is ready")
+    request = Request(f"http://127.0.0.1:{port}/v1/shutdown", data=b"", method="POST")
+    if api_key:
+        request.add_header("Authorization", f"Bearer {api_key}")
+    if force:
+        request.add_header("X-Audiobook-Force", "1")
+    try:
+        with _PROBE_OPENER.open(request, timeout=_PROBE_TIMEOUT_SECONDS) as response:
+            response.read(_MAX_HEALTH_BYTES)
+    except HTTPError as exc:
+        code = exc.code
+        try:
+            body = json.loads(exc.read(_MAX_HEALTH_BYTES).decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            body = {}
+        finally:
+            exc.close()
+        if code == 409:
+            requests = (body.get("work") or {}).get("requests", "some")
+            raise AutoServeError(f"The local speech server is working on {requests} request(s) (a render or "
+                                 "preview is using it); --force stops it anyway, and a render starts it again") from None
+        if code == 404:
+            raise AutoServeError("This local speech server is older than the stop command. Stop it with: "
+                                 f"pkill -f 'epub_tts_narrator.renderer serve .*--port {port}'") from None
+        raise AutoServeError(f"The local speech server refused to stop (HTTP {code})") from None
+    except (URLError, OSError) as exc:
+        raise AutoServeError(f"Could not reach the local speech server on port {port} ({type(exc).__name__})") from None
+    if notify is not None:
+        notify(f"Stopping the local speech server on port {port}…")
+    deadline = time.monotonic() + wait
+    while _probe(port, api_key=api_key) != _ABSENT:
+        if time.monotonic() >= deadline:
+            raise AutoServeError(f"The local speech server on port {port} has not stopped after {wait:g}s; "
+                                 f"its log is {_cache_root() / f'serve-{port}.log'}")
+        time.sleep(SPAWN_POLL_SECONDS)
+    return True
+
+
+def _replace_if_older(config, port, health, api_key, notify):
+    """Stop an idle server running older code; True when it was stopped (the caller starts a fresh one)."""
+    if not older_code(health):
+        return False
+    idle = health.get("idle_seconds")
+    working = (health.get("work") or {}).get("requests", 0)
+    if working or (isinstance(idle, (int, float)) and idle < REPLACE_IDLE_SECONDS):
+        if notify is not None:
+            notify(f"The local speech server on port {port} runs older code but is in use; it is replaced once "
+                   "idle (just server restart replaces it now).")
+        return False
+    if notify is not None:
+        notify(f"The local speech server on port {port} runs older code; starting a fresh one.")
+    try:
+        return stop_server(config, notify=None)
+    except AutoServeError as exc:
+        if notify is not None:
+            notify(f"Could not replace it: {exc}")
+        return False
+
+
 def server_absent(config):
     """Whether nothing listens on the auto-start port (the server is gone, not merely busy or loading)."""
     port, api_key = _port_and_key(config)
@@ -267,10 +374,12 @@ def resolve_small_job_engine(config, notify=None):
                              "engine.type = drama3_mlx")
     port, api_key = _port_and_key(config)
     health = _probe(port, api_key=api_key)
-    if isinstance(health, dict):
+    if isinstance(health, dict) and not older_code(health):
         return _verified_client(config, port, health, api_key=api_key)
     with _exclusive_spawn_lock(port):
         health = _probe(port, api_key=api_key)
+        if isinstance(health, dict) and _replace_if_older(config, port, health, api_key, notify):
+            health = _probe(port, api_key=api_key)
         if isinstance(health, dict):
             return _verified_client(config, port, health, api_key=api_key)
         if health == _WARMING:
