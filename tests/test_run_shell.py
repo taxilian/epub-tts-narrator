@@ -308,6 +308,57 @@ class RunModelTests(unittest.TestCase):
         self.assertEqual([item["error"] for item in chapters], ["take 3 skipped words"])
         self.assertEqual(self.model.book_failure("b2"), (None, []))
 
+    def test_a_chapter_that_failed_again_retries_from_any_of_its_rows_while_its_book_renders(self):
+        # The case a person hit: retry, the chapter fails again, then r on its older row was refused.
+        board = BusBoard(self.bus)
+        board.book_state("/q/b1", "rendering")
+        requests = []
+        record = {"number": 2, "error_type": "SpeechVerificationFailed", "error": "first"}
+        board.chapter_failure(record, book="b1", retry=lambda: requests.append(1) or True)
+        first = self.model.current_failures()[0]
+        self.assertEqual(self.model.retry(first), "chapter")
+        board.chapter_failure(dict(record, error="second"), book="b1", retry=lambda: requests.append(2) or True)
+        # The older row is replaced, not left behind as "retrying".
+        self.assertEqual([item["error"] for item in self.model.visible_failures()], ["second"])
+        self.assertEqual(self.model.retry(first), "chapter")  # the old row retries the chapter's newest failure
+        self.assertEqual(requests, [1, 2])
+        board.chapter_state("/q/b1", 2, "done")
+        self.assertEqual([item["state"] for item in self.model.visible_failures()], ["retried"])
+
+    def test_a_chapter_whose_render_ended_retries_through_its_book_or_as_soon_as_one_can_take_it(self):
+        board = BusBoard(self.bus)
+        board.book_state("/q/b1", "rendering")
+        record = {"number": 3, "error_type": "SpeechVerificationFailed", "error": "silence"}
+        board.chapter_failure(record, book="b1", retry=lambda: False)  # its render no longer takes retries
+        chapter = self.model.current_failures()[0]
+        self.assertEqual(self.model.retry(chapter), "later")
+        self.assertEqual(self.model.wanted_books(), ["b1"])
+        admitted = []
+        board.book_state("/q/b1", "failed", retry=lambda: admitted.append("b1") or True, error="1 chapter failed")
+        # The book's failed state re-admits it at once for the chapter that was waiting.
+        self.assertEqual(admitted, ["b1"])
+        self.assertEqual((chapter["state"], self.model.wanted_books()), ("retrying", []))
+        # A chapter of a book that already failed goes back through the book.
+        board.book_state("/q/b2", "rendering")
+        board.chapter_failure(dict(record, number=1), book="b2", retry=lambda: False)
+        board.book_state("/q/b2", "failed", retry=lambda: admitted.append("b2") or True, error="failed")
+        self.assertEqual(self.model.retry(self.model.chapter_failure("b2", 1)), "book")
+        self.assertEqual(admitted, ["b1", "b2"])
+
+    def test_attempts_are_summed_up_in_plain_words(self):
+        from epub_tts_narrator.run_shell_model import plain_failure
+        silence = {"passed": False, "reasons": ["generation_or_verification_error"], "echo": False,
+                   "error": "EngineError: Drama 3 did not finish the text: 'silence'"}
+        self.assertEqual(plain_failure([silence] * 3),
+                         "Drama 3 went silent partway through this passage and stopped, on all 3 attempts; "
+                         "no audio was kept.")
+        heard = {"passed": False, "reasons": ["text_mismatch"], "echo": False, "error": ""}
+        self.assertEqual(plain_failure([silence, silence, heard]),
+                         "No take passed in 3 attempts: 2 Drama 3 went silent partway through and stopped; "
+                         "1 was heard saying different words.")
+        self.assertEqual(plain_failure([heard]), "No take passed: its one attempt was heard saying different words.")
+        self.assertEqual(plain_failure([]), "")
+
     def test_every_planned_chapter_is_listed_in_order_with_its_state_and_a_breakdown(self):
         board = BusBoard(self.bus)
         board.book_state("/q/b1", "rendering")
@@ -668,11 +719,14 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             await self.wait_for(pilot, lambda: bool(self.model.current_failures()))
             await pilot.press("5")
             app.query_one("#errors").focus()
-            await pilot.press("enter")
+            await pilot.press("d")  # the row in full, whatever the column width cut
             from epub_tts_narrator.run_shell_screens import FailureScreen, failure_text
             self.assertIsInstance(app.screen, FailureScreen)
-            text = failure_text(app.screen.item, app.screen.hint, app.screen.details)[1]
-            self.assertIn("END-OF-ERROR", text)  # never cut short
+            text = failure_text(app.screen.item, app.screen.hint, app.screen.details, app.screen.summary)[1]
+            # Plain words first, then the whole error, never cut short.
+            self.assertTrue(text.startswith("Drama 3 went silent partway through this passage and stopped, on all "
+                                            "3 attempts"), text[:120])
+            self.assertIn("Error: " + long_error, text)
             self.assertIn("Failed passage: Chapter 4, block 7, spoken by Mara", text)
             self.assertIn("Text: Nobody answered the door.", text)
             self.assertEqual(text.count("EngineError: Drama 3 did not finish the text: 'silence'"), 3)
@@ -681,6 +735,35 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("enter")  # the first repair: fresh takes for this passage
             await self.wait_for(pilot, lambda: not self.model.running)
         self.assertEqual((calls, retried.is_set(), app.result), (["reset"], True, 0))
+
+    async def test_a_retry_asked_for_when_no_render_can_take_it_resumes_its_book_when_the_run_ends(self):
+        from epub_tts_narrator.renderer.progress import report_book_state
+        attempts = []
+
+        def command():
+            attempts.append(1)
+            with live_board(print) as notify:
+                if len(attempts) == 1:
+                    report_book_state(notify, "/q/b1", "rendering")
+                    report_chapter_failure(PrefixedBoardNotify(notify.__self__, "[b1] "),
+                                           {"number": 2, "error_type": "SpeechVerificationFailed", "error": "x"},
+                                           retry=lambda: False)
+                    deadline = time.monotonic() + 10
+                    while not self.model.wanted_books() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    return 2
+            return 0
+
+        app = self.make_app(command)
+        app.resume_command = lambda model, books: (lambda: (attempts.append(tuple(books or ())), 0)[1])
+        async with app.run_test(size=(150, 40)) as pilot:
+            await self.wait_for(pilot, lambda: bool(self.model.current_failures()))
+            await pilot.press("5")
+            app.query_one("#errors").focus()
+            await pilot.press("r")
+            await self.wait_for(pilot, lambda: not app.is_running)
+        # The first run ended with the retry still waiting, so the shell rendered that book again.
+        self.assertEqual(attempts, [1, ("b1",)])
 
     async def test_enter_on_a_failed_book_in_summary_shows_why_and_resumes_it(self):
         from epub_tts_narrator.renderer.progress import report_book_state

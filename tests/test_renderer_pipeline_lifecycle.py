@@ -472,6 +472,7 @@ class PipelineLifecycleTests(unittest.TestCase):
             if event.kind == "failure":
                 repair = event.data["repair"]
                 seen["record"] = dict(event.data["record"])
+                seen["shown"] = event.data["passage"]  # the screen gets the text even without any take
                 seen["passage"] = repair.passage()
                 seen["attempts"] = repair.attempts()
                 seen["takes"] = repair.takes()
@@ -488,6 +489,9 @@ class PipelineLifecycleTests(unittest.TestCase):
         self.assertEqual((record["number"], record["block"], record["speakers"]), (2, 2, ["Narrator"]))  # the heading is block 1
         self.assertIn("did not finish the text: 'silence'", record["error"])
         self.assertEqual(seen["passage"]["text"], "The second boat crossed the harbor.")
+        self.assertEqual(seen["shown"], "The second boat crossed the harbor.")
+        self.assertNotIn("passage", record)  # the text is never saved in the failure record
+        self.assertNotIn("harbor", str(read_json(self.root / "work" / "status.json")))
         self.assertEqual(seen["passage"]["segment_ids"], record["segment_ids"])
         # Every attempt is listed with its error, though none made audio (so there is no take to hear).
         self.assertEqual([(row["attempt"], row["audio"], row["passed"]) for row in seen["attempts"]],
@@ -497,6 +501,39 @@ class PipelineLifecycleTests(unittest.TestCase):
         # The retry made new takes after the three failed ones, and one passed.
         accepted = read_json(self.root / "work" / "clips" / record["request_hash"] / "accepted.json")
         self.assertEqual(accepted["attempt"], 4)
+
+    def test_an_unexpected_error_in_a_retry_fails_only_its_chapter_which_can_be_retried_again(self):
+        from epub_tts_narrator.renderer.progress import shell_board
+        from epub_tts_narrator.run_events import EventBus
+        self._four_chapter_bundle("retry-error-bundle")
+        pool = self.pool_for("pipeline")
+        self.publish_voices(pool)
+        original = self.engine.synthesize
+        calls = {"count": 0}
+
+        def generate(*args, **kwargs):
+            if args[0] == "The second boat crossed the harbor.":
+                calls["count"] += 1
+                if calls["count"] <= 3:
+                    raise RuntimeError("Fish HTTP 500: Drama 3 did not finish the text: 'silence'")
+                if calls["count"] == 4:
+                    raise TypeError("fixture: an unexpected fault during the retry")
+            return original(*args, **kwargs)
+
+        failures, accepted = [], []
+
+        def on_event(event):
+            if event.kind == "failure":
+                failures.append(event.data["record"]["error_type"])
+                accepted.append(event.data["retry"]())
+
+        bus = EventBus()
+        bus.subscribe(on_event)
+        with patch.object(self.engine, "synthesize", side_effect=generate), shell_board(bus) as board:
+            result = render(self.bundle, self.config, pool, self.verifier, notify=board.log)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(failures, ["SpeechVerificationFailed", "TypeError"])
+        self.assertEqual(accepted, [True, True])  # the failed retry left retries open
 
     def test_node_activity_shows_which_block_holds_each_speech_and_verify_slot(self):
         from epub_tts_narrator.renderer.node_activity import ACTIVITY

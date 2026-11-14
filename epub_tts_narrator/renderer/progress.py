@@ -273,12 +273,12 @@ class BusBoard(TerminalBoard):
         self.bus.publish("outcome", severity="info" if succeeded else "error",
                          scope={"book": _book_label(key)}, data={"key": key, "succeeded": bool(succeeded)})
 
-    def chapter_failure(self, failure, *, book=None, retry=None, repair=None):
+    def chapter_failure(self, failure, *, book=None, retry=None, repair=None, passage=None):
         scope = {"chapter": failure.get("number")}
         if book:
             scope["book"] = book
         self.bus.publish("failure", failure.get("error", ""), severity="error", scope=scope,
-                         data={"record": dict(failure), "retry": retry, "repair": repair})
+                         data={"record": dict(failure), "retry": retry, "repair": repair, "passage": passage})
 
     def book_state(self, key, state, retry=None, error=None):
         """One book's lifecycle: queued, preparing, rendering, assembling, done, failed, interrupted.
@@ -416,9 +416,10 @@ class PrefixedBoardNotify:
     def set_status(self, key, order, snapshot):
         self.board.set_status(key, (self.prefix, *order), snapshot, book=_prefix_book(self.prefix))
 
-    def chapter_failure(self, failure, retry=None, repair=None):
+    def chapter_failure(self, failure, retry=None, repair=None, passage=None):
         if getattr(self.board, "structured_status", False):
-            self.board.chapter_failure(failure, book=_prefix_book(self.prefix), retry=retry, repair=repair)
+            self.board.chapter_failure(failure, book=_prefix_book(self.prefix), retry=retry, repair=repair,
+                                       passage=passage)
 
     def book_state(self, key, state, retry=None, error=None):
         if getattr(self.board, "structured_status", False):
@@ -502,14 +503,15 @@ def report_chapter_state(notify, key, number, state, **details):
         _board_of(notify).chapter_state(key, number, state, **details)
 
 
-def report_chapter_failure(notify, failure, retry=None, repair=None):
-    """Hand one chapter-scoped failure record (and its retry callback) to a run shell's board.
+def report_chapter_failure(notify, failure, retry=None, repair=None, passage=None):
+    """Hand one chapter-scoped failure record (its retry callback, takes, passage text) to a run shell's board.
 
     The line output already carries the failure message; plain, terminal
-    boards and custom notify callbacks ignore this.
+    boards and custom notify callbacks ignore this. ``passage`` (the failed
+    passage's text) reaches the screen only, never a log line or record.
     """
     if offers_chapter_retries(notify):
-        _board_of(notify).chapter_failure(failure, retry=retry, repair=repair)
+        _board_of(notify).chapter_failure(failure, retry=retry, repair=repair, passage=passage)
 
 
 def report_retry_hold(notify, release, failed):

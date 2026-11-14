@@ -153,6 +153,19 @@ def _failure_passage(bundle, chapter, linkage):
     return result
 
 
+def _failure_text(chapter, linkage):
+    """The failed passage's spoken text, for a run shell's screen only (never saved in a failure record)."""
+    chunk_id = linkage.get("chunk_id")
+    chunk = next((chunk for chunk in chapter.get("chunks") or []
+                  if isinstance(chunk, dict) and chunk.get("chunk_id") == chunk_id), None)
+    if chunk is None:
+        return None
+    if isinstance(chunk.get("spoken_text"), str):
+        return chunk["spoken_text"]
+    turns = chunk.get("paragraph_turns")
+    return " ".join(str(row.get("spoken_text") or "") for row in turns if isinstance(row, dict)) if isinstance(turns, list) else None
+
+
 # Six of nine investigated narrator-read dead ends repeated Drama 3 truncation on 700+ character chunks.
 _TRUNCATION_SPLIT_THRESHOLD = 2
 
@@ -3140,6 +3153,27 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                 _publish_work_chapter_link(config, composed, notify=notify)
             return composed
 
+        def chapter_failed(chapter_index, chapter, chapter_label, exc):
+            """Record one chapter's failure and offer a run shell its passage, takes and a retry."""
+            stop_if_requested()
+            reason = safe_error_text(exc, secrets=configured_secrets(config))
+            linkage = _failure_linkage(exc)
+            failure = {"number": chapter["number"], "error_type": type(exc).__name__,
+                       "error": reason, **linkage, **_failure_passage(bundle, chapter, linkage)}
+            with plan_lock:
+                chapter_failures[chapter["number"]] = failure
+            notify(f"=== Failed {chapter_label}: {reason}; continuing remaining chapters. ===")
+            from .progress import report_chapter_failure
+            repair = None
+            if retries is not None and failure.get("request_hash"):
+                # The shell can play this passage's takes and accept one a person judges good.
+                from .take_review import TakeReview
+                repair = TakeReview(work, config, verifier, failure["request_hash"],
+                                    book=bundle.get("directory"))
+            report_chapter_failure(notify, failure, retry=(
+                None if retries is None else lambda index=chapter_index: retries.request(index)),
+                repair=repair, passage=_failure_text(chapter, linkage))
+
         def process(chapter_index, budget=None):
             chapter = plan["chapters"][chapter_index]
             stop_if_requested()
@@ -3200,24 +3234,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     # faults propagate unchanged.
                     if isinstance(exc, VerificationUnavailable):
                         raise
-                    stop_if_requested()
-                    reason = safe_error_text(exc, secrets=configured_secrets(config))
-                    linkage = _failure_linkage(exc)
-                    failure = {"number": chapter["number"], "error_type": type(exc).__name__,
-                               "error": reason, **linkage, **_failure_passage(bundle, chapter, linkage)}
-                    with plan_lock:
-                        chapter_failures[chapter["number"]] = failure
-                    notify(f"=== Failed {chapter_label}: {reason}; continuing remaining chapters. ===")
-                    from .progress import report_chapter_failure
-                    repair = None
-                    if retries is not None and failure.get("request_hash"):
-                        # The shell can play this passage's takes and accept one a person judges good.
-                        from .take_review import TakeReview
-                        repair = TakeReview(work, config, verifier, failure["request_hash"],
-                                            book=bundle.get("directory"))
-                    report_chapter_failure(notify, failure, retry=(
-                        None if retries is None else lambda index=chapter_index: retries.request(index)),
-                        repair=repair)
+                    chapter_failed(chapter_index, chapter, chapter_label, exc)
                     return
                 if rendered_chapter != chapter:
                     with plan_lock:
@@ -3261,6 +3278,20 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     if callable(prioritize):
                         prioritize(owner)
                     process(index, budget=SpeechRetryBudget())
+                except Exception as error:  # noqa: BLE001 - a retry a person asked for fails only its chapter
+                    if isinstance(error, VerificationUnavailable):
+                        retry_errors.append(error)
+                        retries.close()
+                    else:
+                        # Unlike the main pass, an unexpected error here stays the
+                        # chapter's: the person can retry it again, and the other
+                        # chapters' retries stay open.
+                        try:
+                            chapter_failed(index, plan["chapters"][index],
+                                           f"chapter {number} / {len(bundle['chapters'])}", error)
+                        except BaseException as inner:  # noqa: BLE001 - re-raised by the run after the drain
+                            retry_errors.append(inner)
+                            retries.close()
                 except BaseException as error:  # noqa: BLE001 - re-raised by the run after the drain
                     retry_errors.append(error)
                     retries.close()

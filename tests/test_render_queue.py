@@ -763,6 +763,46 @@ class BookOutcomeBoardTests(QueueFixtureTests):
         self.assertEqual(started, [("book-1", 0, False), ("book-2", 1, False), ("book-1", 0, False),
                                    ("book-3", 2, True)])
 
+    def test_a_failed_chapter_of_a_finished_book_retries_while_another_book_renders(self):
+        """The case a person hit: one book ended with a failed chapter, another still renders; r must work."""
+        from epub_tts_narrator.renderer.progress import report_chapter_failure
+        from epub_tts_narrator.run_shell_model import RunModel
+        model = RunModel("render")
+        started, routes = [], []
+        book_one_again = threading.Event()
+        book_two_started = threading.Event()
+
+        def behavior(bundle, config, engine, verifier, **kwargs):
+            name = Path(config["render"]["work_dir"]).parent.name
+            started.append(name)
+            if name == "book-1" and started.count("book-1") == 1:
+                kwargs["on_synthesis_ready"]()  # room for book 2 beside it
+                book_two_started.wait(5)
+                # Its render no longer takes chapter retries (its hold ended), then the book fails.
+                report_chapter_failure(kwargs["notify"], {"number": 2, "error_type": "SpeechVerificationFailed",
+                                                          "error": "Drama 3 did not finish the text: 'silence'"},
+                                       retry=lambda: False)
+                raise RuntimeError("Rendering incomplete: 1 chapter failed")
+            if name == "book-1":
+                book_one_again.set()
+            if name == "book-2":
+                book_two_started.set()
+                book_one_again.wait(5)  # still rendering while book 1's chapter is retried
+            return {"chapters": []}
+
+        def on_event(event):
+            model.on_event(event)
+            if event.kind == "failure" and event.scope.get("book") == "book-1":
+                routes.append(model.retry(model.chapter_failure("book-1", 2)))
+
+        with patch("epub_tts_narrator.renderer.render_metrics.METRICS.snapshot", return_value={}):
+            code = self.run_in_shell_board(behavior, on_event, count=2, engine=Mock(max_parallel=1))
+        self.assertEqual(code, 0)
+        self.assertEqual(routes, ["later"])  # taken, and done as soon as book 1's render ended
+        self.assertEqual(started, ["book-1", "book-2", "book-1"])
+        self.assertTrue(book_one_again.is_set())
+        self.assertEqual(model.wanted_books(), [])
+
     def test_a_queue_with_only_failed_books_waits_for_retries_until_released(self):
         holds = []
 

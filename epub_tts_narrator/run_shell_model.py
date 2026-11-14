@@ -56,6 +56,47 @@ def repair_hint(item):
     return "Fix what stopped it, then resume the book (Enter on it in Summary, or r in Errors); completed work is reused."
 
 
+# What a failed attempt did, in plain words, by its rejection reason.
+_REASON_WORDS = {
+    "text_mismatch": "was heard saying different words", "audio_too_short": "was too short",
+    "audio_too_long": "ran too long", "silent_audio": "was silent", "audio_too_quiet": "was too quiet",
+    "excessive_silence": "had too much silence", "internal_silence_stall": "stalled in a long pause",
+    "excessive_clipping": "was distorted (clipped)", "generation_incomplete": "never finished",
+}
+
+
+def _attempt_cause(row):
+    error = (row.get("error") or "").casefold()
+    if "did not finish the text" in error and "silence" in error:
+        return "Drama 3 went silent partway through and stopped"
+    if row.get("echo"):
+        return "repeated an earlier line instead (history echo)"
+    reasons = [reason for reason in row.get("reasons") or [] if reason != "generation_or_verification_error"]
+    if reasons:
+        return " and ".join(_REASON_WORDS.get(reason, reason.replace("_", " ")) for reason in reasons)
+    if row.get("error"):
+        return "stopped with an error and made no audio"
+    return "was rejected"
+
+
+def plain_failure(rows):
+    """One plain sentence for what a failed passage's attempts did, e.g. 'Drama 3 went silent … on all 3 attempts'."""
+    rows = [row for row in rows or [] if not row.get("passed")]
+    if not rows:
+        return ""
+    causes = {}
+    for row in rows:
+        causes.setdefault(_attempt_cause(row), []).append(row)
+    if len(causes) == 1:
+        (cause, same), = causes.items()
+        if cause.startswith("Drama 3 went silent"):
+            return f"Drama 3 went silent partway through this passage and stopped, on {'all ' if len(same) > 1 else ''}{len(same)} attempt{'s' if len(same) > 1 else ''}; no audio was kept."
+        which = f"all {len(same)} attempts" if len(same) > 1 else "its one attempt"
+        return f"No take passed: {which} {cause}."
+    parts = [f"{len(same)} {cause}" for cause, same in sorted(causes.items(), key=lambda pair: -len(pair[1]))]
+    return f"No take passed in {len(rows)} attempts: " + "; ".join(parts) + "."
+
+
 @dataclass
 class RunFilter:
     book: str | None = None
@@ -142,11 +183,16 @@ class RunModel:
         self.pending_rebuilds = set()          # (book, chapter) to rebuild once its chapter finishes
         self._feedback = {}                    # render work -> {(request_hash, attempt): verdict}
         self._rejected_attempts = {}           # (render work, request_hash) -> rejected attempts with audio
+        # book -> chapter numbers a person asked to retry when no render of that
+        # book could take them yet; its next failed state (in a queue) re-admits
+        # the book, and a run that ends resumes it.
+        self.wanted_retries = {}
         self.changed = threading.Event()
 
     # Events --------------------------------------------------------------------
 
     def on_event(self, event):
+        deferred = None
         with self._lock:
             if ("book" not in event.scope and len(self.book_states) == 1
                     and event.kind in (LOG, STATUS, FAILURE, REJECTED, REBUILD)):
@@ -200,6 +246,13 @@ class RunModel:
                         entry["error"] = entry["error_type"] = None
                     elif data["state"] == "done" and entry["blocks"] is not None:
                         entry["done"] = entry["blocks"]
+                if data.get("state") == "done":
+                    for item in self.failures:
+                        # A chapter that rendered after a retry is no longer failing.
+                        if (item["kind"] == "chapter" and item.get("state") == "retrying"
+                                and item["scope"].get("book") == event.scope.get("book")
+                                and item["scope"].get("chapter") == event.scope.get("chapter")):
+                            item["state"] = "retried"
             elif event.kind == REJECTED:
                 data = dict(event.data or {})
                 key = (data.get("request_hash"), data.get("attempt"))
@@ -246,11 +299,21 @@ class RunModel:
                 if state == "failed":
                     self._book_failure(book, event.data.get("key"), retry=event.data.get("retry"),
                                        error=event.data.get("error"))
+                    if self.wanted_retries.get(book) and callable(event.data.get("retry")):
+                        # A chapter retry asked for while the book could not take it: re-admit the book.
+                        deferred = (book, event.data["retry"])
             elif event.kind == FAILURE:
                 data = dict(event.data or {})
+                for item in self.failures:
+                    # The chapter failed again: its newest failure replaces the older ones.
+                    if (item["kind"] == "chapter" and item["scope"].get("book") == event.scope.get("book")
+                            and item["scope"].get("chapter") == event.scope.get("chapter")
+                            and item.get("state", "failed") in ("failed", "retrying")):
+                        item["state"] = "superseded"
                 self.failures.append({"kind": "chapter", "scope": dict(event.scope), "error": event.text,
                                       "record": dict(data.get("record") or {}), "retry": data.get("retry"),
-                                      "repair": data.get("repair"), "state": "failed", "attempt": self.attempt})
+                                      "repair": data.get("repair"), "passage": data.get("passage"),
+                                      "state": "failed", "attempt": self.attempt})
                 entry = self._chapter(event.scope.get("book"), event.scope.get("chapter"), create=False)
                 if entry is not None:
                     error_type = (data.get("record") or {}).get("error_type")
@@ -267,6 +330,20 @@ class RunModel:
                 self.progress = dict(event.data or {})
             elif event.kind == FINISHED:
                 self.finish(event.data.get("exit_code"), event.data.get("error"))
+        if deferred is not None:
+            book, retry = deferred
+            if retry():
+                with self._lock:
+                    chapters = self.wanted_retries.pop(book, set())
+                    for item in self.failures:
+                        if item["scope"].get("book") == book and (
+                                item["kind"] == "book" and item.get("state") == "failed"
+                                or item["kind"] == "chapter" and item.get("wanted")):
+                            item["state"], item["wanted"] = "retrying", False
+                    for number in chapters:
+                        entry = self._chapter(book, number, create=False)
+                        if entry is not None:
+                            entry["state"] = "retrying"
         self.changed.set()
 
     def _book(self, book, *, key=None):
@@ -396,6 +473,7 @@ class RunModel:
             self.stopping = False
             self.progress = None
             self.holds.clear()
+            self.wanted_retries.clear()
             self.rebuild_handlers.clear()
             self.pending_rebuilds.clear()
             self.book_states = {book: dict(state, state="queued") for book, state in self.book_states.items()
@@ -485,20 +563,56 @@ class RunModel:
             return [item for item in self.failures
                     if item["attempt"] == self.attempt and item.get("state", "failed") == "failed"]
 
+    def current_failure(self, item):
+        """The newest failure of the same chapter (an older one was replaced when the chapter failed again)."""
+        if item["kind"] != "chapter" or item.get("state") != "superseded":
+            return item
+        return self.chapter_failure(item["scope"].get("book"), item["scope"].get("chapter")) or item
+
     def retry(self, item):
-        """Render one failed chapter again in the running render; False when it no longer can."""
-        callback = item.get("retry")
-        if not callable(callback) or item.get("state", "failed") != "failed" or not self.running:
+        """Render a failed chapter or book again while the run is alive; how, or False once the run has ended.
+
+        ``"chapter"``: its book's render retries it now. ``"book"``: its book's
+        render had ended, so the book goes back in the queue (finished chapters
+        are restored, the failed one renders with fresh takes). ``"later"``: no
+        render can take it yet; the book is re-admitted when its render ends
+        in a queue, and resumed when the run ends. False when the run is over
+        (resume it) or the chapter is already being rendered again.
+        """
+        item = self.current_failure(item)
+        if not self.running or item.get("state", "failed") not in ("failed",):
             return False
-        if not callback():
+        book = item["scope"].get("book")
+        route = None
+        callback = item.get("retry")
+        if callable(callback) and callback():
+            route = item["kind"]
+        elif item["kind"] == "chapter":
+            failure, _ = self.book_failure(book)
+            if (failure is not None and failure.get("state", "failed") == "failed"
+                    and callable(failure.get("retry")) and failure["retry"]()):
+                route = "book"
+                with self._lock:
+                    failure["state"] = "retrying"
+            else:
+                route = "later"
+                with self._lock:
+                    self.wanted_retries.setdefault(book, set()).add(item["scope"].get("chapter"))
+        if route is None:
             return False
         with self._lock:
-            item["state"] = "retrying"
-            entry = self._chapter(item["scope"].get("book"), item["scope"].get("chapter"), create=False)
-            if item["kind"] == "chapter" and entry is not None:
+            item["state"] = "retrying" if route != "later" else "failed"
+            item["wanted"] = route == "later"
+            entry = self._chapter(book, item["scope"].get("chapter"), create=False)
+            if item["kind"] == "chapter" and entry is not None and route != "later":
                 entry["state"] = "retrying"
         self.changed.set()
-        return True
+        return route
+
+    def wanted_books(self):
+        """Books with chapter retries still waiting for a render to take them (resumed when the run ends)."""
+        with self._lock:
+            return [book for book, chapters in self.wanted_retries.items() if chapters]
 
     def book_failure(self, book):
         """The book's newest book-level failure this attempt (failed or sent for a retry) and its failed chapters.
@@ -552,9 +666,10 @@ class RunModel:
         return len(releases)
 
     def visible_failures(self):
+        """Every failure passing the filter; a chapter's older failures it has since replaced are not listed."""
         with self._lock:
-            return [item for item in self.failures
-                    if self.filter.matches(item["scope"], text=item["error"])]
+            return [item for item in self.failures if item.get("state") != "superseded"
+                    and self.filter.matches(item["scope"], text=item["error"])]
 
     def visible_logs(self, after=0):
         """``[(sequence, event)]`` passing the filter, newer than ``after``."""

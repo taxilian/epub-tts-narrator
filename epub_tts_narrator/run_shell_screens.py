@@ -38,11 +38,12 @@ ACTIONS = {
 }
 
 
-def failure_text(item, hint, details=()):
+def failure_text(item, hint, details=(), summary=""):
+    """``(title, text)``: the plain-words summary first, then the whole error, the details, the hint and record."""
     scope = item["scope"]
-    lines = []
+    lines = [summary, ""] if summary else []
     if item.get("error"):
-        lines.append(item["error"])
+        lines.append(("Error: " if summary else "") + item["error"])
     else:
         lines.append("No error message was reported; the Log (4) has this run's messages.")
     if details:
@@ -69,7 +70,7 @@ class FailureScreen(Dialog):
                 Binding("pageup", "scroll_detail(-1)", "Scroll up", show=False),
                 Binding("pagedown", "scroll_detail(1)", "Scroll down", show=False)]
 
-    def __init__(self, item, hint, actions, *, details=()):
+    def __init__(self, item, hint, actions, *, details=(), summary=""):
         """``actions`` are names in ``ACTIONS`` or ``(name, label)`` pairs; Close is always last."""
         super().__init__()
         self.labels = {}
@@ -80,10 +81,10 @@ class FailureScreen(Dialog):
             self.labels[name] = label
         self.item, self.hint, self.actions = item, hint, [*names, "close"]
         self.labels["close"] = ACTIONS["close"]
-        self.details = list(details)
+        self.details, self.summary = list(details), summary
 
     def compose(self) -> ComposeResult:
-        title, text = failure_text(self.item, self.hint, self.details)
+        title, text = failure_text(self.item, self.hint, self.details, self.summary)
         with Vertical(classes="dialog"):
             yield Label(Text(title), classes="dialog-title")
             with VerticalScroll(id="failure-detail"):
