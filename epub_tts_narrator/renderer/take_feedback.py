@@ -80,7 +80,8 @@ def record_verdict(work, request_hash, row, verdict):
     from .common import write_json
     if verdict is not None and verdict not in VERDICTS:
         raise ValueError("A take verdict is good, bad or none")
-    report = row["record"].get("report") or {}
+    take_record = row.get("record") or {}
+    report = take_record.get("report") or {}
     with _locked(work):
         record = load(work)
         key = _key(request_hash, row["attempt"])
@@ -89,7 +90,7 @@ def record_verdict(work, request_hash, row, verdict):
         else:
             record["takes"][key] = {
                 "request_hash": request_hash, "attempt": row["attempt"], "verdict": verdict,
-                "audio_sha256": row["record"].get("audio_sha256"),
+                "audio_sha256": take_record.get("audio_sha256"),
                 "passed": report.get("passed") is True, "reasons": list(report.get("reasons") or []),
                 "text_confirmation_method": report.get("text_confirmation_method"),
                 "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),

@@ -1,4 +1,4 @@
-"""Smoke-test the real review-ui command through a POSIX pseudo-terminal."""
+"""Smoke-test the real review-ui command's curses screen (``--plain``) through a POSIX pseudo-terminal."""
 
 import fcntl
 import os
@@ -81,7 +81,7 @@ class ReviewTerminalTests(unittest.TestCase):
         self.addCleanup(self.close_child)
 
     def start(self, command=None):
-        command = command or [sys.executable, "-u", "-m", "epub_tts_narrator", "review-ui", str(self.directory)]
+        command = command or [sys.executable, "-u", "-m", "epub_tts_narrator", "review-ui", str(self.directory), "--plain"]
         self.process = subprocess.Popen(
             command, cwd=Path(__file__).resolve().parent.parent,
             env=self.environment, stdin=self.slave, stdout=self.slave, stderr=self.slave,
@@ -128,6 +128,17 @@ class ReviewTerminalTests(unittest.TestCase):
             self.read_more(min(0.1, remaining))
         self.process.wait(timeout=1)
         self.assertEqual(self.process.returncode, 0, self.transcript.decode(errors="replace"))
+
+    def test_a_terminal_opens_the_full_screen_review_and_quitting_gives_the_terminal_back(self):
+        self.start([sys.executable, "-u", "-m", "epub_tts_narrator", "review-ui", str(self.directory)])
+        self.wait_for(b"Needs")
+        self.wait_for(b"Chapter Two")
+
+        os.write(self.master, b"q")
+        self.finish()
+        # Textual left its keyboard mode and the alternate screen before exiting.
+        self.assertIn(b"\x1b[<u", self.transcript)
+        self.assertIn(b"\x1b[?1049l", self.transcript)
 
     def test_real_terminal_opens_toc_navigates_to_passages_and_quits(self):
         self.start()
@@ -220,7 +231,7 @@ class ReviewTerminalTests(unittest.TestCase):
                 add_failure_status(directory, 1, error="Verification exhausted", segment_ids=["s3"])
                 self._resize(cols)
                 self.start([sys.executable, "-u", "-m", "epub_tts_narrator", "review-ui",
-                            str(directory)])
+                            str(directory), "--plain"])
                 self.wait_for(b"FAILED SpeechVerificationFailed")
                 os.write(self.master, b"\r")
                 # The long title legitimately pushes the error text off the

@@ -3,8 +3,8 @@
 Import this module only after ``tui_support.wants_tui`` said yes: Textual is an
 optional extra, and nothing else in the package imports it at module level.
 
-* ``ConfirmScreen``, ``TextEditScreen``, ``ChoiceScreen``, ``PromptScreen`` —
-  modal dialogs that return their answer through ``dismiss``.
+* ``ConfirmScreen``, ``TextEditScreen``, ``ChoiceScreen``, ``MultiChoiceScreen``,
+  ``PromptScreen`` — modal dialogs that return their answer through ``dismiss``.
 * ``PromptBridge`` — file-like input/output streams that turn a worker
   thread's line prompt (``readline``) into a ``PromptScreen``, so code written
   for a terminal (model download confirmation, speaker choices) can run under a
@@ -349,6 +349,112 @@ class ChoiceScreen(Dialog):
 
     def on_option_list_option_selected(self, event):
         self.dismiss(self.options[int(event.option.id)][0])
+
+    def action_cancel(self):
+        self.dismiss(None)
+
+
+class MultiChoiceScreen(Dialog):
+    """Choose one option, or mark several (Space) and choose them together; Escape cancels.
+
+    ``options`` is ``[(value, label)]``; a value of ``None`` means "none of
+    them" and always returns ``[]``. Enter returns the highlighted option
+    alone, unless it is marked or two or more are marked: then it returns the
+    marked ones, in the order they were marked. Typing filters the list; Down
+    (or Tab) moves into it, where Space marks.
+    """
+
+    DEFAULT_CSS = BASE_CSS + """
+    MultiChoiceScreen OptionList { height: auto; max-height: 20; }
+    """
+    BINDINGS = [Binding("escape", "cancel", "Cancel", priority=True),
+                Binding("space", "toggle", "Mark", show=False)]
+
+    def __init__(self, title, options, *, selected=(), help_text=""):
+        super().__init__()
+        self.title_text, self.options, self.help_text = title, list(options), help_text
+        self.marked = [value for value in selected if value is not None]
+        self._shown = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog"):
+            yield Label(Text(self.title_text), classes="dialog-title")
+            yield Input(placeholder="Type to filter", id="choice-filter")
+            yield OptionList(id="choices")
+            yield Static(Text(self.help_text or "Enter chooses the highlighted one, or the marked ones · "
+                                                "Space marks (in the list) · Escape cancels"),
+                         classes="dialog-help")
+
+    def _label(self, value, label):
+        if value is None:
+            return Text(("[x] " if not self.marked else "[ ] ") + label, style="italic")
+        return Text(("[x] " if value in self.marked else "[ ] ") + label)
+
+    def _fill(self, text, keep=None):
+        words = text.casefold().split()
+        self._shown = [index for index, (_, label) in enumerate(self.options)
+                       if all(word in label.casefold() for word in words)]
+        choices = self.query_one("#choices", OptionList)
+        choices.clear_options()
+        choices.add_options([Option(self._label(*self.options[index]), id=str(index)) for index in self._shown])
+        if self._shown:
+            position = self._shown.index(keep) if keep in self._shown else 0
+            choices.highlighted = position
+
+    def on_mount(self):
+        self._fill("")
+        first = next((index for index, (value, _) in enumerate(self.options) if value in self.marked), None)
+        if first is not None:
+            self.query_one("#choices", OptionList).highlighted = self._shown.index(first)
+        self.query_one("#choice-filter", Input).focus()
+
+    def _highlighted(self):
+        choices = self.query_one("#choices", OptionList)
+        if not choices.option_count or choices.highlighted is None:
+            return None
+        return int(choices.get_option_at_index(choices.highlighted).id)
+
+    def on_key(self, event):
+        if event.key == "down" and self.focused is self.query_one("#choice-filter", Input):
+            self.query_one("#choices", OptionList).focus()
+            event.stop()
+
+    def on_input_changed(self, event):
+        self._fill(event.value)
+
+    def action_toggle(self):
+        if self.focused is self.query_one("#choice-filter", Input):
+            # Space types in the filter; it marks only in the list.
+            self.query_one("#choice-filter", Input).insert_text_at_cursor(" ")
+            return
+        index = self._highlighted()
+        if index is None:
+            return
+        value = self.options[index][0]
+        if value is None:
+            self.marked.clear()
+        elif value in self.marked:
+            self.marked.remove(value)
+        else:
+            self.marked.append(value)
+        self._fill(self.query_one("#choice-filter", Input).value, keep=index)
+
+    def _choose(self, index):
+        value = self.options[index][0]
+        if value is None:
+            self.dismiss([])
+        elif len(self.marked) >= 2 or value in self.marked:
+            self.dismiss(list(self.marked))
+        else:
+            self.dismiss([value])
+
+    def on_input_submitted(self, event):
+        index = self._highlighted()
+        if index is not None:
+            self._choose(index)
+
+    def on_option_list_option_selected(self, event):
+        self._choose(int(event.option.id))
 
     def action_cancel(self):
         self.dismiss(None)

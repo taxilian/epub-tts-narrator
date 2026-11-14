@@ -68,9 +68,15 @@ def _speaker_judge(config):
 def _run_directory_command(args):
     """Dispatch completed-book commands that need no shared pipeline state."""
     if args.command == "review-ui":
-        from .review_tui import run_review
+        from .tui_support import wants_tui
         config = load_config(args.config)
         player_command = config.get("casting", {}).get("player", ["/usr/bin/afplay"])
+        if wants_tui(args):
+            from .review_tui_app import run_review_tui
+            run_review_tui(args.directory.resolve(), player_command=player_command)
+            return 0
+        # --plain, or no Textual: the curses screen (which needs a terminal too).
+        from .review_tui import run_review
         run_review(args.directory.resolve(), player_command=player_command)
         return 0
     from .voice_profile_refresh import refresh_book_voice_profiles
@@ -268,6 +274,8 @@ def parser():
     review_ui.add_argument("directory", type=Path, help="Completed analysis directory to review")
     review_ui.add_argument("--config", type=Path,
                            help="Global TOML file (accepted for command consistency; review-ui makes no model calls)")
+    review_ui.add_argument("--plain", action="store_true",
+                           help="Use the simpler curses screen instead of the full-screen interface")
     speakers = commands.add_parser("resolve-speakers", help="Resolve unassigned passages by consensus and refresh existing book directories")
     speakers.add_argument("directories", nargs="+", type=Path, help="Analyzed book directories to repair in place; originals are backed up")
     speakers.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")

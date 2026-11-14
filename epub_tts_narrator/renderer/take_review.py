@@ -34,9 +34,12 @@ NOTE = "Accepted by a person listening in the run shell"
 class TakeReview:
     """Takes of one passage, and a person's decisions about them. Safe to call from a UI thread."""
 
-    def __init__(self, work, config, verifier, request_hash, *, directory=None, book=None):
+    def __init__(self, work, config, verifier, request_hash, *, directory=None, book=None, list_takes=None,
+                 select_take=None, note=NOTE):
+        """``list_takes``/``select_take`` default to ``take_selection``'s; review-ui passes its own."""
         from .take_feedback import clip_folder
         self.work = Path(work)
+        self._list_takes, self._select_take, self.note = list_takes, select_take, note
         # The book (bundle) directory, for edits a person makes to the passage.
         self.book = Path(book) if book is not None else None
         # The take folder: ``clips/HASH``, or ``clips/HASH/parts/PART`` for one
@@ -52,14 +55,14 @@ class TakeReview:
     def takes(self):
         """Every retained take, oldest first: what the screen needs and nothing more."""
         from .take_feedback import verdicts
-        from .take_selection import list_takes
         marks = verdicts(self.work, self.request_hash)
         used = self.used()
         rows = []
-        for row in list_takes(self.clips, self.request_hash):
-            report = row["record"].get("report") or {}
+        for row in self._lister()(self.clips, self.request_hash):
+            record = row.get("record") or {}
+            report = record.get("report") or {}
             accepted = row["accepted"] or (used is not None and used.get("attempt") == row["attempt"]
-                                           and used.get("audio_sha256") == row["record"].get("audio_sha256"))
+                                           and used.get("audio_sha256") == record.get("audio_sha256"))
             rows.append({
                 "attempt": row["attempt"], "passed": row["passed"], "accepted": accepted,
                 "eligible": row["eligible"], "ineligible_reason": row["ineligible_reason"],
@@ -171,6 +174,18 @@ class TakeReview:
         return {(entry.get("request_hash"), entry.get("attempt")): entry.get("verdict")
                 for entry in load(self.work)["takes"].values()}
 
+    def _lister(self):
+        if self._list_takes is None:
+            from .take_selection import list_takes
+            self._list_takes = list_takes
+        return self._list_takes
+
+    def _selector(self):
+        if self._select_take is None:
+            from .take_selection import select_take
+            self._select_take = select_take
+        return self._select_take
+
     def used(self):
         """The accepted record for this passage (a manual selection keeps its own audio copy), or None."""
         from .common import read_json, regular_file
@@ -191,15 +206,14 @@ class TakeReview:
         return blocks or None
 
     def _row(self, attempt):
-        from .take_selection import list_takes
-        row = next((item for item in list_takes(self.clips, self.request_hash) if item["attempt"] == attempt), None)
+        row = next((item for item in self._lister()(self.clips, self.request_hash) if item["attempt"] == attempt), None)
         if row is None:
             raise ValueError(f"Take {attempt} does not exist")
         return row
 
     def _learn(self, row):
         from .stored_audio import audio_hash
-        report = row["record"].get("report") or {}
+        report = (row.get("record") or {}).get("report") or {}
         blocks = self._learnable(report)
         if not blocks:
             return []
@@ -215,9 +229,8 @@ class TakeReview:
         A person choosing a take also judges it good, which the feedback keeps.
         """
         from .take_feedback import record_verdict
-        from .take_selection import select_take
         row = self._row(attempt)
-        result = select_take(self.clips, self.request_hash, attempt, note=NOTE)
+        result = self._selector()(self.clips, self.request_hash, attempt, note=self.note)
         record_verdict(self.work, self.request_hash, row, "good")
         learned = self._learn(row) if learn else []
         return {"attempt": attempt, "basis": result.get("basis"), "learned": learned}

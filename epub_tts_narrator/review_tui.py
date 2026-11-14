@@ -1,4 +1,10 @@
-"""Interactive terminal review for published analyses; existing cast members only."""
+"""Interactive terminal review for published analyses; existing cast members only.
+
+``ReviewApp`` owns every review state and decision (no curses, no Textual).
+Two views drive it: the full-screen Textual screen (``review_tui_app``, the
+default in a terminal) through its shared actions, and the curses adapter
+below (``--plain``, or without Textual) through ``handle_key``/``draw``.
+"""
 # noqa: SIZE_OK — the pure terminal state machine and its sole curses adapter
 # share one event/draw contract and are deliberately independent of the model.
 
@@ -160,8 +166,11 @@ class ReviewApp:
         chapter_index = self.confirm_ignore_index
         ignored = self.confirm_ignore_ignored
         self.view = "toc"
-        if chapter_index is None:
-            return
+        if chapter_index is not None:
+            self.set_ignored(chapter_index, ignored)
+
+    def set_ignored(self, chapter_index, ignored):
+        """Ignore (or restore) one chapter now; return whether it was saved (``notice`` says what happened)."""
         try:
             updated = chapter_ignores.set_ignored(
                 self.directory, self.document, chapter_index, ignored,
@@ -169,7 +178,7 @@ class ReviewApp:
             )
         except (ValueError, OSError) as exc:
             self.notice = "Ignore save failed: " + _flat(exc)
-            return
+            return False
         self.ignored_chapters = frozenset(updated)
         self._sync_toc_selection()
         number = chapter_index + 1
@@ -179,6 +188,7 @@ class ReviewApp:
         else:
             self.notice = (f"Chapter {number} restored. The next render and assemble include it; "
                            "unsaved attribution edits are unchanged.")
+        return True
 
     def _chapter_failure(self, chapter_index=None):
         """Return the persisted render failure for one chapter, if any."""
@@ -230,17 +240,23 @@ class ReviewApp:
         count = len(self._passage_rows())
         self.passage_index = max(0, min(count - 1, self.passage_index + amount))
 
-    def _jump_to_failure(self):
-        """Open the chapter at its first known failed passage, when linkage exists."""
+    def failed_passage(self):
+        """The current chapter's first known failed passage (its row index), or None (``notice`` says why)."""
         failure = self._chapter_failure()
         if failure is None:
             self.notice = "This chapter has no recorded render failure."
-            return
+            return None
         rows = self._passage_rows()
         target = next((index for index, row in enumerate(rows) if row["failed"]), None)
         if target is None:
             self.notice = (f"Chapter {self.chapter_index + 1} render failed "
                            f"({failure['error_type']}); no exact failed-passage linkage was recorded.")
+        return target
+
+    def _jump_to_failure(self):
+        """Open the chapter at its first known failed passage, when linkage exists."""
+        target = self.failed_passage()
+        if target is None:
             return
         self.passage_index = target
         self.passage_scroll = 0
@@ -255,6 +271,10 @@ class ReviewApp:
             self.view = "info"
 
     def _open_speaker(self):
+        self._load_speaker_options()
+        self.view = "speaker"
+
+    def _load_speaker_options(self):
         document = self._effective_document()
         segment = self._segment(self.info_segment_id)
         ranked = rank_speakers(document, segment)
@@ -266,32 +286,147 @@ class ReviewApp:
         current: list[str] = metadata(document, self.info_segment_id)["role_ids"]
         self.speaker_selected = list(current)
         self.speaker_index = self.speaker_options.index(current[0]) if current else 0
-        self.view = "speaker"
 
     def _commit_speaker(self, role_ids):
+        if self.set_speakers(role_ids):
+            self.view = "info"
+
+    def _toggle_review(self):
+        self.toggle_review()
+
+    # Shared actions: the curses keys and the Textual screen both use these ------------
+
+    def focus(self, chapter_index=None, segment_id=None):
+        """Make a chapter (original partition index) and a passage the ones the actions apply to."""
+        if chapter_index is not None:
+            self.chapter_index = chapter_index
+        if segment_id is not None:
+            self.info_segment_id = segment_id
+
+    def chapter_rows(self):
+        return self._toc_rows()
+
+    def passage_rows(self):
+        return self._passage_rows()
+
+    def detail_rows(self):
+        """``[(field or None, text)]`` for the focused passage; fields are speaker, direction, review, takes."""
+        return self._info_rows()
+
+    def speaker_choices(self):
+        """``([(role_id or None, label, reason)], selected role IDs)`` for the focused passage, ranked."""
+        self._load_speaker_options()
+        options = [(role_id, "Unresolved" if role_id is None else self.labels[role_id],
+                    self.speaker_reasons.get(role_id, "")) for role_id in self.speaker_options]
+        return options, list(self.speaker_selected)
+
+    def role_slot(self, role_id):
+        """The role's cast position, which picks its color."""
+        return list(self.roles).index(role_id)
+
+    def set_speakers(self, role_ids):
+        """Reassign the focused passage to existing cast members (two or more: simultaneous)."""
         try:
             edited = edit_speaker(self._segment(self.info_segment_id), role_ids,
                                   self.roles, self.labels, candidates=self.speaker_candidates)
         except ValueError as exc:
             self.notice = str(exc)
-            return
+            return False
         self._store_edit(edited)
-        self.view = "info"
+        return True
 
-    def _toggle_review(self):
+    def direction(self):
+        return self._segment(self.info_segment_id)["delivery"]["direction"]
+
+    def set_direction(self, text):
+        """Replace the focused passage's delivery direction (at most 240 characters)."""
+        try:
+            edited = edit_direction(self._segment(self.info_segment_id), text)
+        except ValueError as exc:
+            self.notice = str(exc)
+            return False
+        self._store_edit(edited)
+        return True
+
+    def toggle_review(self):
         segment = self._segment(self.info_segment_id)
         try:
             edited = edit_review(segment, not segment["attribution"]["review_required"])
         except ValueError as exc:
             self.notice = str(exc)
-            return
+            return False
         self._store_edit(edited)
+        return True
+
+    def passage_clips(self):
+        """``(chapter index, clips)`` of the focused passage; no clips sets ``notice`` to why."""
+        chapter = self._render_chapter()
+        clips = list(chapter["segments"].get(self.info_segment_id, []))
+        if not clips:
+            self.notice = self._not_rendered_notice(chapter)
+        return chapter, clips
+
+    def accepted_take(self):
+        """The focused passage's accepted take row, or None (``notice`` says why).
+
+        A passage rendered in several chunks has no single take: the notice
+        says so, and ``passage_clips`` lists them.
+        """
+        chapter, clips = self.passage_clips()
+        if not clips:
+            return None
+        if len(clips) > 1:
+            self.notice = "This passage has multiple rendered chunks; choose a chunk and take to play."
+            return None
+        try:
+            rows = self._clip_takes(chapter, clips[0])
+        except (ValueError, OSError) as exc:
+            self.notice = "Could not list takes: " + _flat(exc)
+            return None
+        accepted = next((row for row in rows if row.get("accepted")), None)
+        if accepted is None:
+            self.notice = "Not rendered: this passage has no accepted take."
+        return accepted
+
+    def take_review(self, chapter, clip):
+        """The shared take review (``renderer/take_review``) of one rendered chunk: listen, mark."""
+        from .renderer.take_review import TakeReview
+        return TakeReview(chapter["work_directory"], {"casting": {}}, None, clip["request_hash"],
+                          list_takes=self._take_lister(), select_take=self._take_selector())
+
+    def accept_take(self, chapter, clip, attempt):
+        """Use one take for a chunk; supersede the chapter checkpoint so a rerender rebuilds it."""
+        clips = chapter["work_directory"] / "clips"
+        try:
+            self._take_selector()(clips, clip["request_hash"], attempt, note="")
+        except ValueError as exc:
+            self.notice = _flat(exc)
+            return False
+        self.notice = f"Accepted take {attempt}. " + self.rerender_notice(chapter, attempt)
+        return True
+
+    def rerender_notice(self, chapter, token):
+        """Supersede the focused chapter's checkpoint after its takes changed; say how to rerender."""
+        chapter_number = self.chapter_index + 1
+        try:
+            archived = archive_checkpoint(chapter["work_directory"], chapter_number, token=token)
+            archive_error = ""
+        except OSError as exc:
+            archived = None
+            archive_error = _flat(exc)
+        book = shlex.quote(str(self.directory))
+        command = (f"audiobook-render render {book} --chapters-only {chapter_number} && "
+                   f"audiobook-render assemble {book}")
+        archived_notice = "Chapter checkpoint archived. " if archived else ""
+        if archive_error:
+            archived_notice = "Checkpoint archive failed: " + archive_error + ". "
+        return f"{archived_notice}Rerun: {command}"
 
     def _activate_info_field(self, field):
         if field == "speaker":
             self._open_speaker()
         elif field == "direction":
-            self.direction_buffer = self._segment(self.info_segment_id)["delivery"]["direction"]
+            self.direction_buffer = self.direction()
             self.view = "direction"
         elif field == "review":
             self._toggle_review()
@@ -390,25 +525,13 @@ class ReviewApp:
         self.notice = playback_notice(outcome)
 
     def _play_info_accepted(self, screen):
-        chapter = self._render_chapter()
-        clips = chapter["segments"].get(self.info_segment_id, [])
-        if not clips:
-            self.notice = self._not_rendered_notice(chapter)
-            return
-        if len(clips) > 1:
+        accepted = self.accepted_take()
+        if accepted is not None:
+            self._play_audio(accepted, screen)
+        elif len(self._render_chapter()["segments"].get(self.info_segment_id, [])) > 1:
+            notice = self.notice
             self._open_takes()
-            self.notice = "This passage has multiple rendered chunks; choose a chunk and take to play."
-            return
-        try:
-            rows = self._clip_takes(chapter, clips[0])
-        except (ValueError, OSError) as exc:
-            self.notice = "Could not list takes: " + _flat(exc)
-            return
-        accepted = next((row for row in rows if row.get("accepted")), None)
-        if accepted is None:
-            self.notice = "Not rendered: this passage has no accepted take."
-            return
-        self._play_audio(accepted, screen)
+            self.notice = notice
 
     def _request_take_acceptance(self):
         assert self.takes_chapter is not None
@@ -432,28 +555,11 @@ class ReviewApp:
         assert self.takes_chapter is not None and self.confirm_take_attempt is not None
         attempt = self.confirm_take_attempt
         clip = self.takes_clips[self.takes_chunk_index]
-        clips = self.takes_chapter["work_directory"] / "clips"
         self.view = "takes"
-        try:
-            self._take_selector()(clips, clip["request_hash"], attempt, note="")
-        except ValueError as exc:
-            self.notice = _flat(exc)
-            return
-        chapter_number = self.chapter_index + 1
-        try:
-            archived = archive_checkpoint(self.takes_chapter["work_directory"], chapter_number, token=attempt)
-            archive_error = ""
-        except OSError as exc:
-            archived = None
-            archive_error = _flat(exc)
-        self._load_takes()
-        book = shlex.quote(str(self.directory))
-        command = (f"audiobook-render render {book} --chapters-only {chapter_number} && "
-                   f"audiobook-render assemble {book}")
-        archived_notice = "Chapter checkpoint archived. " if archived else ""
-        if archive_error:
-            archived_notice = "Checkpoint archive failed: " + archive_error + ". "
-        self.notice = f"Accepted take {attempt}. {archived_notice}Rerun: {command}"
+        if self.accept_take(self.takes_chapter, clip, attempt):
+            notice = self.notice
+            self._load_takes()
+            self.notice = notice
 
     def _handle_takes(self, key, screen):
         if key == "ESC":
@@ -537,13 +643,8 @@ class ReviewApp:
 
     def _handle_direction(self, key):
         if key == "ENTER":
-            try:
-                edited = edit_direction(self._segment(self.info_segment_id), self.direction_buffer)
-            except ValueError as exc:
-                self.notice = str(exc)
-                return
-            self._store_edit(edited)
-            self.view = "info"
+            if self.set_direction(self.direction_buffer):
+                self.view = "info"
         elif key == "ESC":
             self.view = "info"
         elif key == "BACKSPACE":
