@@ -928,6 +928,14 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             # Interrupted raw-only takes reserve their IDs but cannot be
             # verified. Append a new seed rather than recycling an orphan.
             continue
+        if (purpose == "speech" and not result_path.exists() and audio_present(wav)
+                and not (elevenlabs and (generation_path.exists() or generation_path.is_symlink()))):
+            # Audio with no record of how it was made (a stop between writing it
+            # and saving its record) is never verified as this take: its engine
+            # metadata, such as a joined recording's parts, is unknown. It stays
+            # on disk and this take is made again under another name.
+            notify(f"  Take {attempt} has audio but no record of how it was made; making it again.")
+            wav = directory / speech_take_filename(request, attempt, role="unrecorded-" + os.urandom(8).hex())
         try:
             if (elevenlabs and attempt != missing_accepted_attempt
                     and (generation_path.exists() or generation_path.is_symlink())):
@@ -1064,7 +1072,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 # recognition can be interrupted. In particular, a pronunciation
                 # rewrite must retain its reviewed spelling and audit when this
                 # already-generated waveform is verified on the next run.
-                if adaptive or fresh_speech:
+                if adaptive or fresh_speech or purpose == "speech":
                     write_json(result_path, {
                         "request_hash": request_hash, "request": request,
                         "attempt": attempt, "seed": seed, "validation_key": validation_key,
