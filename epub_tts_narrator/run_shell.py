@@ -119,8 +119,8 @@ class RunApp(CapturePrintMixin, App):
         Binding("v", "severity", "Level", tooltip="Cycle the message level: info, warnings, errors, everything"),
         Binding("slash", "search", "Search", tooltip="Filter messages by text"),
         Binding("x", "clear_filters", "Clear", tooltip="Clear every filter"),
-        Binding("r", "retry", "Retry", tooltip="Put the highlighted failed chapter or book back at the front of the "
-                                               "queue while the run continues"),
+        Binding("r", "retry", "Retry", tooltip="Put the highlighted failed chapter back at the front of the queue, or "
+                                               "a failed book back in its command-line place, while the run continues"),
         Binding("t", "takes", "Takes", tooltip="Listen to the failed passage's takes and accept a good one"),
         Binding("F", "finish", "Finish", show=False,
                 tooltip="Stop waiting for retries; the run reports what still failed (asks first)"),
@@ -514,11 +514,10 @@ class RunApp(CapturePrintMixin, App):
     def on_data_table_row_selected(self, event):
         table = event.data_table.id
         if table == "books":
-            # Drill into one book: its chapters, workers, log and errors.
             key = event.row_key.value
-            self.model.filter.book = None if key == "None" else key
-            self.action_tab("chapters")
-            self.refresh_view(force=True)
+            book = None if key == "None" else key
+            if not self._open_book_failure(book):
+                self._show_book(book)
         elif table == "rows":
             self._chapter_detail(event.row_key.value)
         elif table == "errors":
@@ -529,6 +528,45 @@ class RunApp(CapturePrintMixin, App):
             item = self._highlighted_rejection()
             if item is not None:
                 self._open_rejection(item)
+
+    def _show_book(self, book):
+        """Drill into one book: its chapters, workers, log and errors."""
+        self.model.filter.book = book
+        self.action_tab("chapters")
+        self.refresh_view(force=True)
+
+    def _open_book_failure(self, book):
+        """A failed book's error, its failed chapters and how to resume it; False for a book that has not failed."""
+        from .run_shell_screens import FailureScreen
+        failure, chapters = self.model.book_failure(book)
+        state = self.model.book_states.get(book, {}).get("state")
+        if failure is None and state != "failed":
+            return False
+        item = failure or {"kind": "book", "scope": {"book": book}, "error": "", "record": {}, "state": "failed"}
+        actions = []
+        if (failure is not None and failure.get("state", "failed") == "failed" and self.model.running
+                and callable(failure.get("retry"))):
+            actions.append("retry_book")
+        if self.resumable and not self.model.running:
+            actions.append("resume_book" if book is not None else "resume")
+        actions.append("chapters")
+        details = [f"Chapter {entry['scope'].get('chapter')}"
+                   + (f" ({entry['record']['error_type']})" if entry["record"].get("error_type") else "")
+                   + f": {entry['error'] or 'no message'}" for entry in chapters]
+        if details:
+            details = ["Failed chapters (Errors, 5, has each one's repairs):", *details]
+
+        def chosen(action):
+            if action == "retry_book":
+                self._retry(failure)
+            elif action == "resume_book":
+                self._resume(books=[book])
+            elif action == "resume":
+                self._resume()
+            elif action == "chapters":
+                self._show_book(book)
+        self.push_screen(FailureScreen(item, repair_hint(item), actions, details=details), chosen)
+        return True
 
     def _chapter_detail(self, key):
         chapter = next((item for row_key, item in self.model.visible_chapters() if row_key == key), None)
@@ -599,7 +637,8 @@ class RunApp(CapturePrintMixin, App):
     def _retry(self, item):
         if self.model.retry(item):
             if item["kind"] == "book":
-                self.notify(f"{item['scope'].get('book')} is back at the front of the queue.")
+                self.notify(f"{item['scope'].get('book')} is back in the queue in its command-line place: it "
+                            "goes ahead of books listed after it as soon as their current chapters are done.")
             else:
                 self.notify(f"Retrying chapter {item['scope'].get('chapter')} first; other chapters keep going.")
         elif self.model.running:

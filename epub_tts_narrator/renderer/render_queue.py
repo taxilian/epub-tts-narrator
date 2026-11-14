@@ -567,46 +567,75 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
         # Until a book is prepared, a run shell lists its chapters from its manifest.
         report_chapter_plan(notify, book, lambda book=book: _chapter_outline(book), outline=True)
     # A run shell can put a failed book back into this queue (after fixing
-    # what stopped it); a retried book is admitted next, ahead of the books
-    # still waiting. Plain and custom notify never offer book retries.
+    # what stopped it). The command line's order is the queue's priority: a
+    # retried book is admitted in its own place, so one listed before a book
+    # that is rendering is admitted at once and its chapters take the next
+    # free chapter slots (the queue's chapter coordinators order by book).
+    # Plain and custom notify never offer book retries.
     from collections import deque
     from .progress import offers_chapter_retries, report_retry_hold
     from .render_chapter_flow import ChapterRetries
     book_retries = ChapterRetries() if offers_chapter_retries(notify) else None
     pending = deque(enumerate(books))
+    requested = set()
     latest = {}
 
     def failed(index, run, message):
         """Record one book's failure, offering the shell a retry while the queue runs."""
         run.status = ("failed", message)
         run.finished = True
-        retry = None if book_retries is None else (lambda: book_retries.request(index))
-        report_book_state(notify, run.book, "failed", retry=retry)
+        retry = None
+        if book_retries is not None:
+            def retry(index=index):
+                accepted = book_retries.request(index)
+                changed.set()
+                return accepted
+        report_book_state(notify, run.book, "failed", retry=retry, error=message)
         _record_book_outcome(notify, run.book, False)
         _emit(notify, f"[{run.name}] failed: {message}")
 
+    def waiting():
+        """The earliest book on the command line waiting to be admitted (retried or not yet started), or None."""
+        if book_retries is not None:
+            while (index := book_retries.take_nowait()) is not None:
+                book_retries.done()
+                requested.add(index)
+        candidates = [*requested, *([pending[0][0]] if pending else [])]
+        return min(candidates) if candidates else None
+
+    def earliest_rendering():
+        indexes = [run.index for run in runs if run.thread is not None and run.thread.is_alive()]
+        return min(indexes) if indexes else None
+
     def next_book():
         """``(index, book, retried)`` to admit now, or None when nothing is waiting."""
-        if book_retries is not None:
-            index = book_retries.take_nowait()
-            if index is not None:
-                book_retries.done()
-                return index, books[index], True
-        if pending:
-            return (*pending.popleft(), False)
-        return None
+        index = waiting()
+        if index is None:
+            return None
+        if index in requested:
+            requested.discard(index)
+            return index, books[index], True
+        pending.popleft()
+        return index, books[index], False
 
     with RenderInterrupts():
         try:
             while True:
                 stop_if_requested()
-                if runs and (pending or (book_retries is not None and book_retries.peek() is not None)):
+                if runs and waiting() is not None:
                     # Wait for room before choosing, so a book put back in the
-                    # queue meanwhile is the one admitted next.
+                    # queue meanwhile is the one admitted next; a book listed
+                    # before one that is rendering never waits for room.
                     previous = runs[-1]
                     spare_polls = 0
                     while previous.thread is not None and previous.thread.is_alive():
                         stop_if_requested()
+                        upcoming, rendering = waiting(), earliest_rendering()
+                        if rendering is not None and upcoming < rendering:
+                            _emit(notify, f"Admitting book {upcoming + 1} of {len(books)}"
+                                         f"{' again' if upcoming in requested else ''}: it comes before book "
+                                         f"{rendering + 1} on the command line, so its chapters go next.")
+                            break
                         slots = getattr(engine, "max_parallel", None)
                         if previous.synthesis_ready.is_set() and type(slots) is int:
                             stage = METRICS.snapshot().get("synthesis")
@@ -616,10 +645,8 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                                 busy = 0
                             spare_polls = spare_polls + 1 if busy < slots else 0
                             if spare_polls >= GATE_OPEN_POLLS:
-                                again = book_retries is not None and book_retries.peek() is not None
-                                upcoming = book_retries.peek() if again else pending[0][0]
                                 _emit(notify, f"Admitting book {upcoming + 1} of {len(books)}"
-                                             f"{' again' if again else ''}: "
+                                             f"{' again' if upcoming in requested else ''}: "
                                              f"spare capacity ({busy} of {slots} slots).")
                                 break
                         changed.wait(poll_seconds)
@@ -647,7 +674,7 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                 latest[index] = run
                 book_notify = _prefixed(f"[{run.name}] ", notify)
                 if retried:
-                    _emit(notify, f"[{run.name}] Back in the queue at the front: rendering it again.")
+                    _emit(notify, f"[{run.name}] Back in the queue in its command-line place: rendering it again.")
                 report_book_state(notify, book, "preparing")
                 try:
                     bundle, config, plan = _prepare_book(book, args, notify=book_notify)

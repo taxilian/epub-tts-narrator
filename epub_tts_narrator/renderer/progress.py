@@ -280,14 +280,15 @@ class BusBoard(TerminalBoard):
         self.bus.publish("failure", failure.get("error", ""), severity="error", scope=scope,
                          data={"record": dict(failure), "retry": retry, "repair": repair})
 
-    def book_state(self, key, state, retry=None):
+    def book_state(self, key, state, retry=None, error=None):
         """One book's lifecycle: queued, preparing, rendering, assembling, done, failed, interrupted.
 
-        A failed book in a multi-book queue carries ``retry``, which puts it
-        back at the front of that queue.
+        A failed book carries ``error``, the message that stopped it; in a
+        multi-book queue it also carries ``retry``, which puts it back in that
+        queue in its command-line place.
         """
         self.bus.publish("book", state, scope={"book": _book_label(key)},
-                         data={"key": str(key), "state": state, "retry": retry})
+                         data={"key": str(key), "state": state, "retry": retry, "error": error})
 
     def chapter_plan(self, key, chapters, *, outline=False):
         """Every chapter this book will render: ``[{"number", "title", "blocks", "saved"}]``.
@@ -419,9 +420,9 @@ class PrefixedBoardNotify:
         if getattr(self.board, "structured_status", False):
             self.board.chapter_failure(failure, book=_prefix_book(self.prefix), retry=retry, repair=repair)
 
-    def book_state(self, key, state, retry=None):
+    def book_state(self, key, state, retry=None, error=None):
         if getattr(self.board, "structured_status", False):
-            self.board.book_state(key, state, retry=retry)
+            self.board.book_state(key, state, retry=retry, error=error)
 
     def chapter_plan(self, key, chapters, *, outline=False):
         if getattr(self.board, "structured_status", False):
@@ -477,10 +478,10 @@ def report_rebuild_handler(notify, handler):
         board.rebuild_handler(handler)
 
 
-def report_book_state(notify, key, state, retry=None):
-    """A book's lifecycle state for a run shell; plain, terminal and custom output ignore it."""
+def report_book_state(notify, key, state, retry=None, error=None):
+    """A book's lifecycle state (and a failed book's error) for a run shell; plain, terminal and custom output ignore it."""
     if offers_chapter_retries(notify):
-        _board_of(notify).book_state(key, state, retry=retry)
+        _board_of(notify).book_state(key, state, retry=retry, error=error)
 
 
 def report_chapter_plan(notify, key, chapters, *, outline=False):

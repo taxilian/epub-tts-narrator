@@ -1,7 +1,8 @@
 """Render repair dialogs for the run shell (Textual).
 
-* ``FailureScreen`` — one failure's saved detail, a plain-language hint, and
-  the repairs that apply to it; returns the chosen action name.
+* ``FailureScreen`` — one failure's saved detail (for a book, also its failed
+  chapters), a plain-language hint, and the repairs that apply to it; returns
+  the chosen action name.
 * ``TakesScreen`` — every retained take of a failed passage: play them, compare
   what the recognizer heard with the passage, and accept one a person judges
   good (optionally teaching the recognizer); returns ``{"attempt", "learn"}``.
@@ -25,18 +26,25 @@ from .tui_widgets import BASE_CSS, ChoiceScreen, Dialog, highlighted_key, sync_t
 
 ACTIONS = {
     "retry": "Retry this chapter now, ahead of everything waiting (reuses every verified clip)",
-    "retry_book": "Put this book back in the queue now, at the front (completed work is reused)",
+    "retry_book": ("Resume this book now in its command-line place: it goes ahead of books listed after it as soon "
+                   "as their current chapters are done (completed work is reused)"),
     "takes": "Listen to the takes and accept one that sounds right",
-    "resume_book": "Resume this book after the run (completed work is reused)",
+    "resume_book": "Resume this book (completed work is reused)",
+    "resume": "Run it again (completed work is reused)",
+    "chapters": "Show this book's chapters",
     "close": "Close",
 }
 
 
-def failure_text(item, hint):
+def failure_text(item, hint, details=()):
     scope = item["scope"]
     lines = []
     if item.get("error"):
         lines.append(item["error"])
+    else:
+        lines.append("No error message was reported; the Log (4) has this run's messages.")
+    if details:
+        lines += ["", *details]
     lines += ["", "Suggestion: " + hint, ""]
     if item.get("state") and item["state"] != "failed":
         lines.append(f"State: {item['state']}")
@@ -57,12 +65,13 @@ class FailureScreen(Dialog):
     """
     BINDINGS = [Binding("escape", "close", "Close", priority=True)]
 
-    def __init__(self, item, hint, actions):
+    def __init__(self, item, hint, actions, *, details=()):
         super().__init__()
         self.item, self.hint, self.actions = item, hint, [*actions, "close"]
+        self.details = list(details)
 
     def compose(self) -> ComposeResult:
-        title, text = failure_text(self.item, self.hint)
+        title, text = failure_text(self.item, self.hint, self.details)
         with Vertical(classes="dialog"):
             yield Label(Text(title), classes="dialog-title")
             with VerticalScroll(id="failure-detail"):

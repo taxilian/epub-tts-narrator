@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -681,14 +682,14 @@ class BookOutcomeBoardTests(QueueFixtureTests):
         self.assertEqual(code, 1)
         self.assertEqual(reported, [(str(self.books[0]), False), (str(self.books[1]), True)])
 
-    def run_in_shell_board(self, behavior, on_event, count=3):
+    def run_in_shell_board(self, behavior, on_event, count=3, engine=None):
         from epub_tts_narrator.renderer.progress import shell_board
         from epub_tts_narrator.run_events import EventBus
         bus = EventBus()
         bus.subscribe(on_event)
         with (shell_board(bus),
               patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
-              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=Mock()),
+              patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine or Mock()),
               patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=Mock()),
               patch("epub_tts_narrator.renderer.workflow.render", side_effect=behavior)):
             return render_queue_command(self.render_args(*range(1, count + 1)), self.config, poll_seconds=0.01)
@@ -729,6 +730,37 @@ class BookOutcomeBoardTests(QueueFixtureTests):
 
         self.assertEqual(self.run_in_shell_board(behavior, on_event), 0)
         self.assertEqual(rendered, ["book-1", "book-1", "book-2", "book-3"])
+
+    def test_a_retried_book_goes_ahead_of_later_books_even_while_one_is_rendering(self):
+        started, failed_once = [], threading.Event()
+        book_two_released, book_two_done = threading.Event(), threading.Event()
+
+        def behavior(bundle, config, engine, verifier, **kwargs):
+            name = Path(config["render"]["work_dir"]).parent.name
+            started.append((name, kwargs["queue_position"], book_two_done.is_set()))
+            if name == "book-1" and not failed_once.is_set():
+                kwargs["on_synthesis_ready"]()  # spare capacity: book 2 is admitted beside it
+                deadline = time.monotonic() + 5
+                while len(started) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                failed_once.set()
+                raise RuntimeError("fixture: voices were missing")
+            if name == "book-1":
+                book_two_released.set()  # book 2 was still rendering when book 1 came back
+            if name == "book-2":
+                book_two_released.wait(5)  # never reports spare capacity, so book 3 must wait for it
+                book_two_done.set()
+            return {"chapters": []}
+
+        def on_event(event):
+            if event.kind == "book" and event.data["state"] == "failed" and event.data["retry"] is not None:
+                self.assertTrue(event.data["retry"]())
+
+        with patch("epub_tts_narrator.renderer.render_metrics.METRICS.snapshot", return_value={}):
+            code = self.run_in_shell_board(behavior, on_event, engine=Mock(max_parallel=1))
+        self.assertEqual(code, 0)
+        self.assertEqual(started, [("book-1", 0, False), ("book-2", 1, False), ("book-1", 0, False),
+                                   ("book-3", 2, True)])
 
     def test_a_queue_with_only_failed_books_waits_for_retries_until_released(self):
         holds = []

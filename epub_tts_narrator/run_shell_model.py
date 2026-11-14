@@ -53,7 +53,7 @@ def repair_hint(item):
                 "or retry the chapter (r).")
     if item["kind"] == "chapter":
         return "Retry the chapter (r); the retry reuses every verified clip."
-    return "Resume this book (R) after the run; completed work is reused."
+    return "Fix what stopped it, then resume the book (Enter on it in Summary, or r in Errors); completed work is reused."
 
 
 @dataclass
@@ -243,7 +243,8 @@ class RunModel:
                 if state in FINAL_BOOK_STATES:
                     self._stop_chapters(book)
                 if state == "failed":
-                    self._book_failure(book, event.data.get("key"), retry=event.data.get("retry"))
+                    self._book_failure(book, event.data.get("key"), retry=event.data.get("retry"),
+                                       error=event.data.get("error"))
             elif event.kind == FAILURE:
                 data = dict(event.data or {})
                 self.failures.append({"kind": "chapter", "scope": dict(event.scope), "error": event.text,
@@ -312,18 +313,19 @@ class RunModel:
                     if entry["state"] in _UNFINISHED_CHAPTER:
                         entry["state"] = "stopped"
 
-    def _book_failure(self, book, key, retry=None):
-        """One book-level failure per book and attempt, carrying its last error and any retry.
+    def _book_failure(self, book, key, retry=None, error=None):
+        """One book-level failure per book and attempt, carrying its error and any retry.
 
-        A book that fails again after a retry updates the same entry, which
-        becomes a failure again with its newest error.
+        The error is the one the failed state reported, else the book's last
+        error line. A book that fails again after a retry updates the same
+        entry, which becomes a failure again with its newest error.
         """
-        last = next((item.text for _, item in reversed(self.logs)
-                     if item.severity == "error" and item.scope.get("book") in (book, None)), "")
+        last = error or next((item.text for _, item in reversed(self.logs)
+                              if item.severity == "error" and item.scope.get("book") in (book, None)), "")
         existing = next((item for item in self.failures if item["kind"] == "book"
                          and item["scope"].get("book") == book and item["attempt"] == self.attempt), None)
         if existing is not None:
-            if retry is not None or existing.get("state") == "retrying":
+            if retry is not None or error or existing.get("state") == "retrying":
                 existing.update(state="failed", error=last or existing["error"],
                                 retry=retry if retry is not None else existing.get("retry"))
             return
@@ -485,6 +487,20 @@ class RunModel:
                 entry["state"] = "retrying"
         self.changed.set()
         return True
+
+    def book_failure(self, book):
+        """The book's newest book-level failure this attempt (failed or sent for a retry) and its failed chapters.
+
+        ``(failure or None, [chapter failures])``; the chapters are this
+        attempt's failures not yet sent for a retry.
+        """
+        with self._lock:
+            mine = [item for item in self.failures if item["attempt"] == self.attempt
+                    and item["scope"].get("book") == book]
+            failure = next((item for item in reversed(mine) if item["kind"] == "book"
+                            and item.get("state", "failed") in ("failed", "retrying")), None)
+            chapters = [item for item in mine if item["kind"] == "chapter" and item.get("state", "failed") == "failed"]
+        return failure, chapters
 
     def request_rebuild(self, book, chapter):
         """Rebuild one chapter with a newly chosen take: ``"now"``, ``"after"`` it finishes, or ``None``."""

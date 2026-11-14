@@ -292,6 +292,21 @@ class RunModelTests(unittest.TestCase):
         self.assertEqual(self.model.choices("book"), ["b1", "b2"])
         self.assertIn("2 failure(s)", self.model.summary())
 
+    def test_a_failed_book_keeps_the_error_it_reported_even_when_its_log_line_comes_later(self):
+        board = BusBoard(self.bus)
+        board.book_state("/q/b1", "rendering")
+        board.chapter_failure({"number": 2, "error_type": "SpeechVerificationFailed", "error": "take 3 skipped words"},
+                              book="b1")
+        # The queue reports the failed state, then the outcome, then its "[b1] failed: ..." line.
+        board.book_state("/q/b1", "failed", retry=lambda: True, error="Voices are missing: Mara")
+        board.book_outcome("/q/b1", False)
+        self.bus.log("[b1] failed: Voices are missing: Mara")
+        self.bus.log("[b2] Renderer stopped: unrelated", severity="error")
+        failure, chapters = self.model.book_failure("b1")
+        self.assertEqual((failure["kind"], failure["error"], failure["state"]), ("book", "Voices are missing: Mara", "failed"))
+        self.assertEqual([item["error"] for item in chapters], ["take 3 skipped words"])
+        self.assertEqual(self.model.book_failure("b2"), (None, []))
+
     def test_every_planned_chapter_is_listed_in_order_with_its_state_and_a_breakdown(self):
         board = BusBoard(self.bus)
         board.book_state("/q/b1", "rendering")
@@ -585,6 +600,66 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
                 report_retry_hold(notify, None, 0)
             return 0 if outcome[-1] else 2
         return command
+
+    async def test_enter_on_a_failed_book_in_summary_shows_why_and_resumes_it(self):
+        from epub_tts_narrator.renderer.progress import report_book_state
+        retried = threading.Event()
+
+        def command():
+            with live_board(print) as notify:
+                report_book_state(notify, "/q/b1", "queued")
+                report_book_state(notify, "/q/b2", "rendering")
+                report_chapter_failure(PrefixedBoardNotify(notify.__self__, "[b1] "),
+                                       {"number": 3, "error_type": "RenderBlocked", "error": "bad clip"})
+                report_book_state(notify, "/q/b1", "failed", retry=lambda: retried.set() or True,
+                                  error="Voices are missing: Mara")
+                print("[b1] failed: Voices are missing: Mara")
+                if not retried.wait(10):
+                    return 1
+                report_book_state(notify, "/q/b1", "preparing")
+                report_book_state(notify, "/q/b1", "done")
+                report_book_state(notify, "/q/b2", "done")
+            return 0
+
+        app = self.make_app(command)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await self.wait_for(pilot, lambda: self.model.book_failure("b1")[0] is not None)
+            await pilot.press("1")
+            books = app.query_one("#books")
+            await self.wait_for(pilot, lambda: books.row_count == 2)
+            books.focus()
+            books.move_cursor(row=0)
+            await pilot.press("enter")
+            from epub_tts_narrator.run_shell_screens import FailureScreen, failure_text
+            self.assertIsInstance(app.screen, FailureScreen)
+            text = failure_text(app.screen.item, app.screen.hint, app.screen.details)[1]
+            self.assertIn("Voices are missing: Mara", text)
+            self.assertIn("Chapter 3 (RenderBlocked): bad clip", text)
+            self.assertEqual(app.screen.actions, ["retry_book", "chapters", "close"])
+            await pilot.press("enter")  # the first repair: resume it now
+            await self.wait_for(pilot, lambda: not self.model.running)
+        self.assertTrue(retried.is_set())
+        self.assertEqual(app.result, 0)
+
+    async def test_enter_on_a_book_that_has_not_failed_drills_into_its_chapters(self):
+        from epub_tts_narrator.renderer.progress import report_book_state
+        release = threading.Event()
+
+        def command():
+            with live_board(print) as notify:
+                report_book_state(notify, "/q/b1", "rendering")
+                release.wait(10)
+            return 0
+
+        app = self.make_app(command)
+        async with app.run_test(size=(150, 40)) as pilot:
+            books = app.query_one("#books")
+            await self.wait_for(pilot, lambda: books.row_count == 1)
+            books.focus()
+            await pilot.press("enter")
+            self.assertEqual((self.model.filter.book, app.query_one("#tabs").active), ("b1", "chapters"))
+            release.set()
+            await self.wait_for(pilot, lambda: not self.model.running)
 
     async def test_r_retries_a_held_chapter_and_f_finishes_the_wait(self):
         for key, expected, still_open in (("r", True, False), ("F", False, True)):
