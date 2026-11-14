@@ -15,6 +15,15 @@ audio competes with the reference for identity and accent. Chapter headings
 never become the pinned take. When a prompt overflows, candidates drop the
 latest turn, then the pinned one, exactly as Fish does.
 
+A line with a person-chosen pronunciation hears an example of it: when
+neither the pinned nor the latest take was heard saying that reading in its
+own shape, the latest slot holds the voice's most recent earlier take that
+was (``name_shape.heard_right``). Drama 3 imitates the name as history says
+it: across recorded takes a correct example in history was followed by a
+correct reading every time, a misread one by the same misreading every
+time, and with no example the narrator's reading was close to a coin flip.
+The take list in the identity still names exactly what was heard.
+
 Only the chapter coordinator advances history: a take starts once every earlier
 take of a subset of its voices is accepted (``history_dependencies``), and
 history is chosen by source position, so independent voices render
@@ -149,12 +158,15 @@ class ChapterContinuity:
         with self._lock:
             return {entry["identity"]["audio_sha256"] for entry in self.entries}
 
-    def takes(self, speakers, *, before=None):
+    def takes(self, speakers, *, before=None, readings=frozenset()):
         """Fish's first + latest, from this chapter's takes by these voice ids only.
 
         With ``before`` (a source position) only takes from earlier in the
         chapter count, in source order, so a take accepted early by another
-        voice's queue never enters an earlier line's history.
+        voice's queue never enters an earlier line's history. ``readings``
+        (``name_shape.chosen_readings`` keys) are chosen pronunciations the
+        line uses: when neither turn says one of them right, the latest slot
+        holds the most recent take that says the most of them right.
         """
         with self._lock:
             entries = list(self.entries)
@@ -167,12 +179,19 @@ class ChapterContinuity:
             return []
         pinned = next((entry for entry in eligible if entry["pinnable"]), None)
         latest = eligible[-1]
+        missing = set(readings) - set().union(*(entry.get("readings", ()) for entry in (pinned, latest) if entry))
+        if missing:
+            scored = [(len(missing & entry.get("readings", frozenset())), index)
+                      for index, entry in enumerate(eligible) if entry is not pinned]
+            best = max(scored, default=(0, None))
+            if best[0]:
+                latest = eligible[best[1]]
         return [latest] if pinned is None or pinned is latest else [pinned, latest]
 
     @contextmanager
     def transaction(self, request, *, pinnable=True, position=None):
         voices = request_speakers(request)
-        takes = deepcopy(self.takes(voices, before=position))
+        takes = deepcopy(self.takes(voices, before=position, readings=_chosen_readings(request)))
         identity = {"version": 3, "policy": POLICY, "takes": [take["identity"] for take in takes]}
         bound = dict(request, continuity=identity)
         segments = _segments(request["chunk"]) if isinstance(request.get("chunk"), dict) else []
@@ -235,12 +254,40 @@ class ChapterContinuity:
         # Selection uses the script voices; the take identity (and so every
         # request's cache identity) still names only the exact accepted take.
         entry = {"path": str(codes_path), "marker": deepcopy(marker), "pinnable": scope["pinnable"],
+                 "readings": _readings_heard_right(accepted),
                  "voices": list(scope["voices"]), "position": scope.get("position"), "identity": {
             "codes_sha256": marker["sha256"], "text_sha256": digest(marker["text"]),
             "speakers": list(marker["speakers"]), "request_hash": accepted["request_hash"],
             "audio_sha256": accepted["audio_sha256"]}}
         with self._lock:
             self.entries.append(entry)
+
+
+def _chosen_readings(request):
+    """Chosen pronunciations a request's text uses (``name_shape.chosen_readings``)."""
+    if not isinstance(request.get("chunk"), dict):
+        return frozenset()
+    from .name_shape import chosen_readings
+    from .performance_runtime import verification_options
+    try:
+        return frozenset(chosen_readings(verification_options(request).get("performance")))
+    except (ValueError, KeyError, TypeError):
+        return frozenset()
+
+
+def _readings_heard_right(accepted):
+    """Chosen pronunciations an accepted take was heard saying in their own shape."""
+    request, report = accepted.get("request"), accepted.get("report")
+    if not isinstance(request, dict) or not isinstance(report, dict) or not _chosen_readings(request):
+        return frozenset()
+    from .name_shape import heard_right
+    from .performance_runtime import verification_options
+    try:
+        performance = verification_options(request).get("performance")
+    except (ValueError, KeyError, TypeError):
+        return frozenset()
+    return frozenset(heard_right(report.get("expected_text") or "",
+                                 report.get("verified_transcript") or report.get("transcript"), performance))
 
 
 def _retag(text, mapping):

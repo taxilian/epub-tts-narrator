@@ -88,14 +88,43 @@ def rearranged(phonemes, heard):
     return len(expected) == len(actual) and sum(expected) == sum(actual) and expected != actual
 
 
-def check(expected_text, transcript, performance):
-    """``[{"text", "heard", "expected_shape", "heard_shape"}]`` for every chosen reading heard rearranged."""
+def _readings(performance):
+    """Person-chosen one-word CMU readings of a passage: ``[(control, phonemes)]``."""
+    from .quality import normalize_words
+    found = []
+    for control in (performance or {}).get("controls", []):
+        if (control.get("kind") != "pronunciation" or control.get("alphabet") != "cmu_arpabet"
+                or len(normalize_words(control.get("text") or "")) != 1):
+            continue
+        phonemes = control["phonemes"].strip()
+        if _POSSESSIVE.search(control["text"]):
+            # The reading of a possessive ends in its "s" sound; the name itself is the rest.
+            phonemes = re.sub(r"\s+[SZ]$", "", phonemes)
+        found.append((control, phonemes))
+    return found
+
+
+def reading_key(phonemes):
+    """One chosen reading, whatever its group marks and spacing: ``S EH2 N EH1 D R AH0``."""
+    return " ".join(phonemes.replace("|", " ").split())
+
+
+def chosen_readings(performance):
+    """Keys of the passage's person-chosen one-word CMU readings (possessives share the name's key)."""
+    return {reading_key(phonemes) for _, phonemes in _readings(performance)}
+
+
+def _heard(expected_text, transcript, performance):
+    """``[(control, phonemes, heard)]`` per chosen reading: ``heard`` is the word heard in its place.
+
+    ``heard`` is ``True`` when the recognizer wrote the word as written,
+    ``None`` when nothing in the transcript can be placed against it.
+    """
     from difflib import SequenceMatcher
     from .close_match import _alignment
     from .quality import normalize_words
-    controls = [control for control in (performance or {}).get("controls", [])
-                if control.get("kind") == "pronunciation" and control.get("alphabet") == "cmu_arpabet"]
-    if not controls or not isinstance(transcript, str) or not transcript.strip():
+    readings = _readings(performance)
+    if not readings or not isinstance(transcript, str) or not transcript.strip():
         return []
     expected, heard = normalize_words(expected_text), normalize_words(transcript)
     if not heard:
@@ -104,28 +133,53 @@ def check(expected_text, transcript, performance):
     # name is aligned word by word, so long paragraphs stay cheap.
     opcodes = SequenceMatcher(None, expected, heard, autojunk=False).get_opcodes()
     found = []
-    for control in controls:
-        if len(normalize_words(control["text"])) != 1:
-            continue
+    for control, phonemes in readings:
         index = len(normalize_words(expected_text[:control["start"]]))
         opcode = next((item for item in opcodes if item[1] <= index < item[2]), None)
+        if opcode is not None and opcode[0] == "equal":
+            found.append((control, phonemes, True))
+            continue
         if opcode is None or opcode[0] != "replace" or opcode[2] - opcode[1] > _STRETCH or opcode[4] - opcode[3] > _STRETCH:
+            found.append((control, phonemes, None))
             continue
         _, first, last, heard_first, heard_last = opcode
         change = next((item for item in _alignment(expected[first:last], heard[heard_first:heard_last])
                        if item["expected_start"] <= index - first < item["expected_end"]), None)
         if (change is None or change["operation"] in {"equal", "deleted", "added"}
                 or change["expected_end"] - change["expected_start"] != 1 or not change["actual"]):
+            found.append((control, phonemes, None))
             continue
-        word, phonemes = "".join(change["actual"]), control["phonemes"].strip()
-        if _POSSESSIVE.search(expected[index]):
-            # The reading of a possessive ends in its "s" sound; compare the name itself.
-            phonemes = re.sub(r"\s+[SZ]$", "", phonemes)
-        word = _POSSESSIVE.sub("", word)
+        found.append((control, phonemes, "".join(change["actual"])))
+    return found
+
+
+def check(expected_text, transcript, performance):
+    """``[{"text", "heard", "expected_shape", "heard_shape"}]`` for every chosen reading heard rearranged."""
+    found = []
+    for control, phonemes, heard in _heard(expected_text, transcript, performance):
+        if not isinstance(heard, str):
+            continue
+        word = _POSSESSIVE.sub("", heard)
         if rearranged(phonemes, word):
-            found.append({"text": control["text"], "heard": "".join(change["actual"]),
+            found.append({"text": control["text"], "heard": heard,
                           "expected_shape": reading_shape(phonemes), "heard_shape": spelling_shape(word)})
     return found
+
+
+def heard_right(expected_text, transcript, performance):
+    """Keys of the chosen readings this take was heard saying in their own shape.
+
+    A word written exactly as in the text, or spelled another way with the
+    reading's shape (``Sinedra`` for ``Ce'Nedra``), counts; a rearranged,
+    missing or unplaceable word does not. Chapter history uses these takes as
+    examples of the reading (``continuity.ChapterContinuity.takes``).
+    """
+    right = set()
+    for _, phonemes, heard in _heard(expected_text, transcript, performance):
+        if heard is True or (isinstance(heard, str)
+                             and spelling_shape(_POSSESSIVE.sub("", heard)) == reading_shape(phonemes)):
+            right.add(reading_key(phonemes))
+    return right
 
 
 def apply(report, expected_text, performance, *, purpose="speech"):

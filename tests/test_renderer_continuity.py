@@ -445,3 +445,116 @@ class ContinuityPolicyTests(unittest.TestCase):
         self.assertEqual([len(kept) for selected, kept in options], [1, 0])
         self.assertEqual([[reference["speaker"] for reference in selected] for selected, kept in options],
                          [[0, 1], [0]])
+
+
+READING = "S EH2 N EH1 D R AH0"
+
+
+def chosen(chunk, name="Ce’Nedra", phonemes=READING):
+    """Give a passage a person-chosen CMU reading of ``name``."""
+    from epub_tts_narrator.performance_plan import text_sha256
+    text = chunk["spoken_text"]
+    start = text.index(name)
+    chunk["expressive_direction"] = ""
+    chunk["expressive_performance"] = {"version": 1, "text_sha256": text_sha256(text), "controls": [
+        {"kind": "pronunciation", "start": start, "end": start + len(name), "text": name,
+         "alphabet": "cmu_arpabet", "phonemes": phonemes}]}
+    return chunk
+
+
+class NameModel(Model):
+    """Heard as written, with each phoneme span heard as the name it reads."""
+
+    def __init__(self, heard="Ce’Nedra"):
+        super().__init__()
+        self.heard = heard
+
+    def generate(self, text, **options):
+        for result in super().generate(text, **options):
+            frequency = max(self.transcripts)
+            spoken = re.sub(r"<\|phoneme_start\|>.*?<\|phoneme_end\|>", self.heard, text)
+            self.transcripts[frequency] = re.sub(r'<[^>]*>|\[[^]]*\]', '', spoken).strip()
+            yield result
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required")
+class ChosenReadingHistoryTests(unittest.TestCase):
+    """A line with a chosen pronunciation hears an earlier take saying it right."""
+
+    setUp = ContinuityTests.setUp
+    run_chapter = ContinuityTests.run_chapter
+
+    def name_chapter(self):
+        self.model = self.engine._model = NameModel()
+        self.verifier = Verifier(self.model)
+        chunks = passages(["Chapter One", "The road ran on.", "Ce’Nedra objected.", "Garion rode ahead.",
+                           "Ce’Nedra laughed."])
+        for chunk in chunks:
+            chunk["segment"]["delivery"]["direction"] = ""
+            chunk["segment"]["kind"] = "narration"
+        chunks[0]["segment"]["kind"] = "heading"
+        chosen(chunks[2]), chosen(chunks[4])
+        return chunks
+
+    def test_the_latest_turn_is_an_earlier_take_saying_the_reading(self):
+        self.run_chapter(self.name_chapter())
+        named = tagged(f"<|phoneme_start|>{READING}<|phoneme_end|> objected.")
+        road = tagged("The road ran on.")
+        # A line without a chosen reading keeps Fish's first + latest.
+        self.assertEqual(histories(self.model)[3], [road, named])
+        # The name's line hears the take that said it, not the line before.
+        self.assertEqual(histories(self.model)[4], [road, named])
+        self.assertEqual(len(self.model.calls), 5)
+
+    def test_a_take_heard_rearranged_is_never_an_example(self):
+        from epub_tts_narrator.renderer.continuity import _readings_heard_right
+        chunk = chosen(passages(["Ce’Nedra objected."])[0])
+        record = lambda heard: {"request": {"kind": "speech", "chunk": chunk},
+                                "report": {"passed": True, "expected_text": chunk["spoken_text"], "transcript": heard}}
+        self.assertEqual(_readings_heard_right(record("Sinedra objected.")), {READING})
+        self.assertEqual(_readings_heard_right(record("Ce’Nedra objected.")), {READING})
+        self.assertEqual(_readings_heard_right(record("Sendera objected.")), frozenset())
+        self.assertEqual(_readings_heard_right(record("She objected.")), frozenset())
+
+
+class ChosenReadingPolicyTests(unittest.TestCase):
+    def setUp(self):
+        from epub_tts_narrator.renderer.continuity import ChapterContinuity
+        self.state = ChapterContinuity({"engine": "fixture"}, {})
+
+    def entry(self, position, name, readings=(), voices=("n",), pinnable=True):
+        return {"voices": list(voices), "pinnable": pinnable, "position": position, "readings": frozenset(readings),
+                "identity": {"request_hash": name, "audio_sha256": name}}
+
+    def names(self, **options):
+        return [take["identity"]["request_hash"] for take in self.state.takes(frozenset({"n"}), **options)]
+
+    def test_the_most_recent_earlier_example_replaces_the_latest_turn(self):
+        self.state.entries = [self.entry(1, "first"), self.entry(2, "said"), self.entry(3, "said again", ["A"]),
+                              self.entry(4, "said once more", ["A"]), self.entry(5, "plain"), self.entry(7, "after", ["A"])]
+        self.assertEqual(self.names(before=6, readings={"A"}), ["first", "said once more"])
+        # Without a chosen reading, or with no example of it, history is Fish's.
+        self.assertEqual(self.names(before=6), ["first", "plain"])
+        self.assertEqual(self.names(before=6, readings={"B"}), ["first", "plain"])
+
+    def test_history_already_saying_the_reading_is_kept(self):
+        self.state.entries = [self.entry(1, "first", ["A"]), self.entry(2, "example", ["A"]), self.entry(3, "plain")]
+        self.assertEqual(self.names(before=4, readings={"A"}), ["first", "plain"])
+        self.state.entries = [self.entry(1, "first"), self.entry(2, "example", ["A"]), self.entry(3, "latest", ["A"])]
+        self.assertEqual(self.names(before=4, readings={"A"}), ["first", "latest"])
+
+    def test_the_example_saying_the_most_chosen_readings_wins(self):
+        self.state.entries = [self.entry(1, "first"), self.entry(2, "both", ["A", "B"]), self.entry(3, "one", ["A"]),
+                              self.entry(4, "plain")]
+        self.assertEqual(self.names(before=5, readings={"A", "B"}), ["first", "both"])
+
+    def test_an_example_by_another_voice_is_never_heard(self):
+        self.state.entries = [self.entry(1, "first"), self.entry(2, "other voice", ["A"], voices=("c",)),
+                              self.entry(3, "plain")]
+        self.assertEqual(self.names(before=4, readings={"A"}), ["first", "plain"])
+
+    def test_a_request_names_the_chosen_readings_it_uses(self):
+        from epub_tts_narrator.renderer.continuity import _chosen_readings
+        chunk = chosen(passages(["They saw Ce’Nedra’s face."])[0], "Ce’Nedra’s", READING + " Z")
+        self.assertEqual(_chosen_readings({"kind": "speech", "chunk": chunk}), {READING})
+        self.assertEqual(_chosen_readings({"kind": "speech", "chunk": passages(["Plain words."])[0]}), frozenset())

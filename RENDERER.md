@@ -418,6 +418,21 @@ requests; there is no setting to turn it off.
   the script's voice id, not the recording: a narrator linked to a character
   (`voice-aliases.json`) clones the same reference but keeps its own history,
   so narration and that character's dialogue stay separate performances.
+- **A chosen pronunciation hears an example of itself.** Drama 3 says a name
+  the way the history says it. Across recorded Belgariad takes of Ce'Nedra
+  with its chosen reading, a narrator line whose latest history turn said the
+  name correctly was right every time (52 takes); one whose history turn had
+  it misread repeated the misreading every time (12 takes); with no example in
+  history the narrator misread it about 4 times in 10, and half the time when
+  the name opened the line. So when a line uses a person-chosen CMU reading
+  (`pronounce`) and neither of its history turns was heard saying that reading
+  in its own shape, the latest slot holds that voice's most recent earlier
+  take in the chapter that was (the one saying the most of the line's chosen
+  readings, when there are several). Takes heard with the name rearranged are
+  rejected (see the pronunciation check under verification), so they never
+  become examples. The policy name is unchanged, so under tolerant history
+  reuse takes already accepted for these lines are kept; the first line of a
+  chapter to use a reading has no example and renders as before.
 - **Each voice change is its own request.** The planner groups consecutive
   chunks only for the same performer (since 2026-10-21), because speaker tags
   cannot guarantee an audible switch and transcript verification cannot detect
