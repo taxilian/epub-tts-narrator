@@ -28,7 +28,7 @@ from pathlib import Path
 import re
 import time
 
-NAME_SHAPE_VERSION = 1
+NAME_SHAPE_VERSION = 2  # 2: a possessive heard as a name ending in s (``Cinderius'``)
 REASON = "pronunciation_mismatch"
 _VOWELS = frozenset("aeiou")
 _DIGRAPHS = ("th", "sh", "ch", "ph", "wh", "gh", "ck")
@@ -155,13 +155,26 @@ def _heard(expected_text, transcript, performance):
     return found
 
 
+def _compared(control, phonemes, heard):
+    """``(phonemes, word)`` to compare for one heard word.
+
+    A possessive heard with its own ``'s`` compares the name itself. One heard
+    otherwise (``Cinderius'``, ``Senedris``: the recognizer wrote the
+    possessive as a name ending in its "s" sound) compares the whole reading,
+    possessive sound included, with the whole heard word.
+    """
+    if _POSSESSIVE.search(control["text"]) and not _POSSESSIVE.search(heard):
+        return control["phonemes"].strip(), heard
+    return phonemes, _POSSESSIVE.sub("", heard)
+
+
 def check(expected_text, transcript, performance):
     """``[{"text", "heard", "expected_shape", "heard_shape"}]`` for every chosen reading heard rearranged."""
     found = []
     for control, phonemes, heard in _heard(expected_text, transcript, performance):
         if not isinstance(heard, str):
             continue
-        word = _POSSESSIVE.sub("", heard)
+        phonemes, word = _compared(control, phonemes, heard)
         if rearranged(phonemes, word):
             found.append({"text": control["text"], "heard": heard,
                           "expected_shape": reading_shape(phonemes), "heard_shape": spelling_shape(word)})
@@ -177,10 +190,13 @@ def heard_right(expected_text, transcript, performance):
     examples of the reading (``continuity.ChapterContinuity.takes``).
     """
     right = set()
-    for _, phonemes, heard in _heard(expected_text, transcript, performance):
-        if heard is True or (isinstance(heard, str)
-                             and spelling_shape(_POSSESSIVE.sub("", heard)) == reading_shape(phonemes)):
+    for control, phonemes, heard in _heard(expected_text, transcript, performance):
+        if heard is True:
             right.add(reading_key(phonemes))
+        elif isinstance(heard, str):
+            compared, word = _compared(control, phonemes, heard)
+            if spelling_shape(word) == reading_shape(compared):
+                right.add(reading_key(phonemes))
     return right
 
 

@@ -15,7 +15,7 @@ import unittest
 from epub_tts_narrator.performance_plan import text_sha256
 from epub_tts_narrator.renderer.common import read_json, write_json
 from epub_tts_narrator.renderer.name_shape import (
-    REASON, SWEEP_FILENAME, check, rearranged, reading_shape, retire_misread, spelling_shape)
+    NAME_SHAPE_VERSION, REASON, SWEEP_FILENAME, check, heard_right, rearranged, reading_shape, retire_misread, spelling_shape)
 from epub_tts_narrator.renderer.quality import validate_audio, validation_key
 import test_renderer_reference_consensus as consensus
 
@@ -71,6 +71,20 @@ class CheckTests(unittest.TestCase):
         perf = performance(text, "Ce’Nedra’s", READING + " Z")
         self.assertEqual(len(check(text, "They saw Sendera's face.", perf)), 1)
         self.assertEqual(check(text, "They saw Sinedra's face.", perf), [])
+
+    def test_a_possessive_heard_as_a_name_ending_in_s_is_checked_whole(self):
+        # The recognizer often writes "Ce'Nedra's" as a name ending in s plus an apostrophe.
+        text = "Ce’Nedra’s flaming hair had been elaborately arranged."
+        perf = performance(text, "Ce’Nedra’s", READING + " Z")
+        for heard in ("Cinderius'", "Sindarius'", "Sendarius'"):
+            with self.subTest(heard=heard):
+                found = check(text, f"{heard} flaming hair had been elaborately arranged.", perf)
+                self.assertEqual(len(found), 1)
+        for heard in ("Senedris", "Sinedra's", "Sinedras"):
+            with self.subTest(heard=heard):
+                self.assertEqual(check(text, f"{heard} flaming hair had been elaborately arranged.", perf), [])
+        self.assertEqual(heard_right(text, "Senedris flaming hair had been elaborately arranged.", perf), {READING})
+        self.assertEqual(heard_right(text, "Cinderius' flaming hair had been elaborately arranged.", perf), set())
 
     def test_names_in_a_long_paragraph_are_found_where_they_were_heard(self):
         filler = " ".join(["The road ran on under the trees and the wagons creaked."] * 30)
@@ -153,7 +167,12 @@ class SweepTests(unittest.TestCase):
             self.assertEqual(read_json(folder / evidence["retired"][0])["audio_sha256"][:1], folder.name[:1])
         for folder in (right, chosen, liked):
             self.assertTrue((folder / "accepted.json").exists())
-        self.assertEqual(read_json(self.work / SWEEP_FILENAME)["version"], 1)
+        self.assertEqual(read_json(self.work / SWEEP_FILENAME)["version"], NAME_SHAPE_VERSION)
+
+    def test_a_new_check_version_reads_every_take_again(self):
+        old = self.accepted("a", "Sendera swallowed hard.")
+        write_json(self.work / SWEEP_FILENAME, {"version": NAME_SHAPE_VERSION - 1, "checked_through": 4e9})
+        self.assertEqual(retire_misread(self.work), [old])
 
     def test_a_later_sweep_reads_only_takes_accepted_since(self):
         old = self.accepted("a", "Sendera swallowed hard.")
