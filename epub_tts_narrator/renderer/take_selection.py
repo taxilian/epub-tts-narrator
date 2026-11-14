@@ -124,6 +124,12 @@ def _take_row(number, record, audio, accepted):
     }
 
 
+def retained_attempts(clips_directory, request_hash) -> list[tuple[int, dict]]:
+    """``[(attempt, record)]`` for every retained take with audio, read without touching the audio."""
+    directory = _clip_directory(clips_directory, request_hash)
+    return [(number, record) for number, record, _ in _attempts(directory, request_hash)]
+
+
 def list_takes(clips_directory, request_hash) -> list[dict]:
     """List every retained attempt with its current acceptance and eligibility."""
     directory = _clip_directory(clips_directory, request_hash)

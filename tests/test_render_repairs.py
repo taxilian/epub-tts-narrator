@@ -96,6 +96,27 @@ class FailedTakeRepairTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "good, bad or none"):
             review.mark(1, "maybe")
 
+    def test_every_take_shows_including_the_one_verification_accepted(self):
+        self.failed_take(1, "quote smiled at the fire tonight.")
+        passed = self.fixture.attempt(self.directory, 2, passed=True)
+        self.fixture.accept(self.directory, passed)
+        review = self.repair()
+        self.assertEqual([(row["attempt"], row["passed"], row["accepted"]) for row in review.takes()],
+                         [(1, False, False), (2, True, True)])
+        self.assertEqual(review.rejected_attempts(), [1])
+        review.mark(1, "bad")
+        self.assertEqual(review.feedback(), {(self.fixture.request_hash, 1): "bad"})
+
+    def test_a_used_take_that_is_not_one_of_the_attempts_is_still_shown(self):
+        self.failed_take(1, "quote smiled at the fire tonight.")
+        copied = self.fixture.attempt(self.directory, 2, passed=True)
+        (self.directory / "attempt-002.json").unlink()  # e.g. a repaired take: no attempt record has its audio
+        self.fixture.accept(self.directory, copied)
+        rows = self.repair().takes()
+        self.assertEqual([(row["attempt"], row["accepted"], row["eligible"]) for row in rows],
+                         [(1, False, True), (2, True, False)])
+        self.assertEqual(rows[1]["audio_path"], str(self.directory / copied["audio_file"]))
+
     def test_using_a_take_also_records_it_as_judged_good(self):
         self.failed_take(1, "quote smiled at the fire tonight.")
         self.repair().accept(1)
@@ -294,6 +315,39 @@ class GlanceTests(unittest.TestCase):
         self.assertEqual(rebuilt, [2, 3])
         self.assertIsNone(self.model.request_rebuild("unknown", 1))
 
+    def test_a_finished_run_stays_open_until_every_rejected_take_is_judged(self):
+        review = FakeRepair()
+        for attempt in (1, 2):
+            self.bus.publish("rejected", "text_mismatch", scope={"book": "b1", "chapter": 3, "block": 4},
+                             data={"request_hash": review.request_hash, "attempt": attempt,
+                                   "reasons": ["text_mismatch"], "detail": "", "review": review})
+        self.model.finish(0)
+        self.assertEqual(self.model.state, "finished")
+        self.assertTrue(self.model.should_hold())
+        self.assertEqual(self.model.health(), ("warning", "Finished — 2 rejected take(s) not judged yet (Rejected, 6)"))
+        self.assertEqual([self.model.take_verdict(item) for item in self.model.visible_rejections()], [None, None])
+        review.mark(1, "good")
+        review.mark(2, "bad")
+        self.assertTrue(self.model.should_hold())  # Verdicts are read again only once the dialog says so.
+        self.model.judgements_changed()
+        self.assertEqual([self.model.take_verdict(item) for item in self.model.visible_rejections()], ["bad", "good"])
+        self.assertFalse(self.model.should_hold())
+        self.assertEqual(self.model.health(), ("ok", "Finished"))
+
+    def test_a_failed_passage_counts_its_rejected_takes_and_how_many_are_judged(self):
+        review = FakeRepair()
+        self.bus.publish("failure", "Take 2/2 failed", scope={"chapter": 1},
+                         data={"record": {"number": 1}, "repair": review})
+        self.bus.publish("failure", "lock held", scope={"chapter": 2}, data={"record": {"number": 2}})
+        with_takes, without = self.model.current_failures()
+        self.assertEqual(self.model.failure_takes(with_takes), (2, 0))
+        self.assertIsNone(self.model.failure_takes(without))
+        self.assertEqual(len(self.model.unjudged()), 2)
+        review.mark(2, "bad")
+        self.model.judgements_changed()
+        self.assertEqual(self.model.failure_takes(with_takes), (2, 1))
+        self.assertEqual(self.model.unjudged(), {(review.request_hash, 1)})
+
     def test_stopping_marks_unfinished_books_stopped_never_failed(self):
         for book, state in (("b1", "done"), ("b2", "rendering"), ("b3", "queued")):
             self.bus.publish("book", state, scope={"book": book}, data={"key": book, "state": state})
@@ -343,6 +397,17 @@ class FakeRepair:
     def mark(self, attempt, verdict, *, learn=False):
         self.marks.append((attempt, verdict, learn))
         return {"attempt": attempt, "verdict": verdict, "learned": []}
+
+    def rejected_attempts(self):
+        return [1, 2]
+
+    def feedback(self):
+        verdicts = {}
+        for attempt, verdict, _ in self.marks:
+            verdicts[(self.request_hash, attempt)] = verdict
+        for attempt, _ in self.accepted:
+            verdicts[(self.request_hash, attempt)] = "good"
+        return {key: value for key, value in verdicts.items() if value}
 
 
 class FakePlayer:
@@ -476,6 +541,44 @@ class RepairScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(review.accepted, [(1, False)])
             self.assertEqual(review.marks[1], (2, "bad", False))
             release.set()
+            await self.wait_for(pilot, lambda: not app.is_running)
+
+    async def test_a_finished_render_with_unjudged_rejected_takes_stays_open_on_them(self):
+        from epub_tts_narrator.renderer.progress import live_board, report_book_state
+        from epub_tts_narrator.run_shell_screens import TakesScreen
+        review = FakeRepair()
+
+        def command():
+            with live_board(print) as notify:
+                report_book_state(notify, "/books/fixture-book", "rendering")
+                for attempt in (1, 2):
+                    notify.__self__.rejected_take({"request_hash": review.request_hash, "attempt": attempt,
+                                                   "reasons": ["text_mismatch"], "detail": ""}, review)
+                report_book_state(notify, "/books/fixture-book", "done")
+            return 0
+
+        app = self.make_app(command)
+        app._player = FakePlayer()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await self.wait_for(pilot, lambda: self.model.state == "finished")
+            await pilot.pause()
+            self.assertTrue(app.is_running)
+            self.assertEqual(app.query_one("#tabs").active, "rejected-tab")
+            self.assertIn("2 to judge", str(app.query_one("#tabs").get_tab("rejected-tab").label))
+            table = app.query_one("#rejected")
+            self.assertEqual([str(table.get_row_at(row)[5]) for row in range(2)], ["not judged", "not judged"])
+            table.focus()
+            await pilot.press("enter")
+            await self.wait_for(pilot, lambda: isinstance(app.screen, TakesScreen))
+            await pilot.press("b")  # the highlighted take (the newest, 2)
+            await pilot.press("up", "b")
+            await self.wait_for(pilot, lambda: {attempt for attempt, _, _ in review.marks} == {1, 2})
+            await pilot.press("escape")
+            await pilot.pause()
+            self.assertEqual([str(table.get_row_at(row)[5]) for row in range(2)], ["bad", "bad"])
+            self.assertEqual(str(app.query_one("#tabs").get_tab("rejected-tab").label), "Rejected (2)")
+            self.assertFalse(self.model.should_hold())
+            await pilot.press("q")
             await self.wait_for(pilot, lambda: not app.is_running)
 
     async def test_the_summary_drills_into_a_book_and_quitting_always_asks(self):

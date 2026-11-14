@@ -49,6 +49,24 @@ def raise_interrupts():
     yield request
 
 
+def _verdict_cell(verdict):
+    """A rejected take's verdict in the Rejected table."""
+    return {"good": Text("good", style="green"), "bad": Text("bad", style="red"), "?": "?"}.get(
+        verdict, Text("not judged", style="bold yellow"))
+
+
+def _failure_takes_cell(counts):
+    """A failed passage's rejected takes and how many a person has judged, for the Errors table."""
+    if counts is None:
+        return ""
+    rejected, judged = counts
+    if not rejected:
+        return "none"
+    if judged >= rejected:
+        return Text(f"{rejected}, all judged", style="green")
+    return Text(f"{rejected}, {rejected - judged} to judge", style="bold yellow")
+
+
 class RunApp(CapturePrintMixin, App):
     """At-a-glance health, books, chapters, workers, log and errors for one command run (and its resumes)."""
 
@@ -187,7 +205,8 @@ class RunApp(CapturePrintMixin, App):
             self.capture_prints(stdout_tty=True, tee=self.bridge.output)
         else:
             self.capture_prints()
-        self.query_one("#errors", DataTable).add_columns("Run", "State", "Book", "Chapter", "Kind", "Error")
+        self.query_one("#errors", DataTable).add_columns("Run", "State", "Book", "Chapter", "Kind",
+                                                         "Rejected takes", "Error")
         self._mount_profile()
         self.start_command()
         self.set_interval(0.5, self.refresh_view)
@@ -204,7 +223,8 @@ class RunApp(CapturePrintMixin, App):
                                                             "Waiting on the node", "Requests on the node",
                                                             "Sent by this render")
         self.query_one("#stages", DataTable).add_columns("Pipeline stage", "Active", "Queued")
-        self.query_one("#rejected", DataTable).add_columns("When", "Book", "Chapter", "Block", "Take", "Why")
+        self.query_one("#rejected", DataTable).add_columns("When", "Book", "Chapter", "Block", "Take",
+                                                           "Your verdict", "Why")
         # Nodes report their own batch state; asking can take a moment, so never on the UI thread.
         self.set_interval(2.0, lambda: self.run_worker(self._probe_nodes, thread=True, exclusive=True,
                                                        group="node-probe"))
@@ -240,6 +260,12 @@ class RunApp(CapturePrintMixin, App):
             self.exit()
             return
         self.refresh_view(force=True)
+        if self.model.state == "finished":
+            # It rendered, but rejected takes still wait for a person to judge them.
+            self.action_tab("rejected")
+            self.notify(f"Finished. {len(self.model.unjudged())} rejected take(s) are not judged yet: Enter opens "
+                        "one to listen and mark it good or bad; q quits.", severity="warning", timeout=10)
+            return
         if self.model.state == "interrupted":
             self.action_tab("errors" if self.model.current_failures() else "summary")
             self.notify("Stopped. R resumes from where it stopped (completed work is reused); q quits.",
@@ -269,6 +295,7 @@ class RunApp(CapturePrintMixin, App):
             failures.append((str(index), (str(item["attempt"]), item.get("state", "failed"),
                                           scope.get("book") or "", str(scope.get("chapter") or ""),
                                           item["record"].get("error_type") or item["kind"],
+                                          _failure_takes_cell(model.failure_takes(item)),
                                           (item["error"] or "").splitlines()[0][:160] if item["error"] else "")))
         sync_table(self.query_one("#errors", DataTable), failures)
         tabs = self.query_one("#tabs", TabbedContent)
@@ -304,11 +331,14 @@ class RunApp(CapturePrintMixin, App):
             (f"{item['request_hash']}:{item['attempt']}",
              (format_seconds(item["time"] - model.started), str(item["scope"].get("book") or ""),
               str(item["scope"].get("chapter") or ""), f"#{item['scope']['block']}" if item["scope"].get("block") else "",
-              str(item["attempt"]), (", ".join(item["reasons"]) + (f" ({item['detail']})" if item["detail"] else ""))[:160]))
+              str(item["attempt"]), _verdict_cell(model.take_verdict(item)),
+              (", ".join(item["reasons"]) + (f" ({item['detail']})" if item["detail"] else ""))[:160]))
             for item in model.visible_rejections()[:2000]])
         rejected = len(model.rejections)
+        waiting = sum(1 for item in list(model.rejections) if model.take_verdict(item) is None)
         self.query_one("#tabs", TabbedContent).get_tab("rejected-tab").label = (
-            f"Rejected ({rejected})" if rejected else "Rejected")
+            (f"Rejected ({rejected}, {waiting} to judge)" if waiting else f"Rejected ({rejected})")
+            if rejected else "Rejected")
 
     def _draw_nodes(self):
         """Chapter workers (not tied to a node) and every node's speech/verify slots."""
@@ -598,6 +628,8 @@ class RunApp(CapturePrintMixin, App):
                  f": {title_tail}")
 
         def chosen(choice):
+            self.model.judgements_changed()
+            self.refresh_view(force=True)
             if choice is not None:
                 self.run_worker(lambda: self._use_take(scope, review, choice, failure), thread=True,
                                 group="use-take")

@@ -129,6 +129,8 @@ class RunModel:
         self._rejected_keys = set()
         self.rebuild_handlers = {}             # book -> handler(chapter number) while it renders
         self.pending_rebuilds = set()          # (book, chapter) to rebuild once its chapter finishes
+        self._feedback = {}                    # render work -> {(request_hash, attempt): verdict}
+        self._rejected_attempts = {}           # (render work, request_hash) -> rejected attempts with audio
         self.changed = threading.Event()
 
     # Events --------------------------------------------------------------------
@@ -316,8 +318,68 @@ class RunModel:
         return self.state == "running"
 
     def should_hold(self):
-        """Stay open after the command ends: anything failed, or it did not finish cleanly."""
-        return self.state in ("failed", "interrupted")
+        """Stay open after the command ends: anything failed, it did not finish cleanly, or a
+        rejected take is still waiting for a person to judge it."""
+        return self.state in ("failed", "interrupted") or bool(self.unjudged())
+
+    # A person's judgement of rejected takes ------------------------------------------
+
+    def _verdicts(self, review):
+        work = str(review.work)
+        if work not in self._feedback:
+            try:
+                self._feedback[work] = review.feedback()
+            except (AttributeError, ValueError, OSError):
+                self._feedback[work] = None  # Unreadable: shown as unknown, never holds the screen.
+        return self._feedback[work]
+
+    def take_verdict(self, item):
+        """A rejected take's verdict: ``"good"``, ``"bad"``, ``None`` (not judged) or ``"?"`` (unknown)."""
+        review = item.get("review")
+        verdicts = self._verdicts(review) if hasattr(review, "work") else None
+        if verdicts is None:
+            return "?"
+        return verdicts.get((item["request_hash"], item["attempt"]))
+
+    def failure_takes(self, item):
+        """``(rejected, judged)`` takes of a failed passage, or None when it has no takes to review."""
+        review = item.get("repair")
+        if review is None or not hasattr(review, "work"):
+            return None
+        key = (str(review.work), review.request_hash)
+        if key not in self._rejected_attempts:
+            try:
+                self._rejected_attempts[key] = list(review.rejected_attempts())
+            except (AttributeError, ValueError, OSError):
+                self._rejected_attempts[key] = None
+        attempts, verdicts = self._rejected_attempts[key], self._verdicts(review)
+        if attempts is None or verdicts is None:
+            return None
+        return len(attempts), sum(1 for attempt in attempts if verdicts.get((review.request_hash, attempt)))
+
+    def unjudged(self):
+        """Every rejected take (listed this run, or of a current failed passage) not judged yet."""
+        with self._lock:
+            rejections, failures = list(self.rejections), self.current_failures()
+        waiting = set()
+        for item in rejections:
+            if hasattr(item.get("review"), "work") and self.take_verdict(item) is None:
+                waiting.add((item["request_hash"], item["attempt"]))
+        for item in failures:
+            review = item.get("repair")
+            if self.failure_takes(item) is None:
+                continue
+            verdicts = self._verdicts(review)
+            for attempt in self._rejected_attempts[(str(review.work), review.request_hash)]:
+                if not verdicts.get((review.request_hash, attempt)):
+                    waiting.add((review.request_hash, attempt))
+        return waiting
+
+    def judgements_changed(self):
+        """A person judged or used takes: read the saved verdicts and takes again."""
+        self._feedback.clear()
+        self._rejected_attempts.clear()
+        self.changed.set()
 
     # Reading ---------------------------------------------------------------------
 
@@ -440,6 +502,9 @@ class RunModel:
         with self._lock:
             failures = len(self.current_failures())
             if self.state == "finished":
+                waiting = len(self.unjudged())
+                if waiting:
+                    return "warning", f"Finished — {waiting} rejected take(s) not judged yet (Rejected, 6)"
                 return "ok", "Finished"
             if self.state == "interrupted":
                 return "warning", "Stopped — R resumes from where it stopped"

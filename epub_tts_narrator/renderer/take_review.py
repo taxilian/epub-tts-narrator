@@ -57,7 +57,36 @@ class TakeReview:
                 "audio_path": str(row["audio_path"]), "learnable": self._learnable(report) is not None,
                 "verdict": marks.get(row["attempt"]),
             })
+        if used is not None and not any(row["accepted"] for row in rows):
+            # The used take is not one of the listed attempts' audio (a repaired or
+            # copied take); it is still shown, so every take of the passage is there.
+            same = next((row for row in rows if row["attempt"] == used.get("attempt")), None)
+            if same is not None:
+                same["accepted"] = True
+            elif isinstance(used.get("audio_file"), str):
+                report = used.get("report") or {}
+                rows.append({
+                    "attempt": used.get("attempt"), "passed": report.get("passed") is True, "accepted": True,
+                    "eligible": False, "ineligible_reason": "it is the take already used",
+                    "reasons": list(report.get("reasons") or []), "duration_seconds": None,
+                    "transcript": report.get("transcript") or "", "expected_text": report.get("expected_text") or "",
+                    "audio_path": str(self.clips / self.request_hash / used["audio_file"]), "learnable": False,
+                    "verdict": marks.get(used.get("attempt")),
+                })
+                rows.sort(key=lambda row: row["attempt"] if type(row["attempt"]) is int else 0)
         return rows
+
+    def rejected_attempts(self):
+        """Attempt numbers of this passage's rejected takes with audio (cheap: no audio is read)."""
+        from .take_selection import retained_attempts
+        return [number for number, record in retained_attempts(self.clips, self.request_hash)
+                if (record.get("report") or {}).get("passed") is not True]
+
+    def feedback(self):
+        """``{(request_hash, attempt): verdict}`` for every take judged in this render work."""
+        from .take_feedback import load
+        return {(entry.get("request_hash"), entry.get("attempt")): entry.get("verdict")
+                for entry in load(self.work)["takes"].values()}
 
     def used(self):
         """The accepted record for this passage (a manual selection keeps its own audio copy), or None."""
