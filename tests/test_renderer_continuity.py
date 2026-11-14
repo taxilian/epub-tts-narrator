@@ -605,3 +605,62 @@ class SilenceStoppedHistoryTests(unittest.TestCase):
         with self.assertRaisesRegex(EngineError, "did not finish the text: 'silence'"):
             self.engine.synthesize("Preview words.", self.voices["v1"], path, seed=1)
         self.assertFalse(path.exists())
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required")
+class OtherChapterExampleTests(unittest.TestCase):
+    """A chapter's first line with a chosen reading hears another chapter's take saying it right."""
+
+    setUp = ContinuityTests.setUp
+
+    def chapter(self, texts, chapter_id, first_sequence, block):
+        chunks = passages(texts, block=block)
+        for number, chunk in enumerate(chunks):
+            chunk["segment"].update(chapter_id=chapter_id, sequence=first_sequence + number, kind="narration")
+            chunk["segment"]["delivery"]["direction"] = ""
+            if "Ce’Nedra" in chunk["spoken_text"]:
+                chosen(chunk)
+        return chunks
+
+    def run(self, result=None):
+        from epub_tts_narrator.renderer import reading_examples
+        reading_examples._INDEXES.clear()
+        return super().run(result)
+
+    def render(self, chunks, number):
+        return _render_chapter_chunks({"number": number, "chunks": chunks}, self.voices, self.engine,
+            self.engine.identity, self.verifier, self.config, self.root / "work", notify=lambda message: None)
+
+    def test_the_first_mention_in_a_chapter_hears_an_earlier_chapter_saying_it(self):
+        self.model = self.engine._model = NameModel()
+        self.verifier = Verifier(self.model)
+        self.render(self.chapter(["The road ran on.", "Ce’Nedra objected."], "ch1", 1, "b1"), 1)
+        self.render(self.chapter(["Garion rode ahead.", "Ce’Nedra laughed."], "ch2", 10, "b2"), 2)
+        named = tagged(f"<|phoneme_start|>{READING}<|phoneme_end|> objected.")
+        # Chapter two's own first line keeps Fish's history; its name line hears chapter one's take.
+        self.assertEqual(histories(self.model)[3], [tagged("Garion rode ahead."), named])
+
+    def test_a_take_heard_rearranged_or_retired_is_never_an_example(self):
+        self.model = self.engine._model = NameModel(heard="Sendera")
+        self.verifier = Verifier(self.model)
+        # A misread take is rejected, so nothing in chapter one says the name right.
+        self.config["render"]["max_attempts"] = 1
+        with self.assertRaises(Exception):
+            self.render(self.chapter(["The road ran on.", "Ce’Nedra objected."], "ch1", 1, "b1"), 1)
+        from epub_tts_narrator.renderer.reading_examples import for_work
+        self.assertEqual(for_work(self.root / "work").candidates(), [])
+
+
+class RetiredExampleTests(OtherChapterExampleTests):
+    test_the_first_mention_in_a_chapter_hears_an_earlier_chapter_saying_it = None
+    test_a_take_heard_rearranged_or_retired_is_never_an_example = None
+
+    def test_an_example_retired_after_the_index_was_read_is_not_heard(self):
+        from epub_tts_narrator.renderer.reading_examples import for_work
+        self.model = self.engine._model = NameModel()
+        self.verifier = Verifier(self.model)
+        self.render(self.chapter(["The road ran on.", "Ce’Nedra objected."], "ch1", 1, "b1"), 1)
+        [example] = for_work(self.root / "work").candidates()
+        example["accepted"].rename(example["accepted"].with_name("accepted.judged-bad-fixture.json"))
+        self.render(self.chapter(["Garion rode ahead.", "Ce’Nedra laughed."], "ch2", 10, "b2"), 2)
+        self.assertEqual(histories(self.model)[3], [tagged("Garion rode ahead.")])

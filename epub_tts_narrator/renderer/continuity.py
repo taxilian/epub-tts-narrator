@@ -157,7 +157,7 @@ def request_speakers(request):
 class ChapterContinuity:
     """Chapter-owned accepted takes for per-request history composition."""
 
-    def __init__(self, engine_identity, voices):
+    def __init__(self, engine_identity, voices, *, examples=None):
         # Engine compatibility (transport, runtime updates, model aliases) is
         # the speech cache's decision through the request's own engine
         # identity; history identity names only the exact accepted takes.
@@ -169,13 +169,16 @@ class ChapterContinuity:
         # Takes reused under tolerant history reuse although an earlier take
         # they heard has since changed.
         self.drifted = 0
+        # Other chapters' takes saying a chosen reading right
+        # (``reading_examples``), for a line with no such take in this chapter.
+        self.examples = examples
 
     def accepted_audio(self):
         """Audio checksums of the takes this chapter's history already holds."""
         with self._lock:
             return {entry["identity"]["audio_sha256"] for entry in self.entries}
 
-    def takes(self, speakers, *, before=None, readings=frozenset()):
+    def takes(self, speakers, *, before=None, readings=frozenset(), sequence=None, chapter=None):
         """Fish's first + latest, from this chapter's takes by these voice ids only.
 
         With ``before`` (a source position) only takes from earlier in the
@@ -183,7 +186,10 @@ class ChapterContinuity:
         voice's queue never enters an earlier line's history. ``readings``
         (``name_shape.chosen_readings`` keys) are chosen pronunciations the
         line uses: when neither turn says one of them right, the latest slot
-        holds the most recent take that says the most of them right.
+        holds the most recent take that says the most of them right. When no
+        take in this chapter does, it holds the same voice's take from another
+        chapter that does (``examples``; ``sequence`` and ``chapter`` place the
+        line in the book).
         """
         with self._lock:
             entries = list(self.entries)
@@ -192,10 +198,8 @@ class ChapterContinuity:
                               if entry.get("position") is not None and entry["position"] < before),
                              key=lambda entry: entry["position"])
         eligible = [entry for entry in entries if set(entry["voices"]) <= speakers]
-        if not eligible:
-            return []
         pinned = next((entry for entry in eligible if entry["pinnable"]), None)
-        latest = eligible[-1]
+        latest = eligible[-1] if eligible else None
         missing = set(readings) - set().union(*(entry.get("readings", ()) for entry in (pinned, latest) if entry))
         if missing:
             scored = [(len(missing & entry.get("readings", frozenset())), index)
@@ -203,12 +207,25 @@ class ChapterContinuity:
             best = max(scored, default=(0, None))
             if best[0]:
                 latest = eligible[best[1]]
+            elif self.examples is not None:
+                example = self.examples.example(speakers, missing, sequence=sequence, chapter=chapter,
+                                                voices_by_asset=self.voices_by_asset)
+                if example is not None:
+                    latest = example
+        if latest is None:
+            return []
         return [latest] if pinned is None or pinned is latest else [pinned, latest]
 
     @contextmanager
     def transaction(self, request, *, pinnable=True, position=None):
         voices = request_speakers(request)
-        takes = deepcopy(self.takes(voices, before=position, readings=_chosen_readings(request)))
+        readings = _chosen_readings(request)
+        if readings and self.examples is not None:
+            from .reading_examples import _chapter, _sequence
+            place = {"sequence": _sequence(request), "chapter": _chapter(request)}
+        else:
+            place = {}
+        takes = deepcopy(self.takes(voices, before=position, readings=readings, **place))
         identity = {"version": 3, "policy": POLICY, "takes": [take["identity"] for take in takes]}
         bound = dict(request, continuity=identity)
         segments = _segments(request["chunk"]) if isinstance(request.get("chunk"), dict) else []
@@ -281,6 +298,8 @@ class ChapterContinuity:
             "audio_sha256": accepted["audio_sha256"]}}
         with self._lock:
             self.entries.append(entry)
+        if self.examples is not None and entry["readings"]:
+            self.examples.add(path, accepted)
 
 
 def _chosen_readings(request):

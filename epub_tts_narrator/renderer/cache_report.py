@@ -182,7 +182,8 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
     for chapter in plan["chapters"]:
         # Replay accepted history in source order. A missed take never enters
         # the replayed history, so the same voice's later takes miss as well.
-        continuity = ChapterContinuity(engine_identity, available)
+        from .reading_examples import for_work
+        continuity = ChapterContinuity(engine_identity, available, examples=for_work(cache.work))
         changed_voices = set()
         for chunk in chapter["chunks"]:
             if chunk["silent_control"]:

@@ -439,8 +439,14 @@ requests; there is no setting to turn it off.
   readings, when there are several). Takes heard with the name rearranged are
   rejected (see the pronunciation check under verification), so they never
   become examples. The policy name is unchanged, so under tolerant history
-  reuse takes already accepted for these lines are kept; the first line of a
-  chapter to use a reading has no example and renders as before.
+  reuse takes already accepted for these lines are kept. A chapter's first
+  line to use a reading has no such take in its chapter, and its retries keep
+  the same history, so it used to misread again and again; it now hears the
+  same voice's take from another chapter that was heard saying the reading
+  right (the nearest earlier one in the book, else the nearest later one;
+  `renderer/reading_examples.py`). The index of such takes is read once per
+  render, grows as takes are accepted, and is checked again before an example
+  is used, so a take since retired (marked bad, misread) is never heard.
 - **Each voice change is its own request.** The planner groups consecutive
   chunks only for the same performer (since 2026-10-21), because speaker tags
   cannot guarantee an audible switch and transcript verification cannot detect
