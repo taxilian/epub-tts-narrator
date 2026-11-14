@@ -693,6 +693,25 @@ class BookOutcomeBoardTests(QueueFixtureTests):
               patch("epub_tts_narrator.renderer.workflow.render", side_effect=behavior)):
             return render_queue_command(self.render_args(*range(1, count + 1)), self.config, poll_seconds=0.01)
 
+    def test_queued_books_list_their_chapters_from_their_manifests(self):
+        outlines = {}
+        (self.books[2] / "manifest.json").write_text("{not json")  # unreadable: no outline, the render reports its plan
+
+        def on_event(event):
+            if event.kind == "chapters":
+                outlines[event.scope["book"]] = (event.data["outline"], event.data["chapters"])
+            if event.kind == "hold" and event.data["release"] is not None:
+                event.data["release"]()  # book-3 cannot be prepared; finish without retrying it
+
+        self.assertEqual(self.run_in_shell_board(lambda *args, **kwargs: {"chapters": []}, on_event), 1)
+        from epub_tts_narrator.renderer.common import read_json
+        titles = [entry["title"] for entry in read_json(self.books[0] / "manifest.json")["files"]["scripts"]]
+        self.assertEqual(sorted(outlines), ["book-1", "book-2"])
+        outline, chapters = outlines["book-1"]
+        self.assertTrue(outline)
+        self.assertEqual([(item["number"], item["title"], item["blocks"], item["saved"]) for item in chapters],
+                         [(number, title, None, False) for number, title in enumerate(titles, 1)])
+
     def test_a_retried_book_goes_back_to_the_front_of_the_queue(self):
         rendered, broken = [], {"book-1"}
 

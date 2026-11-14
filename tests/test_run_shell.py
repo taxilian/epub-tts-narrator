@@ -292,6 +292,74 @@ class RunModelTests(unittest.TestCase):
         self.assertEqual(self.model.choices("book"), ["b1", "b2"])
         self.assertIn("2 failure(s)", self.model.summary())
 
+    def test_every_planned_chapter_is_listed_in_order_with_its_state_and_a_breakdown(self):
+        board = BusBoard(self.bus)
+        board.book_state("/q/b1", "rendering")
+        board.book_state("/q/b2", "queued")
+        board.chapter_plan("/q/b2", [{"number": 1, "title": "Dawn", "blocks": None, "saved": False},
+                                     {"number": 2, "title": "Dusk", "blocks": None, "saved": False}], outline=True)
+        board.chapter_plan("/q/b1", [{"number": number, "title": f"Part {number}", "blocks": 3, "saved": number == 1}
+                                     for number in (1, 2, 3, 4)])
+        self.assertEqual([chapter["state"] for _, chapter in self.model.visible_chapters()][:1], ["saved"])
+        with ChapterProgress(2, 4, chunks(3), notify=PrefixedBoardNotify(board, "[b1] "), clock=self.clock,
+                             heartbeat=False) as chapter:
+            with chapter.task(0):
+                pass
+            chapter.refresh()
+            live = dict(self.model.visible_chapters())["b1\x1f2"]
+            self.assertEqual((live["state"], live["done"], live["blocks"]), ("rendering", 1, 3))
+            self.assertIsNotNone(live["snapshot"])
+        board.chapter_state("/q/b1", 2, "assembling")
+        board.chapter_state("/q/b1", 2, "done")
+        board.chapter_state("/q/b1", 1, "done", reused=True)
+        board.chapter_failure({"number": 3, "error_type": "SpeechVerificationFailed", "error": "take 3 skipped words"},
+                              book="b1", retry=lambda: True)
+        board.chapter_failure({"number": 4, "error_type": "RenderBlocked", "error": "bad clip"}, book="b1")
+        self.bus.publish("rejected", "skipped words", scope={"book": "b1", "chapter": 3},
+                         data={"request_hash": "h", "attempt": 1})
+        rows = self.model.visible_chapters()
+        # Queue order, then chapter order; a queued book's chapters are listed before it starts.
+        self.assertEqual([key for key, _ in rows], ["b1\x1f1", "b1\x1f2", "b1\x1f3", "b1\x1f4", "b2\x1f1", "b2\x1f2"])
+        self.assertEqual([(item["state"], item["reused"]) for _, item in rows],
+                         [("done", True), ("done", False), ("failed", False), ("blocked", False),
+                          ("not started", False), ("not started", False)])
+        self.assertEqual((rows[1][1]["done"], rows[2][1]["rejected"], rows[3][1]["error"]), (3, 1, "bad clip"))
+        self.assertEqual(self.model.chapter_breakdown(),
+                         [("b1", 4, {"done": 2, "failed": 1, "blocked": 1}, 1), ("b2", 2, {"not started": 2}, 0)])
+        self.assertEqual(self.model.chapter_states(), ["not started", "done", "failed", "blocked"])
+        self.model.filter.state = "failed"
+        self.assertEqual([key for key, _ in self.model.visible_chapters()], ["b1\x1f3"])
+        self.model.filter.state, self.model.filter.book = None, "b2"
+        self.assertEqual(len(self.model.visible_chapters()), 2)
+        self.assertEqual([book for book, *_ in self.model.chapter_breakdown()], ["b2"])
+        self.model.filter.book = None
+        # A late queue outline never replaces a book's plan; the book's plan replaces its outline.
+        board.chapter_plan("/q/b1", [{"number": 1, "title": "", "blocks": None, "saved": False}], outline=True)
+        board.chapter_plan("/q/b2", [{"number": number, "title": "", "blocks": 2, "saved": False}
+                                     for number in (1, 2, 3)])
+        board.book_state("/q/b2", "rendering")
+        self.assertEqual([item["state"] for key, item in self.model.visible_chapters() if key.startswith("b2")],
+                         ["queued"] * 3)
+        self.assertEqual(len([key for key, _ in self.model.visible_chapters() if key.startswith("b1")]), 4)
+        failure = next(item for item in self.model.current_failures() if item["scope"].get("chapter") == 3)
+        self.assertTrue(self.model.retry(failure))
+        self.assertEqual(dict(self.model.visible_chapters())["b1\x1f3"]["state"], "retrying")
+        self.model.finish(130)
+        self.assertEqual(dict(self.model.visible_chapters())["b1\x1f3"]["state"], "stopped")
+        self.model.restart()
+        self.assertEqual([item["state"] for key, item in self.model.visible_chapters() if key.startswith("b1")],
+                         ["done", "done", "not started", "not started"])
+
+    def test_live_rows_of_a_command_without_a_plan_still_show(self):
+        board = BusBoard(self.bus)
+        with ChapterProgress(5, 9, chunks(2), notify=PrefixedBoardNotify(board, "[b9] "), clock=self.clock,
+                             heartbeat=False) as chapter:
+            chapter.refresh()
+            rows = self.model.visible_chapters()
+            self.assertEqual([(item["book"], item["chapter"], item["state"]) for _, item in rows], [("b9", 5, "rendering")])
+            self.assertTrue(all(type(key) is str for key, _ in rows))
+        self.assertEqual(self.model.visible_chapters(), [])
+
     def test_filters_narrow_logs_and_failures_but_keep_run_wide_lines(self):
         for line in ("[b1] Ch 1: generating", "[b2] Ch 1: generating", "Rendering with gpu-a (2 slot(s))",
                      "[b1] Ch 2: Could not verify", "[b1] Ch 2: === Failed chapter 2 ==="):
@@ -665,6 +733,64 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("escape")
             release.set()
             await self.wait_for(pilot, lambda: not app.is_running)
+
+    async def test_the_chapters_tab_lists_every_chapter_and_keeps_the_cursor_while_states_change(self):
+        from epub_tts_narrator.renderer.progress import report_book_state, report_chapter_plan, report_chapter_state
+        step, release = threading.Event(), threading.Event()
+
+        def command():
+            with live_board(print) as notify:
+                report_book_state(notify, "fixture", "rendering")
+                report_chapter_plan(notify, "fixture", [
+                    {"number": number, "title": title, "blocks": 4, "saved": number == 1}
+                    for number, title in ((1, "Harbor"), (2, "Storm"), (3, "Lantern"))])
+                report_chapter_state(notify, "fixture", 1, "done", reused=True)
+                report_chapter_failure(notify, {"number": 3, "error_type": "SpeechVerificationFailed",
+                                                "error": "take 3 skipped words"})
+                step.wait(5)
+                report_chapter_state(notify, "fixture", 2, "rendering")
+                release.wait(5)
+            return 0
+
+        app = self.make_app(command)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await self.wait_for(pilot, lambda: len(self.model.visible_chapters()) == 3
+                                and self.model.visible_chapters()[2][1]["state"] == "failed")
+            await pilot.press("2")
+            app.refresh_view(force=True)
+            await pilot.pause()
+            table = app.query_one("#rows")
+            self.assertEqual([key.value for key in table.rows], ["fixture\x1f1", "fixture\x1f2", "fixture\x1f3"])
+            self.assertEqual([str(cell) for cell in table.get_row("fixture\x1f1")[2:5]],
+                             ["Harbor", "done · earlier run", "4/4 (100%)"])
+            self.assertEqual(str(table.get_row("fixture\x1f2")[3]), "queued")
+            breakdown = str(app.query_one("#chapter-breakdown").render())
+            self.assertIn("3 chapters · 1 queued · 1 done (1 from an earlier run) · 1 failed", breakdown)
+            self.assertEqual(str(app.query_one("#tabs").get_tab("chapters").label), "Chapters (1/3 done)")
+            table.focus()
+            table.move_cursor(row=1)
+            step.set()
+            await self.wait_for(pilot, lambda: self.model.visible_chapters()[1][1]["state"] == "rendering")
+            app.refresh_view(force=True)
+            await pilot.pause()
+            self.assertEqual(str(table.get_row("fixture\x1f2")[3]), "rendering")
+            self.assertEqual(table.cursor_row, 1)  # updated in place: the highlighted chapter stays put
+            await pilot.press("s")
+            await pilot.press("down", "down", "down", "enter")  # Any, rendering, done, failed
+            self.assertEqual(self.model.filter.state, "failed")
+            await pilot.pause()
+            self.assertEqual([key.value for key in table.rows], ["fixture\x1f3"])
+            self.assertIn("Showing 1 of 3", str(app.query_one("#chapter-breakdown").render()))
+            await pilot.press("enter")
+            from epub_tts_narrator.tui_widgets import DetailScreen
+            self.assertIsInstance(app.screen, DetailScreen)
+            await pilot.press("escape")
+            release.set()
+            # A failed chapter keeps the screen open after the command ends.
+            await self.wait_for(pilot, lambda: not self.model.running)
+            await pilot.press("q")
+            await self.wait_for(pilot, lambda: not app.is_running)
+        self.assertEqual((app.result, self.model.state), (0, "failed"))
 
     async def test_filters_and_tabs(self):
         release = threading.Event()

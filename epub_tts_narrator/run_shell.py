@@ -26,7 +26,7 @@ from textual.containers import Grid
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
 
 from .run_events import EventBus
-from .run_shell_model import RunModel, next_severity, repair_hint
+from .run_shell_model import CHAPTER_STATES, RunModel, next_severity, repair_hint
 from .tui_support import prompt_streams, screen_host
 from .tui_widgets import (
     BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, DetailScreen, KeysScreen, PromptBridge,
@@ -79,6 +79,7 @@ class RunApp(CapturePrintMixin, App):
     .tile.error { border: round $error; }
     #books { height: 1fr; }
     #rows, #workers, #errors { height: 1fr; }
+    #chapter-breakdown { height: auto; padding: 0 1; }
     #coordinators { height: auto; max-height: 18; }
     #node-work { height: auto; max-height: 8; }
     .section-title { color: $text-muted; padding: 0 1; margin-top: 1; }
@@ -100,7 +101,8 @@ class RunApp(CapturePrintMixin, App):
         Binding("ctrl+q", "quit_run", "Quit", show=False, priority=True, tooltip="Same as q"),
         Binding("question_mark", "keys", "Keys", tooltip="Show every key"),
         Binding("1", "tab('summary')", "Summary", tooltip="At a glance: health, books, clips, verification"),
-        Binding("2", "tab('chapters')", "Chapters", tooltip="Live chapters, blocks, timing and active work"),
+        Binding("2", "tab('chapters')", "Chapters", tooltip="Every chapter of the shown books: its state, blocks, "
+                                                            "rejected takes and active work, with a count per state"),
         Binding("3", "tab('workers')", "Nodes", tooltip="Chapter workers, each node's speech and verify slots and "
                                                         "their blocks, and the pipeline's stages"),
         Binding("4", "tab('log')", "Log", tooltip="Every message, filtered"),
@@ -111,6 +113,7 @@ class RunApp(CapturePrintMixin, App):
         Binding("b", "pick('book')", "Book", tooltip="Filter by book"),
         Binding("c", "pick('chapter')", "Chapter", tooltip="Filter by chapter"),
         Binding("w", "pick('worker')", "Worker", tooltip="Filter by worker"),
+        Binding("s", "pick('state')", "State", tooltip="Show only chapters in one state (rendering, done, failed, …)"),
         Binding("V", "pick('voice')", "Voice", show=False,
                 tooltip="Show chapters with a block spoken by this voice"),
         Binding("v", "severity", "Level", tooltip="Cycle the message level: info, warnings, errors, everything"),
@@ -150,7 +153,7 @@ class RunApp(CapturePrintMixin, App):
         self._player = None
 
     PROFILE = "render"
-    FILTER_KEYS = "b book · c chapter · w worker · V voice · v level · / text · x clear"
+    FILTER_KEYS = "b book · c chapter · s state · w worker · V voice · v level · / text · x clear"
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -173,6 +176,7 @@ class RunApp(CapturePrintMixin, App):
         render = self.PROFILE == "render"
         if render:
             with TabPane("Chapters", id="chapters"):
+                yield Static("", id="chapter-breakdown")
                 yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
                 yield Static("", id="sched")
             with TabPane("Nodes", id="workers-tab"):
@@ -216,7 +220,8 @@ class RunApp(CapturePrintMixin, App):
         """The render layout's tables and its node polling."""
         self.query_one("#books", DataTable).add_columns("Done", "Book", "State", "Chapters", "Active", "Blocks", "Failures")
         self.query_one("#coordinators", DataTable).add_columns("Chapter worker", "Book", "Chapter", "Blocks", "Working on")
-        self.query_one("#rows", DataTable).add_columns("Book", "Chapter", "Blocks", "Elapsed", "Left", "Active")
+        self.query_one("#rows", DataTable).add_columns("Book", "Chapter", "Title", "State", "Blocks",
+                                                       "Rejected takes", "Elapsed", "Left", "Now")
         self.query_one("#workers", DataTable).add_columns("Node", "Role", "Slot", "Book", "Chapter", "Block",
                                                           "Since sent")
         self.query_one("#node-work", DataTable).add_columns("Node", "Batch rows", "Decoding", "Prefilling",
@@ -309,18 +314,14 @@ class RunApp(CapturePrintMixin, App):
         """The render layout's chapters, nodes, pipeline stages and rejected takes."""
         model = self.model
         model.sched = self._sched_status()
-        rows = []
-        for key, scope, snapshot, text in model.visible_rows():
-            if snapshot:
-                cells = (scope.get("book") or "", f"{snapshot['chapter']}/{snapshot['total_chapters']}",
-                         f"{snapshot['done']}/{snapshot['blocks']} ({round(100 * snapshot['done'] / max(1, snapshot['blocks']))}%)",
-                         format_seconds(snapshot.get("elapsed", 0)),
-                         f"~{format_seconds(snapshot['remaining'])}" if snapshot.get("remaining") else "",
-                         _active_text(snapshot))
-            else:
-                cells = (scope.get("book") or "", "", "", "", "", text)
-            rows.append((str(key), cells))
-        sync_table(self.query_one("#rows", DataTable), rows)
+        chapters = model.visible_chapters()
+        sync_table(self.query_one("#rows", DataTable), [(key, _chapter_cells(chapter)) for key, chapter in chapters])
+        tally = model.chapter_breakdown()
+        self.query_one("#chapter-breakdown", Static).update(_breakdown_text(tally, len(chapters), model.filter))
+        total = sum(item[1] for item in tally)
+        done = sum(item[2].get("done", 0) for item in tally)
+        self.query_one("#tabs", TabbedContent).get_tab("chapters").label = (
+            f"Chapters ({done}/{total} done)" if total else "Chapters")
         self.query_one("#sched", Static).update(self._sched_line())
         self._draw_nodes()
         stages = (model.sched or {}).get("stages") or {}
@@ -471,7 +472,7 @@ class RunApp(CapturePrintMixin, App):
         self.query_one("#tabs", TabbedContent).active = self.TABS[name]
 
     def action_pick(self, dimension):
-        values = self.model.choices(dimension)
+        values = self.model.chapter_states() if dimension == "state" else self.model.choices(dimension)
         if not values:
             self.notify(f"No {dimension} seen yet", severity="warning")
             return
@@ -530,22 +531,36 @@ class RunApp(CapturePrintMixin, App):
                 self._open_rejection(item)
 
     def _chapter_detail(self, key):
-        row = next((item for item in self.model.visible_rows() if str(item[0]) == key), None)
-        if row is None or not row[2]:
+        chapter = next((item for row_key, item in self.model.visible_chapters() if row_key == key), None)
+        if chapter is None:
             return
-        _, scope, snapshot, _ = row
-        lines = [f"{snapshot['done']} of {snapshot['blocks']} blocks accepted, {format_seconds(snapshot['elapsed'])} so far"
-                 + (f", about {format_seconds(snapshot['remaining'])} left" if snapshot.get("remaining") else "") + ".", ""]
-        for task in snapshot.get("active", []):
+        snapshot = chapter["snapshot"]
+        lines = [f"State: {_state_label(chapter)}"]
+        if chapter["title"]:
+            lines.insert(0, chapter["title"])
+        if snapshot:
+            lines.append(f"{snapshot['done']} of {snapshot['blocks']} blocks accepted, "
+                         f"{format_seconds(snapshot['elapsed'])} so far"
+                         + (f", about {format_seconds(snapshot['remaining'])} left" if snapshot.get("remaining") else "")
+                         + ".")
+        elif chapter["blocks"] is not None:
+            lines.append(f"{chapter['done']} of {chapter['blocks']} blocks accepted.")
+        if chapter["rejected"]:
+            lines.append(f"{chapter['rejected']} rejected take(s) this run (Rejected, 6).")
+        if chapter["error"]:
+            lines += ["", f"{chapter['error_type'] or 'Error'}: {chapter['error']}",
+                      "Errors (5) has its repairs: r retries the chapter, t listens to its takes."]
+        lines.append("")
+        for task in (snapshot or {}).get("active", []):
             lines.append(f"Block {task['block']}: {task['phase']} for {format_seconds(task.get('elapsed', 0))}"
                          + (f" on {task['worker']}" if task.get("worker") else "")
                          + (f" (voices: {', '.join(task['voices'])})" if task.get("voices") else ""))
         recent = [event.text for _, event in self.model.visible_logs()
-                  if event.scope.get("chapter") == snapshot["chapter"]
-                  and event.scope.get("book") == scope.get("book")][-15:]
+                  if event.scope.get("chapter") == chapter["chapter"]
+                  and event.scope.get("book") == chapter["book"]][-15:]
         if recent:
             lines += ["", "Recent messages:", *recent]
-        title = (f"[{scope['book']}] " if scope.get("book") else "") + f"Chapter {snapshot['chapter']}"
+        title = (f"[{chapter['book']}] " if chapter["book"] else "") + f"Chapter {chapter['chapter'] or ''}".rstrip()
         self.push_screen(DetailScreen(title, "\n".join(lines)))
 
     # Failures and repairs ------------------------------------------------------
@@ -857,6 +872,74 @@ STAGE_NAMES = {"synthesis": "Generating speech", "synthesis_slot": "Waiting for 
                "review_coordination": "Review coordination", "model_thread": "Model thread"}
 BOOK_STYLES = {"rendering": "bold cyan", "assembling": "cyan", "preparing": "cyan", "queued": "dim",
                "done": "green", "failed": "bold red", "stopped": "yellow"}
+
+
+CHAPTER_STYLES = {"rendering": "bold cyan", "assembling": "cyan", "retrying": "bold yellow", "queued": "",
+                  "not started": "dim", "saved": "green", "done": "green", "failed": "bold red",
+                  "blocked": "bold magenta", "stopped": "yellow"}
+
+
+def _state_label(chapter, *, short=False):
+    if chapter["state"] == "done" and chapter["reused"]:
+        return "done · earlier run" if short else "done (restored from an earlier run)"
+    if chapter["state"] == "saved":
+        return "saved earlier" if short else "saved earlier (its checkpoint is checked when it is reached)"
+    return chapter["state"]
+
+
+def _chapter_cells(chapter):
+    """One Chapters row: book, chapter, title, state, blocks, rejected takes, timing and what it is doing."""
+    snapshot, blocks, done = chapter["snapshot"], chapter["blocks"], chapter["done"]
+    if blocks is not None:
+        progress = f"{done}/{blocks}" + (f" ({round(100 * done / max(1, blocks))}%)" if blocks else "")
+    else:
+        progress = str(done) if done else ""
+    if snapshot:
+        now = _active_text(snapshot)
+    elif chapter["error"]:
+        now = Text(chapter["error"].splitlines()[0][:160], style="red")
+    else:
+        now = chapter["text"] or ""
+    state = Text(_state_label(chapter, short=True), style=CHAPTER_STYLES.get(chapter["state"], ""))
+    rejected = chapter["rejected"]
+    return (str(chapter["book"] or ""), "" if chapter["chapter"] is None else str(chapter["chapter"]),
+            chapter["title"][:48], state, progress,
+            Text(str(rejected), style="yellow") if rejected else "",
+            format_seconds(snapshot.get("elapsed", 0)) if snapshot else "",
+            f"~{format_seconds(snapshot['remaining'])}" if snapshot and snapshot.get("remaining") else "", now)
+
+
+def _breakdown_text(tally, shown, flt):
+    """How many chapters are in each state, per book (and for all books when several are shown)."""
+    def line(name, total, counts, reused):
+        text = Text(f"{name}: ", style="bold")
+        text.append(f"{total} chapter{'s' if total != 1 else ''}")
+        for state in CHAPTER_STATES:
+            if counts.get(state):
+                text.append(" · ")
+                label = "saved earlier" if state == "saved" else state
+                text.append(f"{counts[state]} {label}", style=CHAPTER_STYLES.get(state, ""))
+                if state == "done" and reused:
+                    text.append(f" ({reused} from an earlier run)", style="dim")
+        return text
+    if not tally:
+        return Text("No chapters planned yet.", style="dim")
+    result = Text()
+    if len(tally) > 1:
+        counts = {}
+        for _, _, book_counts, _ in tally:
+            for state, count in book_counts.items():
+                counts[state] = counts.get(state, 0) + count
+        result.append_text(line("All books", sum(item[1] for item in tally), counts, sum(item[3] for item in tally)))
+        result.append("\n")
+    for index, (book, total, counts, reused) in enumerate(tally):
+        if index:
+            result.append("\n")
+        result.append_text(line(str(book or "this run"), total, counts, reused))
+    total = sum(item[1] for item in tally)
+    if shown != total:
+        result.append(f"\nShowing {shown} of {total} ({flt.describe()}; x clears)", style="dim")
+    return result
 
 
 def _active_text(snapshot):

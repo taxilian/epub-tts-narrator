@@ -2813,6 +2813,13 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
     require_engine_support(plan, engine)
     work = Path(config["render"]["work_dir"])
     lock = _start_run(work, plan, "chapters" if chapters_only else "render")
+    # A run shell lists every chapter of the render from the start, marking
+    # those with a checkpoint from an earlier run (checked when reached).
+    from .progress import report_chapter_plan, report_chapter_state
+    book_key = Path(bundle["directory"]).name
+    report_chapter_plan(notify, book_key, lambda: [
+        {"number": chapter["number"], "title": chapter["title"], "blocks": len(chapter["chunks"]),
+         "saved": _checkpoint_path(work, chapter).is_file()} for chapter in plan["chapters"]])
     book_lock = None
     voice_lock = None
     assembly_executor = None
@@ -2870,8 +2877,9 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         if config.get("_link_checkpoint_records") is not None:
             _link_completed_chapters(work, config["_link_checkpoint_records"], notify=notify)
 
-        def completed(index, composed, chapter_acceptance, chapter_label, chapter_started):
+        def completed(index, composed, chapter_acceptance, chapter_label, chapter_started, reused=False):
             composed_records[index] = (composed, chapter_acceptance)
+            report_chapter_state(notify, book_key, plan["chapters"][index]["number"], "done", reused=reused)
             notify(f"=== Completed {chapter_label} in {format_duration(monotonic() - chapter_started)}; "
                    f"run elapsed {format_duration(monotonic() - run_started)} "
                    f"({len(composed_records)} / {len(plan['chapters'])} selected chapters ready). ===")
@@ -2928,6 +2936,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                             _publish_work_chapter_link(config, composed, notify=notify)
                     notify(f"Reusing completed {chapter_label}: {chapter['title']} ({composed['encoded_path'] or 'empty'})")
             if composed is None:
+                report_chapter_state(notify, book_key, chapter["number"], "rendering")
                 notify(f"Processing {chapter_label}: {chapter['title']} ({len(chapter['chunks'])} blocks)")
                 try:
                     rendered_chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
@@ -2973,11 +2982,12 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                 if scheduler is None:
                     # Legacy keeps exactly one outstanding assembly, in order.
                     finish_completed(final=True)
+                report_chapter_state(notify, book_key, chapter["number"], "assembling")
                 pending_assembly[chapter_index] = (
                     assembly_executor.submit(compose, chapter, clips, context, chapter_acceptance),
                     chapter_acceptance, chapter_label, chapter_started)
             else:
-                completed(chapter_index, composed, chapter_acceptance, chapter_label, chapter_started)
+                completed(chapter_index, composed, chapter_acceptance, chapter_label, chapter_started, reused=True)
 
         # A run shell can ask to render a failed chapter again while the run
         # continues (plain and custom notify never offer retries). A retried

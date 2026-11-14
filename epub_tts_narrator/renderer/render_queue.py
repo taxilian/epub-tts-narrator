@@ -69,6 +69,20 @@ def _prefixed(prefix, notify):
     return line
 
 
+def _chapter_outline(book):
+    """A queued book's chapters (number and title) from its manifest, or None when it cannot be read.
+
+    Display only: the book's render checks its bundle and reports its plan.
+    """
+    from .common import read_json
+    try:
+        scripts = read_json(Path(book) / "manifest.json")["files"]["scripts"]
+        return [{"number": number, "title": str(entry.get("title") or ""), "blocks": None, "saved": False}
+                for number, entry in enumerate(scripts, 1)]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def _positive_int(value):
     return value if type(value) is int and value > 0 else None
 
@@ -547,9 +561,11 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
     coordinators = None
     runs = []
     changed = threading.Event()
-    from .progress import report_book_state
+    from .progress import report_book_state, report_chapter_plan
     for book in books:
         report_book_state(notify, book, "queued")
+        # Until a book is prepared, a run shell lists its chapters from its manifest.
+        report_chapter_plan(notify, book, lambda book=book: _chapter_outline(book), outline=True)
     # A run shell can put a failed book back into this queue (after fixing
     # what stopped it); a retried book is admitted next, ahead of the books
     # still waiting. Plain and custom notify never offer book retries.

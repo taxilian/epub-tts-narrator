@@ -22,6 +22,8 @@ from typing import Any
 LOG, STATUS, STATUS_REMOVED, OUTCOME, FAILURE, FINISHED, PROGRESS, HOLD, BOOK, REJECTED, REBUILD = (
     "log", "status", "status_removed", "outcome", "failure", "finished", "progress", "hold", "book",
     "rejected", "rebuild")
+# A book's planned chapters (``data["chapters"]``), and one chapter's state change (``data["state"]``).
+CHAPTERS, CHAPTER = "chapters", "chapter"
 SEVERITIES = ("debug", "info", "warning", "error")
 
 

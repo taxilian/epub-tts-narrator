@@ -381,6 +381,49 @@ class PipelineLifecycleTests(unittest.TestCase):
     def test_the_sequential_scheduler_retries_after_its_main_pass(self):
         self._retry_in_place("legacy")
 
+    def test_the_run_shell_lists_every_chapter_with_its_state_and_reuses_finished_ones(self):
+        from epub_tts_narrator.run_shell_model import RunModel
+        self._four_chapter_bundle("chapters-bundle")
+        plans = []
+
+        def watch(model):
+            def on_event(event):
+                model.on_event(event)
+                if event.kind == "chapters":
+                    plans.append([(item["number"], item["title"], item["blocks"], item["saved"])
+                                  for item in event.data["chapters"]])
+                if event.kind == "hold" and event.data["release"] is not None:
+                    event.data["release"]()  # the person finishes without retrying
+            return on_event
+
+        first = RunModel("render")
+        with self.assertRaises(ChaptersRenderFailed):
+            self._render_in_shell("pipeline", watch(first))
+        # Every chapter is listed from the start, before any has reported progress.
+        self.assertEqual([(number, saved) for number, _, _, saved in plans[0]],
+                         [(1, False), (2, False), (3, False), (4, False)])
+        self.assertTrue(all(blocks for _, _, blocks, _ in plans[0]))
+        chapters = [chapter for _, chapter in first.visible_chapters()]
+        self.assertEqual([(item["chapter"], item["state"]) for item in chapters],
+                         [(1, "done"), (2, "blocked"), (3, "done"), (4, "done")])
+        self.assertEqual(chapters[0]["done"], chapters[0]["blocks"])
+        self.assertIn("Fixture permanent generation error", chapters[1]["error"])
+
+        from epub_tts_narrator.renderer.progress import shell_board
+        from epub_tts_narrator.run_events import EventBus
+        second = RunModel("render")
+        plans.clear()
+        bus = EventBus()
+        bus.subscribe(watch(second))
+        with shell_board(bus) as board:  # the cause is fixed and the person resumes
+            result = render(self.bundle, self.config, self.pool_for("pipeline"), self.verifier, notify=board.log)
+        self.assertEqual(result["status"], "complete")
+        # Finished chapters are marked from their checkpoints, then restored rather than rendered.
+        self.assertEqual([saved for *_, saved in plans[0]], [True, False, True, True])
+        self.assertEqual([(item["state"], item["reused"]) for _, item in second.visible_chapters()],
+                         [("done", True), ("done", False), ("done", True), ("done", True)])
+        self.assertEqual(second.chapter_breakdown(), [("chapters-bundle", 4, {"done": 4}, 3)])
+
     def test_a_person_accepts_a_failed_take_and_the_chapter_continues_from_it(self):
         from epub_tts_narrator.renderer.progress import shell_board
         from epub_tts_narrator.run_events import EventBus

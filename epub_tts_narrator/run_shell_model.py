@@ -15,8 +15,8 @@ import re
 import threading
 import time
 
-from .run_events import (BOOK, FAILURE, FINISHED, HOLD, LOG, OUTCOME, PROGRESS, REBUILD, REJECTED, SEVERITIES,
-                         STATUS, STATUS_REMOVED)
+from .run_events import (BOOK, CHAPTER, CHAPTERS, FAILURE, FINISHED, HOLD, LOG, OUTCOME, PROGRESS, REBUILD,
+                         REJECTED, SEVERITIES, STATUS, STATUS_REMOVED)
 
 
 SEVERITY_LEVELS = ("info", "warning", "error", "debug")  # cycle order; "debug" shows everything
@@ -27,6 +27,12 @@ _REUSED = re.compile(r"^Reusing completed chapter (\d+) / (\d+)")
 _REJECTED = re.compile(r"\brejected\b", re.IGNORECASE)
 _RETRYING = re.compile(r"\b(retrying|retry \d|attempt \d+/\d+)\b", re.IGNORECASE)
 FINAL_BOOK_STATES = ("done", "failed", "stopped")
+# A chapter's state in the Chapters view, in breakdown order. "not started" is a
+# chapter of a book that is not rendering yet; "queued" waits inside a rendering
+# book; "saved" has a checkpoint from an earlier run, checked when it is reached.
+CHAPTER_STATES = ("rendering", "assembling", "retrying", "queued", "not started", "saved", "done", "failed",
+                  "blocked", "stopped")
+_UNFINISHED_CHAPTER = ("rendering", "assembling", "retrying")
 
 
 def repair_hint(item):
@@ -58,13 +64,15 @@ class RunFilter:
     voice: str | None = None
     severity: str = "info"
     text: str = ""
+    state: str | None = None  # a chapter state; narrows the Chapters view only
 
     def active(self):
-        return any((self.book, self.chapter, self.worker, self.voice, self.text)) or self.severity != "info"
+        return any((self.book, self.chapter, self.worker, self.voice, self.text, self.state)) or self.severity != "info"
 
     def describe(self):
         parts = [f"{name}={value}" for name, value in (("book", self.book), ("chapter", self.chapter),
-                                                       ("worker", self.worker), ("voice", self.voice))
+                                                       ("worker", self.worker), ("voice", self.voice),
+                                                       ("state", self.state))
                  if value is not None]
         if self.severity != "info":
             parts.append("all messages" if self.severity == "debug" else f"{self.severity} and worse")
@@ -118,6 +126,8 @@ class RunModel:
         self.progress = None      # analysis stage and model-stream status (PROGRESS events)
         self.holds = {}           # book (or None) -> release callable while a render waits for retries
         self.book_states = {}     # book -> {"state", "ready", "total", "key"}
+        self.chapter_plans = {}   # book -> {number: {"number", "title", "blocks", "state", "done", ...}}
+        self._outlines = set()    # books whose chapters are still a queued outline
         self.sched = None         # latest render_schedule_status snapshot (polled by the screen)
         self._done_by_key = {}    # board key -> blocks done last seen
         self.accepted = deque()   # (time, blocks) accepted while chapters ran
@@ -164,6 +174,11 @@ class RunModel:
                     state["total"] = row["snapshot"].get("total_chapters") or state["total"]
                     if state["state"] in ("queued", "preparing", None):
                         state["state"] = "rendering"
+                    entry = self._chapter(book, row["scope"].get("chapter"), create=False)
+                    if entry is not None:
+                        entry["done"], entry["blocks"] = done, row["snapshot"].get("blocks", entry["blocks"])
+                        if entry["state"] not in ("rendering", "assembling"):
+                            entry["state"], entry["error"], entry["error_type"] = "rendering", None, None
                     for task in row["snapshot"].get("active", []):
                         if task.get("worker"):
                             self.seen["worker"].add(task["worker"])
@@ -171,6 +186,19 @@ class RunModel:
                 if event.text:
                     row["text"] = event.text
                 row["updated"] = event.time
+            elif event.kind == CHAPTERS:
+                self._plan_chapters(event.scope.get("book"), (event.data or {}).get("chapters") or [],
+                                    outline=bool((event.data or {}).get("outline")))
+            elif event.kind == CHAPTER:
+                data = event.data or {}
+                entry = self._chapter(event.scope.get("book"), event.scope.get("chapter"))
+                if entry is not None and data.get("state") in CHAPTER_STATES:
+                    entry["state"] = data["state"]
+                    entry["reused"] = bool(data.get("reused"))
+                    if data["state"] == "rendering":
+                        entry["error"] = entry["error_type"] = None
+                    elif data["state"] == "done" and entry["blocks"] is not None:
+                        entry["done"] = entry["blocks"]
             elif event.kind == REJECTED:
                 data = dict(event.data or {})
                 key = (data.get("request_hash"), data.get("attempt"))
@@ -200,6 +228,7 @@ class RunModel:
                 book = event.scope.get("book")
                 self.books[book] = bool(event.data.get("succeeded"))
                 self._book(book, key=event.data.get("key"))["state"] = "done" if self.books[book] else "failed"
+                self._stop_chapters(book)
                 if not self.books[book]:
                     self._book_failure(book, event.data.get("key"))
                 else:
@@ -211,6 +240,8 @@ class RunModel:
                 book = event.scope.get("book")
                 state = event.data.get("state")
                 self._book(book, key=event.data.get("key"))["state"] = state
+                if state in FINAL_BOOK_STATES:
+                    self._stop_chapters(book)
                 if state == "failed":
                     self._book_failure(book, event.data.get("key"), retry=event.data.get("retry"))
             elif event.kind == FAILURE:
@@ -218,6 +249,12 @@ class RunModel:
                 self.failures.append({"kind": "chapter", "scope": dict(event.scope), "error": event.text,
                                       "record": dict(data.get("record") or {}), "retry": data.get("retry"),
                                       "repair": data.get("repair"), "state": "failed", "attempt": self.attempt})
+                entry = self._chapter(event.scope.get("book"), event.scope.get("chapter"), create=False)
+                if entry is not None:
+                    error_type = (data.get("record") or {}).get("error_type")
+                    # No take passed verification ("failed"), or something must be fixed first ("blocked").
+                    entry["state"] = "failed" if error_type in (None, "SpeechVerificationFailed") else "blocked"
+                    entry["error"], entry["error_type"] = event.text, error_type
             elif event.kind == HOLD:
                 book = event.scope.get("book")
                 if event.data.get("release") is None:
@@ -235,6 +272,45 @@ class RunModel:
         if key and not state["key"]:
             state["key"] = key
         return state
+
+    def _plan_chapters(self, book, chapters, *, outline):
+        """A book's chapter list: its render's plan replaces a queued outline, never the reverse."""
+        if outline and book in self.chapter_plans and book not in self._outlines:
+            return
+        self._book(book)
+        plan = {}
+        for item in chapters:
+            number = item.get("number")
+            if type(number) is not int:
+                continue
+            blocks = item.get("blocks") if type(item.get("blocks")) is int else None
+            plan[number] = {"number": number, "title": str(item.get("title") or ""), "blocks": blocks,
+                            "state": "saved" if item.get("saved") else "queued", "done": 0, "reused": False,
+                            "error": None, "error_type": None}
+        self.chapter_plans[book] = dict(sorted(plan.items()))
+        if outline:
+            self._outlines.add(book)
+        else:
+            self._outlines.discard(book)
+
+    def _chapter(self, book, number, *, create=True):
+        """A planned chapter's entry; a state for an unplanned chapter of a planned book adds it."""
+        plan = self.chapter_plans.get(book)
+        if plan is None or type(number) is not int:
+            return None
+        if number not in plan and create:
+            plan[number] = {"number": number, "title": "", "blocks": None, "state": "queued", "done": 0,
+                            "reused": False, "error": None, "error_type": None}
+            self.chapter_plans[book] = dict(sorted(plan.items()))
+        return plan.get(number)
+
+    def _stop_chapters(self, book=None):
+        """Chapters still in progress when their book (or the run) ended were stopped, not finished."""
+        for name, plan in self.chapter_plans.items():
+            if book is None or name == book:
+                for entry in plan.values():
+                    if entry["state"] in _UNFINISHED_CHAPTER:
+                        entry["state"] = "stopped"
 
     def _book_failure(self, book, key, retry=None):
         """One book-level failure per book and attempt, carrying its last error and any retry.
@@ -282,6 +358,7 @@ class RunModel:
             self.error = error
             self.finished_at = self._clock()
             self.rows.clear()
+            self._stop_chapters()
             if interrupted or exit_code == 130:
                 self.state = "interrupted"
                 # Whatever had not finished was stopped by the person, not failed.
@@ -309,6 +386,11 @@ class RunModel:
             self.pending_rebuilds.clear()
             self.book_states = {book: dict(state, state="queued") for book, state in self.book_states.items()
                                 if state["state"] != "done"}
+            for book, plan in self.chapter_plans.items():
+                if book in self.book_states:
+                    for entry in plan.values():
+                        if entry["state"] != "done":
+                            entry.update(state="queued", error=None, error_type=None)
             self._done_by_key.clear()
             self.last_progress = self._clock()
         self.changed.set()
@@ -398,6 +480,9 @@ class RunModel:
             return False
         with self._lock:
             item["state"] = "retrying"
+            entry = self._chapter(item["scope"].get("book"), item["scope"].get("chapter"), create=False)
+            if item["kind"] == "chapter" and entry is not None:
+                entry["state"] = "retrying"
         self.changed.set()
         return True
 
@@ -455,6 +540,102 @@ class RunModel:
                  and (flt.voice is None or any(flt.voice in (task.get("voices") or ())
                                                for task in (item[2] or {}).get("active", [])))]
         return sorted(items, key=lambda item: (str(item[1].get("book") or ""), item[1].get("chapter") or 0))
+
+    def _book_order(self):
+        order = list(self.book_states)
+        order += [book for book in self.chapter_plans if book not in self.book_states]
+        order += sorted({row["scope"].get("book") for row in self.rows.values()} - set(order), key=str)
+        return order
+
+    def _chapters(self):
+        """Every chapter row, in book then chapter order, before filters (call holding the lock).
+
+        Planned chapters come first; a live row the plan does not know (a
+        command that reports no plan) is listed under its book as well.
+        """
+        live = {}
+        unplanned = []
+        for key, row in self.rows.items():
+            place = (row["scope"].get("book"), row["scope"].get("chapter"))
+            if place[0] in self.chapter_plans and place[1] in self.chapter_plans[place[0]]:
+                live[place] = (key, row)
+            else:
+                unplanned.append((key, row))
+        rejected = {}
+        for item in self.rejections:
+            place = (item["scope"].get("book"), item["scope"].get("chapter"))
+            rejected[place] = rejected.get(place, 0) + 1
+        result = []
+        for book in self._book_order():
+            book_state = (self.book_states.get(book) or {}).get("state")
+            for number, entry in (self.chapter_plans.get(book) or {}).items():
+                key, row = live.get((book, number), (None, None))
+                snapshot = row["snapshot"] if row else None
+                state = entry["state"]
+                if row is not None and state not in ("assembling", "done"):
+                    state = "rendering"
+                elif state == "queued" and book_state not in ("rendering", "assembling"):
+                    state = "not started"
+                result.append((f"{book}\x1f{number}", {
+                    "book": book, "chapter": number, "title": entry["title"], "state": state,
+                    "reused": entry["reused"], "blocks": snapshot["blocks"] if snapshot else entry["blocks"],
+                    "done": snapshot["done"] if snapshot else entry["done"],
+                    "rejected": rejected.get((book, number), 0), "error": entry["error"],
+                    "error_type": entry["error_type"], "snapshot": snapshot, "text": row["text"] if row else "",
+                    "row_key": key}))
+            for key, row in sorted((item for item in unplanned if item[1]["scope"].get("book") == book),
+                                   key=lambda item: item[1]["scope"].get("chapter") or 0):
+                snapshot = row["snapshot"]
+                number = row["scope"].get("chapter")
+                result.append((f"live\x1f{key}", {
+                    "book": book, "chapter": number, "title": "", "state": "rendering", "reused": False,
+                    "blocks": snapshot["blocks"] if snapshot else None, "done": snapshot["done"] if snapshot else 0,
+                    "rejected": rejected.get((book, number), 0), "error": None, "error_type": None,
+                    "snapshot": snapshot, "text": row["text"], "row_key": key}))
+        return result
+
+    def visible_chapters(self):
+        """``[(key, chapter)]`` for the Chapters view: every planned chapter of the shown books.
+
+        Keys are strings, stable while the chapter list stays the same, so
+        the table updates in place. The book, chapter and state filters
+        apply; a worker or voice filter keeps chapters with matching active work.
+        """
+        with self._lock:
+            items = self._chapters()
+        flt = self.filter
+
+        def tasks(chapter):
+            return (chapter["snapshot"] or {}).get("active", [])
+        return [(key, chapter) for key, chapter in items
+                if (flt.book is None or chapter["book"] == flt.book)
+                and (flt.chapter is None or chapter["chapter"] == flt.chapter)
+                and (flt.state is None or chapter["state"] == flt.state)
+                and (flt.worker is None or any(task.get("worker") == flt.worker for task in tasks(chapter)))
+                and (flt.voice is None or any(flt.voice in (task.get("voices") or ()) for task in tasks(chapter)))]
+
+    def chapter_breakdown(self):
+        """``[(book, total, {state: count}, reused)]`` per shown book (the book filter applies, not the others).
+
+        ``reused`` counts done chapters restored from an earlier run.
+        """
+        with self._lock:
+            items = self._chapters()
+        books = {}
+        for _, chapter in items:
+            if self.filter.book is not None and chapter["book"] != self.filter.book:
+                continue
+            tally = books.setdefault(chapter["book"], {"total": 0, "counts": {}, "reused": 0})
+            tally["total"] += 1
+            tally["counts"][chapter["state"]] = tally["counts"].get(chapter["state"], 0) + 1
+            tally["reused"] += chapter["state"] == "done" and chapter["reused"]
+        return [(book, tally["total"], tally["counts"], tally["reused"]) for book, tally in books.items()]
+
+    def chapter_states(self):
+        """The chapter states present now, in breakdown order, for the state filter."""
+        with self._lock:
+            present = {chapter["state"] for _, chapter in self._chapters()}
+        return [state for state in CHAPTER_STATES if state in present]
 
     def workers(self):
         """``{worker: [(book, chapter, block, phase, elapsed)]}`` from the live rows."""

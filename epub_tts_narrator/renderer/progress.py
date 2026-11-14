@@ -289,6 +289,20 @@ class BusBoard(TerminalBoard):
         self.bus.publish("book", state, scope={"book": _book_label(key)},
                          data={"key": str(key), "state": state, "retry": retry})
 
+    def chapter_plan(self, key, chapters, *, outline=False):
+        """Every chapter this book will render: ``[{"number", "title", "blocks", "saved"}]``.
+
+        ``outline`` is a queued book's chapter list read before it is
+        prepared; the book's render replaces it with its plan.
+        """
+        self.bus.publish("chapters", scope={"book": _book_label(key)},
+                         data={"chapters": [dict(item) for item in chapters], "outline": bool(outline)})
+
+    def chapter_state(self, key, number, state, **details):
+        """One chapter's state: rendering, assembling or done (``reused`` when restored from a checkpoint)."""
+        self.bus.publish("chapter", state, scope={"book": _book_label(key), "chapter": number},
+                         data={"state": state, **details})
+
     def rejected_take(self, take, review, *, book=None):
         """One rejected take; ``review`` builds its ``TakeReview`` when a person opens it."""
         from .node_activity import current_job
@@ -409,6 +423,14 @@ class PrefixedBoardNotify:
         if getattr(self.board, "structured_status", False):
             self.board.book_state(key, state, retry=retry)
 
+    def chapter_plan(self, key, chapters, *, outline=False):
+        if getattr(self.board, "structured_status", False):
+            self.board.chapter_plan(key, chapters, outline=outline)
+
+    def chapter_state(self, key, number, state, **details):
+        if getattr(self.board, "structured_status", False):
+            self.board.chapter_state(key, number, state, **details)
+
     def rejected_take(self, take, review):
         if getattr(self.board, "structured_status", False):
             self.board.rejected_take(take, review, book=_prefix_book(self.prefix))
@@ -459,6 +481,24 @@ def report_book_state(notify, key, state, retry=None):
     """A book's lifecycle state for a run shell; plain, terminal and custom output ignore it."""
     if offers_chapter_retries(notify):
         _board_of(notify).book_state(key, state, retry=retry)
+
+
+def report_chapter_plan(notify, key, chapters, *, outline=False):
+    """A book's chapters for a run shell's Chapters view; ``chapters`` may be a callable building them.
+
+    Plain, terminal and custom output ignore it (and never build the list);
+    a callable returning None reports nothing.
+    """
+    if offers_chapter_retries(notify):
+        chapters = chapters() if callable(chapters) else chapters
+        if chapters is not None:
+            _board_of(notify).chapter_plan(key, chapters, outline=outline)
+
+
+def report_chapter_state(notify, key, number, state, **details):
+    """One chapter's state for a run shell; plain, terminal and custom output ignore it."""
+    if offers_chapter_retries(notify):
+        _board_of(notify).chapter_state(key, number, state, **details)
 
 
 def report_chapter_failure(notify, failure, retry=None, repair=None):
