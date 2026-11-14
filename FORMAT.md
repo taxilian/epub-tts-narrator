@@ -221,6 +221,26 @@ Optional fields:
 
 Unknown correction keys fail. Edited documents retain all correction payloads in `provenance.corrections`. Reapplying the same correction file to an independently changed cast fails; inspect and refresh the edits rather than bypassing the check.
 
+## Character merges
+
+A person can say two cast entries are one character (`audiobook-render merge-characters`). Each changed book appends a record to `provenance.character_merges`:
+
+```text
+version: 1
+kept_character_id, absorbed_character_id: the two character IDs
+name: the merged character's name, one of either entry's names or aliases
+kept_records: optional {character, voice}; present only in a later book that had only the absorbed entry
+kept_voice_id, absorbed_voice_id, absorbed_names
+role_map: absorbed role ID -> the kept role it merged into
+revoiced_segments: IDs of segments whose performers changed
+source_fingerprint, cast_fingerprint_before, cast_fingerprint_after
+basis: "user"
+```
+
+The analysis is exactly the previous analysis with that record applied (`character_merge.merge_document`), which publication recomputes and compares. The kept character keeps its ID, voice ID, description and voice profile; the absorbed character's names join its `aliases` (minus the merged `name`) and its evidence joins its `evidence`. A role of the absorbed character on its main voice merges into the kept character's role of the same kind and voice when there is one; its other roles move to the kept character, and voices `derived_from` the absorbed voice are derived from the kept voice. The absorbed character and voice leave the cast. Segment performers, attribution candidates, issue targets and the series `character_id_map`/`voice_id_map` values follow; a simultaneous group left with one performer becomes that performer's ordinary assignment. `voice_samples` drops the absorbed voice and binds the new cast. In a later book that had only the absorbed entry, `kept_records` adds the kept character (with no evidence of its own; it takes the absorbed entry's) and its voice as series casting reuse (casting-only traits with `series_origin`). Earlier books are not changed.
+
+The renderer adds a segment's current performer voice IDs to the chunk identity of every segment listed in any record's `revoiced_segments`, so those lines get new chunk IDs and are rendered again; all other chunk IDs are unchanged.
+
 ## Exported bundle
 
 The directory has `manifest.json`, `cast.json`, `source.json`, `review.json`, and chapter scripts named `scripts/chapter-NNNN.jsonl`. The manifest has `format: "epub-audiobook-bundle"`, `version: 2`, `book`, `chapters`, `source_fingerprint`, `readiness`, `files`, `sha256`, `offsets`, and `provenance`. Analysis documents and series registries remain version 1.

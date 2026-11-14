@@ -229,6 +229,10 @@ def make_plan(bundle, config):
     from .name_pronunciation_tags import named_pronunciation_snapshot, with_tagged_names
     named = (config["_tagged_name_snapshot"] if "_tagged_name_snapshot" in config else
              named_pronunciation_snapshot(bundle))
+    from ..character_merge import revoiced_segment_ids
+    # A character merge moved these lines to another voice: their speakers are
+    # part of their chunk identity, so they render again under new chunk IDs.
+    revoiced = revoiced_segment_ids(bundle["manifest"].get("provenance", {}))
     chapters, errors, used = [], [], set()
     established_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
     if established_series and config["voices"]["series_id"] != established_series:
@@ -258,9 +262,11 @@ def make_plan(bundle, config):
                     "source_ranges": spoken_source_ranges(row, start, end),
                     "silent_control": is_silent_control(speech),
                 }
-                chunk["chunk_id"] = digest({"source": chunk_identity_fingerprint(bundle["manifest"]),
-                                            "segment": row["id"], "start": start, "end": end,
-                                            "spoken_text": speech})[:32]
+                identity = {"source": chunk_identity_fingerprint(bundle["manifest"]),
+                            "segment": row["id"], "start": start, "end": end, "spoken_text": speech}
+                if row["id"] in revoiced:
+                    identity["speakers"] = sorted(speaker["voice_id"] for speaker in speakers)
+                chunk["chunk_id"] = digest(identity)[:32]
                 bind_chunk_performance(chunk, performance, sparse=performances is None)
                 if not chunk["silent_control"]:
                     used.update(speaker["voice_id"] for speaker in speakers)

@@ -143,6 +143,10 @@ _REVISION_SIDECARS = {
     "voice-profiles": frozenset({"audition-scripts.json"}),
     "source-edit": frozenset({"audition-scripts.json", "pronunciations.json", "scoped-pronunciations.json",
                               "performance-plan.json"}),
+    # A character merge drops the absorbed voice from every per-voice choice.
+    "character-merge": frozenset({"audition-scripts.json", "voice-aliases.json", "voice-traits.json",
+                                  "voice-accents.json", "voice-accent-assignments.json",
+                                  "voice-accent-groups.json", "voice-clips.json"}),
 }
 
 
@@ -219,8 +223,9 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
                        scope="attribution", sidecars=None, speaker_decision_inputs=None,
                        reserved_update_locks=None):
     """Publish a revision, coordinating manual decisions with profile refreshes."""
-    if scope not in {"attribution", "source-edit", "voice-profiles", "speaker-decisions"}:
-        raise ValueError("Revision scope must be attribution, source-edit, voice-profiles, or speaker-decisions")
+    if scope not in {"attribution", "source-edit", "voice-profiles", "speaker-decisions", "character-merge"}:
+        raise ValueError("Revision scope must be attribution, source-edit, voice-profiles, speaker-decisions, "
+                         "or character-merge")
     if speaker_decision_inputs is not None and scope != "speaker-decisions":
         raise ValueError("speaker_decision_inputs are accepted only for speaker-decisions revisions")
     if reserved_update_locks is not None and scope == "speaker-decisions":
@@ -259,7 +264,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
 
     This operation revises attribution and its audit/review state. Source and book
     locations stay fixed; cast and voice identities are fixed except for validated
-    manual-decision appends. Voice stores, aliases, render caches, and existing
+    manual-decision appends and recorded character merges. Voice stores, aliases, render caches, and existing
     audiobooks are never part of the write inventory.
 
     ``scope`` selects the change contract: ``"attribution"`` (default) permits
@@ -271,7 +276,11 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
     ``sidecars`` optionally maps a directory to already validated JSON records
     keyed by plain existing filenames. Voice profiles accept only their audition
     binding; source edits accept that plus pronunciations.json,
-    scoped-pronunciations.json, and performance-plan.json. Every file is backed
+    scoped-pronunciations.json, and performance-plan.json. ``"character-merge"``
+    accepts exactly the deterministic result of each revised book's new
+    ``provenance.character_merges`` record (``character_merge.merge_document``)
+    and its per-voice renderer sidecars (aliases, traits, accents, clip counts,
+    audition scripts). Every file is backed
     up, replaced, and rolled back atomically with the revision.
     ``reserved_update_locks`` optionally maps exactly the update chain's
     directories to locks already owned through ``reserve_revision_scope``;
@@ -334,6 +343,10 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                     raise ValueError("Source-only updates must preserve book identity, cast, and series context")
             elif candidate != document:
                 raise ValueError("Source-only updates may change only the selected book")
+        elif scope == "character-merge":
+            if path in revisions:
+                from .character_merge import validate_character_merge
+                validate_character_merge(document, candidate)
         elif scope == "voice-profiles":
             differences = profile_revision_differences(document, candidate)
             if differences:
@@ -386,7 +399,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             # A resolved parent attribution may have been copied into descendants
             # as a review issue. Refresh only such inherited review records.
             history = dict(registry, books=registry["books"][:-1])
-            if scope in {"attribution", "speaker-decisions"}:
+            if scope in {"attribution", "speaker-decisions", "character-merge"}:
                 _refresh_import_reviews(document, history, document["provenance"]["series"])
             document["readiness"] = readiness(document)
             snapshot = _snapshot(document)

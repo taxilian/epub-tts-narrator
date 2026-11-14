@@ -313,6 +313,8 @@ Author afterwords and explicit “From the Author” sections have a separate au
 
 Manual sharing is book-specific: `audiobook-render voice-aliases BOOK --set SOURCE_VOICE_ID TARGET_VOICE_ID` writes `voice-aliases.json`, and later books inherit the nearest mapping. `--remove SOURCE_VOICE_ID` removes a local override. Global configuration must not contain `voices.aliases`.
 
+When the analysis made two cast entries for one person, `audiobook-render merge-characters BOOK CHARACTER OTHER` (or `just merge-characters`, or `j` in `cast`) says they are the same character instead of only sharing a recording: the absorbed entry's lines, names and evidence go to the kept entry, and it leaves the cast in that book and every later book that carries it, while earlier books keep the two apart. It shows the change and asks before saving, and publishes through the same receipt-bound revision as speaker decisions; see [RENDERER.md](RENDERER.md#merging-two-cast-entries-into-one-character).
+
 The input directory must contain the `series-cast.json` produced by directory analysis. Directory mode rejects `--series` and `analysis.series_registry`; prior context is selected explicitly with `--continue-from`. Identity consensus requires current-source evidence and three approvals for continuity. Names and aliases find candidates but do not establish identity. Without consensus, matching remains restricted to the sole prior character sharing an exact normalized name or alias, with ambiguous matches reviewable.
 
 ### Legacy JSON workflow

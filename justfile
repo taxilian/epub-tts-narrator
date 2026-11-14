@@ -49,6 +49,10 @@ pronounce-name *args:
 accents *args:
     @"{{ python }}" -m epub_tts_narrator.renderer accents "$@"
 
+# BOOK CHARACTER OTHER [--keep CHARACTER] [--name NAME] [--dry-run] [--yes]: say two cast entries are one character.
+merge-characters *args:
+    @"{{ python }}" -m epub_tts_narrator.renderer merge-characters "$@"
+
 # BOOK --from OTHER_BOOK: reuse OTHER_BOOK's chosen voices for the same characters.
 import-voices *args:
     @"{{ python }}" -m epub_tts_narrator.renderer import-voices "$@"

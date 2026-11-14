@@ -155,6 +155,8 @@ class CastApp(CapturePrintMixin, App):
                 tooltip="Edit the accent cue said before every line in this voice (empty means none)"),
         Binding("d", "share", "Share", tooltip="Use another voice's recording for this voice"),
         Binding("D", "stop_sharing", "Unshare", show=False, tooltip="Stop sharing (this book's own link only)"),
+        Binding("j", "merge", "Same as", show=False,
+                tooltip="This character is the same character as another: merge the two cast entries into one"),
         Binding("c", "clips", "Clips", tooltip="Reference clip count for the next generation"),
         Binding("i", "instruct", "Instruct",
                 tooltip="Type how descriptions should change; the model revises them for you to review"),
@@ -238,6 +240,9 @@ class CastApp(CapturePrintMixin, App):
         self.call_from_thread(self.render_all)
 
     def _tick(self):
+        if self.controller.reopen and self.controller.jobs.running() is None:
+            self.exit()
+            return
         if self.controller.playing is not None and not self.controller.poll_playback():
             self.render_all()
         elif self.controller.jobs.running() is not None:
@@ -480,6 +485,42 @@ class CastApp(CapturePrintMixin, App):
                               "No new sample is generated; D undoes this.",
                               lambda: self._attempt(lambda: self.controller.share(row, target)))
         self.push_screen(ChoiceScreen(f"Which voice should {label(row)} use?", options), chosen)
+
+    def action_merge(self):
+        row = self._require_row()
+        if row is None:
+            return
+        options = self._attempt(lambda: self.controller.merge_options(row))
+        if options is None:
+            return
+        if not options:
+            self.notify("No other character to merge with", severity="warning")
+            return
+
+        def chosen(other_id):
+            if other_id is None:
+                return
+            other = self.controller.row(other_id)
+            plan = self._attempt(lambda: self.controller.merge_plan(row, other))
+            if plan is None:
+                return
+            kept = self.controller.row(plan.kept["voice_id"])
+            absorbed = self.controller.row(plan.absorbed["voice_id"])
+            survivors = [(kept["voice_id"], f"Keep {label(kept)} (because {plan.reason})"),
+                         (absorbed["voice_id"], f"Keep {label(absorbed)}")]
+
+            def kept_one(voice_id):
+                if voice_id is None:
+                    return
+                final = (plan if voice_id == kept["voice_id"] else
+                         self._attempt(lambda: self.controller.merge_plan(row, other, keep=absorbed)))
+                if final is not None:
+                    self._confirm(final.text + "\n\nSave this merge?",
+                                  lambda: self._attempt(lambda: self.controller.merge(final)),
+                                  title="Merge characters?")
+            self.push_screen(ChoiceScreen("Which entry is kept, with its voice, description and accent?",
+                                          survivors, filterable=False), kept_one)
+        self.push_screen(ChoiceScreen(f"Which character is the same character as {label(row)}?", options), chosen)
 
     def action_stop_sharing(self):
         row = self._require_row()

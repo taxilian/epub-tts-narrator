@@ -569,6 +569,12 @@ def casting_command(args, bundle, config):
             controller = CastController(session, player, config_path=getattr(args, "config", None))
             book = bundle.get("source", {}).get("book", {})
             run_cast_tui(controller, title=book.get("title") or Path(bundle["directory"]).name)
+            if controller.reopen:
+                # Two characters were merged: open the cast again on the saved book.
+                player.stop()
+                session.close()
+                from .bundle import load_bundle
+                return casting_command(args, load_bundle(bundle["directory"]), config)
         elif action == "interactive":
             run_casting(session, player)
         elif action == "list":

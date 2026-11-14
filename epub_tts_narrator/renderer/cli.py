@@ -205,6 +205,24 @@ def parser():
                                  help="Saved attempt JSON to recheck without resynthesis (--action recover)")
             command.add_argument("--keep-unselected", action="store_true",
                                  help="Save a recovered take without changing the active voice (--action recover)")
+    merge = commands.add_parser(
+        "merge-characters", description=(
+            "Say two cast entries are the same character: every line of the absorbed entry becomes the kept "
+            "entry's line, its names become aliases, and it leaves the cast (also in later books of the series). "
+            "Unlike sharing a voice (cast d, voice-aliases), this changes the book's identities. Shows the change "
+            "and asks before saving."))
+    merge.add_argument("bundle", type=Path)
+    merge.add_argument("first", metavar="CHARACTER", help="A name, alias, character ID or voice ID")
+    merge.add_argument("second", metavar="OTHER", help="The other character, named the same ways")
+    merge.add_argument("--keep", metavar="CHARACTER",
+                       help="Which of the two survives, with its voice, description and accent (default: the one "
+                            "with an accepted voice, else the one with more lines)")
+    merge.add_argument("--name", help="The merged character's name: one of the two entries' names or aliases "
+                                      "(default: the kept entry's name)")
+    merge.add_argument("--yes", action="store_true", help="Merge without asking")
+    merge.add_argument("--dry-run", action="store_true", help="Show the change; save nothing")
+    merge.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
+    merge.set_defaults(work_dir=None, output=None, epub=None)
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     serve = commands.add_parser("serve", help="Serve local Drama 3 through a Fish-compatible /v1/tts endpoint")
@@ -402,7 +420,9 @@ def main(argv=None, *, in_shell=False):
         if args.command == "serve":
             from epub_tts_narrator.config import resolve_config_path
             config_path = resolve_config_path(config_path).resolve()
-        if args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations", "pronounce", "pronounce-name",
+        if args.command == "merge-characters":
+            config = load_config(config_path, require_verifier=False, require_engine=False)
+        elif args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations", "pronounce", "pronounce-name",
                             "history-echoes", "take-feedback", "accents"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"serve", "cache-report", "prune"}:
@@ -473,6 +493,9 @@ def main(argv=None, *, in_shell=False):
                   + (f"; {counts['audio_changed']} take(s) changed since they were judged" if counts["audio_changed"] else "")
                   + ".")
             return 0
+        if args.command == "merge-characters":
+            from .character_merge_command import run_merge_command
+            return run_merge_command(bundle, config, args)
         if args.command == "accents":
             from .accent_assignment import run_accents_command
             return run_accents_command(bundle, config, args, config_path)

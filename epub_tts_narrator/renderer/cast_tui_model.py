@@ -223,6 +223,7 @@ class CastController:
         self._rows = []
         self.playing = None
         self.compare = None  # (voice_id, candidate_id) marked for A/B
+        self.reopen = False  # a character merge changed the cast: the screen reopens on the saved book
         session.notify = lambda message: self.log(str(message))
 
     # Reading -----------------------------------------------------------------
@@ -418,6 +419,44 @@ class CastController:
         voice_id = row["voice_id"]
         return self._submit(f"Stop sharing for {label(row)}",
                             lambda: self.session.stop_sharing(voice_id), row)
+
+    # Merging two characters ---------------------------------------------------
+
+    def character(self, row):
+        """The cast character whose own voice this row is; merging needs one."""
+        found = next((character for character in self.session.bundle["cast"]["characters"]
+                      if character["voice_id"] == row["voice_id"]), None)
+        if found is None:
+            raise ValueError(f"{label(row)} is not a character's own voice (narration or a changed-voice state), "
+                             "so it cannot be merged")
+        return found
+
+    def merge_options(self, row):
+        """``[(voice_id, label)]``: the other characters this one could be the same person as."""
+        self.character(row)
+        voices = {character["voice_id"] for character in self.session.bundle["cast"]["characters"]}
+        return [(other["voice_id"], f"{label(other)}  ({other['voice_id']})") for other in self._rows
+                if other["voice_id"] != row["voice_id"] and other["voice_id"] in voices]
+
+    def merge_plan(self, row, other, keep=None):
+        """The planned merge of two rows' characters (``keep``: a row, else the default survivor)."""
+        from .character_merge_command import plan_merge
+        return plan_merge(self.session.bundle, self.session.config, self.character(row)["id"],
+                          self.character(other)["id"], keep=None if keep is None else self.character(keep)["id"],
+                          store=self.session.store)
+
+    def merge(self, plan):
+        """Publish a planned merge; the screen reopens on the merged cast once it is saved."""
+        if any(job.active for job in self.jobs.jobs()):
+            raise ValueError("Wait for the running and queued jobs to finish before merging characters")
+
+        def run():
+            from .character_merge_command import apply_merge
+            apply_merge(plan, progress=self.log)
+            self.reopen = True
+            self.log(f"Merged {plan.absorbed['name']} into {plan.name}; reopening the cast")
+        return self.jobs.submit(f"Merge {plan.absorbed['name']} into {plan.name}", run,
+                                scope={"voice": [plan.kept["voice_id"], plan.absorbed["voice_id"]]})
 
     def set_clips(self, row, count):
         voice_id = row["voice_id"]
