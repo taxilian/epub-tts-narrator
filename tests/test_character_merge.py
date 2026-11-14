@@ -448,31 +448,59 @@ class CastMergeActionTests(unittest.TestCase):
                                              kept={"voice_id": "v1"}))
 
 
+def highlighted(table):
+    from epub_tts_narrator.tui_widgets import highlighted_key
+    return highlighted_key(table)
+
+
+class CastColumnFitTests(unittest.TestCase):
+    def test_columns_take_what_they_need_when_it_fits_and_share_the_room_when_it_does_not(self):
+        from epub_tts_narrator.renderer.cast_tui import MIN_COLUMN, fit_columns
+        self.assertEqual(fit_columns(120, ["Ann", "Belgarath"], ["accepted"], ["", "uses v-ann"]), (9, 10))
+        voice, note = fit_columns(60, ["x" * 80], ["accepted"], ["y" * 50])
+        self.assertEqual(voice + note, 60 - 8 - len("accepted"))
+        self.assertGreater(voice, note, "the name keeps most of the room")
+        self.assertEqual(fit_columns(60, ["x" * 80], ["accepted"], [""]), (40, 4),
+                         "an empty note column leaves the name the rest")
+        self.assertEqual(fit_columns(10, ["x" * 80], ["needs regeneration"], ["y" * 50]), (MIN_COLUMN, MIN_COLUMN))
+
+
 class CastScreenMergeTests(unittest.IsolatedAsyncioTestCase):
-    async def test_a_long_changed_voice_name_is_cut_in_the_table_and_shown_whole_in_the_detail(self):
+    async def test_cast_table_columns_fit_the_screen_width_and_refit_when_it_changes(self):
         import asyncio
         from cast_tui_fixtures import FakePlayer, FakeSession, voice_row
-        from epub_tts_narrator.renderer.cast_tui import VOICE_COLUMN, CastApp
+        from epub_tts_narrator.renderer.cast_tui import CastApp
         from epub_tts_narrator.renderer.cast_tui_model import CastController
         from textual.widgets import DataTable
         asyncio.get_running_loop().slow_callback_duration = 10
         long_name = "Belgarath (condition: Weakened, rushed, unfocused from exhaustion, barely awake)"
-        session = FakeSession([voice_row("v-bel", "Belgarath"),
+        session = FakeSession([voice_row("v-bel", "Belgarath"), voice_row("v-ann", "Ann"),
                                voice_row("v-bel-tired", long_name,
                                          derived={"voice_id": "v-bel", "kind": "condition", "instruction": "x"})])
         controller = CastController(session, FakePlayer(), describe_error=str)
         self.addCleanup(controller.close)
         app = CastApp(controller, title="Fixture Book", startup=False)
-        async with app.run_test(size=(160, 45)) as pilot:
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
             await pilot.pause()
             table = app.query_one("#voices", DataTable)
-            shown = str(table.get_row("v-bel-tired")[0])
-            self.assertEqual(len(shown), VOICE_COLUMN)
-            self.assertTrue(shown.endswith("…"))
             table.focus()
-            table.move_cursor(row=1)
+            table.move_cursor(row=2)
             await pilot.pause()
+            shown = str(table.get_row("v-bel-tired")[0])
+            self.assertTrue(shown.endswith("…") and long_name.startswith(shown[:-1]))
+            self.assertLessEqual(sum(column.get_render_width(table) for column in table.ordered_columns),
+                                 table.size.width, "the columns fit inside the table")
             self.assertIn(long_name, str(app.query_one("#detail").render()))
+            await pilot.resize_terminal(300, 40)
+            await pilot.pause(0.7)
+            self.assertEqual(str(table.get_row("v-bel-tired")[0]), long_name, "a wide screen shows the name whole")
+            self.assertEqual(highlighted(table), "v-bel-tired", "refitting keeps the highlighted row")
+            await pilot.resize_terminal(100, 40)
+            await pilot.pause(0.7)
+            self.assertTrue(str(table.get_row("v-bel-tired")[0]).endswith("…"))
+            self.assertLessEqual(sum(column.get_render_width(table) for column in table.ordered_columns),
+                                 table.size.width)
 
     async def test_j_picks_the_same_character_and_its_survivor_confirms_and_reopens_the_cast(self):
         plans, apply = await self.merge_in_cast_screen(fixed="")

@@ -115,7 +115,31 @@ def _described(error):
         f"{type(error).__name__}: {text}" if text else type(error).__name__)
 
 
-VOICE_COLUMN = 44  # characters of a voice's name shown in the cast table
+MIN_COLUMN = 8  # a cut column never gets narrower than this
+_CELL_GAPS = 2 * 3 + 2  # one cell of padding each side of the three columns, plus the scrollbar
+
+
+def fit_columns(width, names, statuses, notes):
+    """``(voice, note)`` column widths that share a voice table ``width`` cells wide.
+
+    The status is shown whole. When every name and note fits, each column is
+    as wide as its longest value. Otherwise the name, which is how a person
+    finds a row, keeps up to two thirds of the room, and the note takes the
+    rest; both are cut with "…" (the detail pane shows them whole).
+    """
+    status = max([len("Status"), *map(len, statuses)])
+    room = max(width - _CELL_GAPS - status, 2 * MIN_COLUMN)
+    voice = max([len("Voice"), *map(len, names)])
+    note = max([len("Note"), *map(len, notes)])
+    if voice + note <= room:
+        return voice, note
+    note_share = min(note, max(MIN_COLUMN, room // 3))
+    voice = max(min(voice, room - note_share), MIN_COLUMN)
+    return voice, max(room - voice, min(note_share, MIN_COLUMN))
+
+
+def _cut(text, width):
+    return text if len(text) <= width else text[:width - 1].rstrip() + "…"
 
 
 class CastApp(CapturePrintMixin, App):
@@ -179,6 +203,8 @@ class CastApp(CapturePrintMixin, App):
         self.run_startup = startup
         self._ui_thread = None
         self._started = time.monotonic()
+        self._voice_widths = None
+        self._fitted_width = None
         controller._on_change = self._changed
 
     # Layout --------------------------------------------------------------------
@@ -203,7 +229,6 @@ class CastApp(CapturePrintMixin, App):
         self.capture_prints()
         self.title = f"Cast — {self.book_title}"
         voices = self.query_one("#voices", DataTable)
-        voices.add_columns("Voice", "Status", "Note")
         self.query_one("#takes", DataTable).add_columns("", "Take", "Created", "Designer", "Clips", "Verified")
         self.query_one("#log", MessageLog).border_title = "Log"
         self.query_one("#jobs", JobsTable).border_title = "Jobs"
@@ -243,6 +268,9 @@ class CastApp(CapturePrintMixin, App):
         self.call_from_thread(self.render_all)
 
     def _tick(self):
+        if self.query_one("#voices", DataTable).size.width != self._fitted_width:
+            # The screen was resized: fit the voice table's columns to its new width.
+            self.render_all()
         if self.controller.reopen and self.controller.jobs.running() is None:
             self.exit()
             return
@@ -267,14 +295,37 @@ class CastApp(CapturePrintMixin, App):
         if controller.playing is not None:
             summary += " · playing (space stops)"
         self.sub_title = summary
-        rows = []
-        for row, status, note in controller.visible():
-            # A long label (a changed-voice state) is cut here so the table stays usable; the detail shows it whole.
-            name = label(row)
-            name = name if len(name) <= VOICE_COLUMN else name[:VOICE_COLUMN - 1].rstrip() + "…"
-            rows.append((row["voice_id"], (name, Text(status, style=STATUS_STYLES.get(status, "")),
-                                            note.splitlines()[0][:80] if note else "")))
-        sync_table(self.query_one("#voices", DataTable), rows)
+        visible = [(row, label(row), status, note.splitlines()[0] if note else "")
+                   for row, status, note in controller.visible()]
+        table = self.query_one("#voices", DataTable)
+        # Long names (a changed-voice state) and notes are cut to the table's own width, so it stays
+        # usable on any screen; the columns are fitted again when that width changes.
+        self._fitted_width = table.size.width
+        width = table.size.width or max(40, self.size.width * 46 // 100)
+        # Room for "generating" too, so a job starting never refits the table.
+        statuses = [status for _, _, status, _ in visible] + ["generating"]
+        widths = fit_columns(width, [name for _, name, _, _ in visible], statuses,
+                             [note for _, _, _, note in visible])
+        fitted = (*widths, max(map(len, statuses)))
+        highlighted = line = None
+        if fitted != self._voice_widths:
+            # Refitting rebuilds the columns; keep the highlighted row on the same line of the screen.
+            highlighted = highlighted_key(table)
+            if highlighted is not None:
+                line = table.cursor_row - round(table.scroll_y)
+            table.clear(columns=True)
+            table.add_column("Voice", width=widths[0], key="voice")
+            table.add_column("Status", key="status")
+            table.add_column("Note", width=widths[1], key="note")
+            self._voice_widths = fitted
+        rows = [(row["voice_id"], (_cut(name, widths[0]), Text(status, style=STATUS_STYLES.get(status, "")),
+                                   _cut(note, widths[1])))
+                for row, name, status, note in visible]
+        keys = sync_table(table, rows)
+        if highlighted in keys:
+            index = keys.index(highlighted)
+            table.move_cursor(row=index, scroll=False)
+            table.call_after_refresh(table.scroll_to, y=max(0, index - line), animate=False)
         self.render_detail()
         self.query_one("#log", MessageLog).sync(controller.messages, started=self._started)
         self.query_one("#jobs", JobsTable).show(controller.jobs.jobs())
