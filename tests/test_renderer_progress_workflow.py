@@ -283,6 +283,41 @@ class RenderProgressWorkflowTests(unittest.TestCase):
         self.assertIn("  Using take 2, which you marked good.", self.messages)
         self.assertEqual([row["accepted"] for row in review.takes()], [False, True])
 
+    def test_a_used_take_marked_bad_is_rendered_again_and_never_used_again(self):
+        from epub_tts_narrator.renderer.take_review import TakeReview
+        text, request, clips, directory, request_hash = self.passage()
+        generate = lambda path, seed: self.engine._write(text, path, seed)
+        wav, first = verified_take(text, generate, directory, request, self.verifier, self.config,
+                                   notify=self.messages.append)
+        self.assertEqual(first["attempt"], 1)
+        # It passed verification, but a person listening heard it wrong.
+        review = TakeReview(clips.parent, {}, None, request_hash)
+        self.assertTrue(review.mark(1, "bad")["retired"])
+
+        made = []
+        wav, again = verified_take(text, lambda path, seed: made.append(seed) or generate(path, seed),
+                                   directory, request, self.verifier, self.config, notify=self.messages.append)
+        self.assertEqual(len(made), 1)
+        self.assertEqual(again["attempt"], 2)
+        self.assertNotEqual(again["audio_sha256"], first["audio_sha256"])
+        # The new take is used from now on; the bad one stays on disk, unused.
+        wav, reused = verified_take(text, lambda *_: self.fail("made another take"), directory, request,
+                                    self.verifier, self.config, notify=self.messages.append)
+        self.assertEqual(reused["attempt"], 2)
+        self.assertTrue((directory / "attempt-001.json").exists())
+
+    def test_a_mark_saved_before_the_render_retires_the_used_take_when_it_reaches_the_passage(self):
+        from epub_tts_narrator.renderer.take_feedback import record_verdict
+        from epub_tts_narrator.renderer.take_selection import list_takes
+        text, request, clips, directory, request_hash = self.passage()
+        generate = lambda path, seed: self.engine._write(text, path, seed)
+        verified_take(text, generate, directory, request, self.verifier, self.config, notify=self.messages.append)
+        record_verdict(clips.parent, request_hash, list_takes(clips, request_hash)[0], "bad")
+        wav, again = verified_take(text, generate, directory, request, self.verifier, self.config,
+                                   notify=self.messages.append)
+        self.assertEqual(again["attempt"], 2)
+        self.assertIn("  You marked the take used for this passage bad; rendering it again.", self.messages)
+
     def test_interrupted_paragraph_counts_only_verified_work_and_resumes_exact_audio(self):
         bundle = self.bundle(read_json(EXAMPLE / "reviewed.json"))
         # Both targets have one role/voice so they still exercise grouped

@@ -687,7 +687,18 @@ class RunApp(CapturePrintMixin, App):
             if choice is not None:
                 self.run_worker(lambda: self._use_take(scope, review, choice, failure), thread=True,
                                 group="use-take")
-        self.push_screen(TakesScreen(title, review, self._player, highlight=highlight), chosen)
+        self.push_screen(TakesScreen(title, review, self._player, highlight=highlight,
+                                     on_retired=lambda attempt: self._render_again(scope, attempt)), chosen)
+
+    def _render_again(self, scope, attempt):
+        """The used take was marked bad and retired: rebuild its chapter so the passage gets a new take."""
+        chapter = scope.get("chapter")
+        self.bus.log(f"Take {attempt} of a passage in chapter {chapter} was marked bad and is no longer used",
+                     scope=dict(scope), severity="warning")
+        when = self.model.request_rebuild(scope.get("book"), chapter)
+        return {"now": f"Chapter {chapter} renders this passage again, first in line.",
+                "after": f"Chapter {chapter} renders this passage again as soon as it finishes rendering."}.get(
+            when, f"R (or the next render) renders this passage of chapter {chapter} again.")
 
     def _use_take(self, scope, review, choice, failure=None):
         chapter = scope.get("chapter")

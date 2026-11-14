@@ -10,7 +10,11 @@ passage and
   and every later render use it;
 * **mark** takes as acceptable (verification rejected a good take) or bad
   (it should not be used), saved in ``take_feedback`` for later study of the
-  detector, never changing which take is used;
+  detector. A take marked bad is never used again: when it is the take used,
+  its acceptance is retired (renamed, never deleted, see
+  ``retire_judged_bad``), so the passage renders again on the chapter's
+  rebuild or the next render, and no recheck, resume or best-effort choice
+  picks that take again;
 * optionally **teach the recognizer**: when a take judged good failed only
   because words were heard differently (``text_mismatch`` with nothing else
   wrong) and every difference is an eligible word block, those blocks become
@@ -140,12 +144,18 @@ class TakeReview:
         return {"attempt": attempt, "basis": result.get("basis"), "learned": learned}
 
     def mark(self, attempt, verdict, *, learn=False):
-        """Judge one take ``good`` or ``bad`` (``None`` clears); never changes which take is used."""
+        """Judge one take ``good`` or ``bad`` (``None`` clears).
+
+        Marking the used take bad retires its acceptance (``retired`` is then
+        true): the passage has no take until its chapter renders it again.
+        Any other mark leaves the used take alone.
+        """
         from .take_feedback import record_verdict
         row = self._row(attempt)
         record_verdict(self.work, self.request_hash, row, verdict)
         learned = self._learn(row) if learn and verdict == "good" else []
-        return {"attempt": attempt, "verdict": verdict, "learned": learned}
+        retired = bool(retire_judged_bad(self.clips / self.request_hash)) if verdict == "bad" else False
+        return {"attempt": attempt, "verdict": verdict, "learned": learned, "retired": retired}
 
 
 GOOD_NOTE = "A take a person marked good while listening in the run shell"
@@ -185,6 +195,67 @@ def use_judged_good(directory, request_hash):
         if record is not None:
             return record
     return None
+
+
+# A retired acceptance's files: the record, and any best-effort choice or
+# repair that would otherwise publish the same take again.
+RETIRED_FILES = ("accepted.json", "exhaustion-selection.json", "clip-repair.json", "clip-repair-parts")
+
+
+def retire_judged_bad(directory):
+    """Retire this passage's acceptance when a person marked its take bad; the retired names, or ``[]``.
+
+    Files are renamed under an evidence-bound ``judged-bad`` suffix beside a
+    ``judged-bad-*.json`` record, never deleted. With no acceptance the
+    chapter checkpoint, the speech cache and every later render find no take,
+    so the passage renders again.
+    """
+    from datetime import datetime, timezone
+    from .common import digest, read_json, write_json
+    from .take_feedback import judged_bad_audio
+    directory = Path(directory)
+    path = directory / "accepted.json"
+    if path.is_symlink() or not path.is_file():
+        return []
+    bad = judged_bad_audio(directory)
+    record = read_json(path) if bad else None
+    if not isinstance(record, dict) or record.get("audio_sha256") not in bad:
+        return []
+    evidence = {"reason": "judged_bad", "attempt": record.get("attempt"),
+                "audio_sha256": record["audio_sha256"],
+                "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    suffix = digest(evidence)[:12]
+    moved = []
+    for name in RETIRED_FILES:
+        source = directory / name
+        if not source.exists() and not source.is_symlink():
+            continue
+        stem, dot, extension = name.partition(".")
+        target = directory / (f"{stem}.judged-bad-{suffix}{dot}{extension}" if dot else f"{stem}.judged-bad-{suffix}")
+        if target.exists() or target.is_symlink():
+            raise ValueError(f"A retired judged-bad record already exists: {target.name}")
+        source.rename(target)
+        moved.append(target.name)
+    write_json(directory / f"judged-bad-{suffix}.json", {"version": 1, "evidence": evidence, "retired": moved})
+    return moved
+
+
+def retire_all_judged_bad(work):
+    """Retire every acceptance in this render work whose take a person marked bad; their request hashes."""
+    from .take_feedback import load
+    clips = Path(work) / "clips"
+    retired = []
+    import re
+    hashes = sorted({entry.get("request_hash") for entry in load(work)["takes"].values()
+                     if entry.get("verdict") == "bad" and isinstance(entry.get("request_hash"), str)
+                     and re.fullmatch(r"[0-9a-f]{64}", entry["request_hash"])})
+    for request_hash in hashes:
+        directory = clips / request_hash
+        if directory.parent.is_symlink() or directory.is_symlink() or not directory.is_dir():
+            continue
+        if retire_judged_bad(directory):
+            retired.append(request_hash)
+    return retired
 
 
 # The name the failed-passage repair first had.

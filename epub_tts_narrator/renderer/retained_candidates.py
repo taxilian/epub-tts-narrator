@@ -28,8 +28,12 @@ def recheck_retained_candidates(session, verifier, config, *, notify):
             or _accept_pairs(text, latest.get("transcript", "")) is not None):
         return None
     checked = 0
+    from .take_feedback import judged_bad_audio
+    judged_bad = judged_bad_audio(directory)
     for number in sorted(records)[-30:-1][::-1]:
         saved = records[number]
+        if saved.get("audio_sha256") in judged_bad:
+            continue  # A person listened and marked it bad.
         report = saved.get("report", {})
         if (report.get("reasons") != ["text_mismatch"]
                 or _accept_pairs(text, report.get("transcript", "")) is None):

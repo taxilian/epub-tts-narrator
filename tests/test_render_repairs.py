@@ -107,6 +107,61 @@ class FailedTakeRepairTests(unittest.TestCase):
         review.mark(1, "bad")
         self.assertEqual(review.feedback(), {(self.fixture.request_hash, 1): "bad"})
 
+    def test_marking_the_used_take_bad_retires_it_so_the_passage_renders_again(self):
+        from epub_tts_narrator.renderer.take_review import retire_all_judged_bad
+        self.failed_take(1, "quote smiled at the fire tonight.")
+        passed = self.fixture.attempt(self.directory, 2, passed=True)
+        self.fixture.accept(self.directory, passed)
+        review = self.repair()
+        # A bad mark on a take that is not used leaves the used one alone.
+        self.assertFalse(review.mark(1, "bad")["retired"])
+        self.assertTrue((self.directory / "accepted.json").exists())
+        self.assertTrue(review.mark(2, "bad")["retired"])
+        self.assertFalse((self.directory / "accepted.json").exists())
+        retired = sorted(path.name for path in self.directory.glob("*judged-bad*"))
+        self.assertEqual(len(retired), 2)  # The renamed record and its evidence: nothing is deleted.
+        evidence = read_json(next(self.directory.glob("judged-bad-*.json")))
+        self.assertEqual((evidence["evidence"]["attempt"], evidence["evidence"]["audio_sha256"]),
+                         (2, passed["audio_sha256"]))
+        self.assertEqual(evidence["retired"], [name for name in retired if name.startswith("accepted.")])
+        self.assertEqual(read_json(self.directory / evidence["retired"][0]), passed)
+        self.assertEqual([row["accepted"] for row in review.takes()], [False, False])
+        self.assertEqual(retire_all_judged_bad(self.work), [])  # Nothing left to retire.
+
+    def test_a_render_retires_every_used_take_marked_bad_before_reusing_anything(self):
+        from epub_tts_narrator.renderer.take_feedback import record_verdict
+        from epub_tts_narrator.renderer.take_review import retire_all_judged_bad
+        from epub_tts_narrator.renderer.take_selection import list_takes
+        passed = self.fixture.attempt(self.directory, 1, passed=True)
+        self.fixture.accept(self.directory, passed)
+        # A mark saved before marks retired anything (or by another tool) is honoured by the render.
+        row = list_takes(self.clips, self.fixture.request_hash)[0]
+        record_verdict(self.work, self.fixture.request_hash, row, "bad")
+        self.assertTrue((self.directory / "accepted.json").exists())
+        self.assertEqual(retire_all_judged_bad(self.work), [self.fixture.request_hash])
+        self.assertFalse((self.directory / "accepted.json").exists())
+
+    def test_a_take_marked_bad_is_never_a_best_effort_choice(self):
+        from epub_tts_narrator.renderer.exhaustion_selection import select_retained
+        from test_renderer_recovery_boundaries import FormatClient, valid_choice
+        self.failed_take(1, "quote smiled at the fire tonight.")
+        self.failed_take(2, "Kvothe smiled at the fire.")
+        self.repair().mark(1, "bad")
+        client = FormatClient([valid_choice])
+        _, record = select_retained(self.directory, self.fixture.request, client)
+        self.assertEqual([row["attempt"] for row in client.calls[0]["candidates"]], [2])
+        self.assertEqual(record["attempt"], 2)
+        (self.directory / "accepted.json").unlink()
+        self.repair().mark(2, "bad")
+        with self.assertRaisesRegex(ValueError, "marked bad by a person listening"):
+            select_retained(self.directory, self.fixture.request, FormatClient([valid_choice]))
+        # With a new take, the saved choice that offered take 2 is retired (not deleted) and asked again.
+        self.failed_take(3, "Kvothe smiled at the fire tonight, Sal.")
+        client = FormatClient([valid_choice])
+        _, record = select_retained(self.directory, self.fixture.request, client)
+        self.assertEqual(([row["attempt"] for row in client.calls[0]["candidates"]], record["attempt"]), ([3], 3))
+        self.assertEqual(len(list(self.directory.glob("exhaustion-selection.history-echo-*.json"))), 1)
+
     def test_a_used_take_that_is_not_one_of_the_attempts_is_still_shown(self):
         self.failed_take(1, "quote smiled at the fire tonight.")
         copied = self.fixture.attempt(self.directory, 2, passed=True)
@@ -394,9 +449,12 @@ class FakeRepair:
     def __init__(self):
         self.accepted, self.marks = [], []
 
+    used = None  # The attempt standing for the take used: a bad mark on it retires it.
+
     def mark(self, attempt, verdict, *, learn=False):
         self.marks.append((attempt, verdict, learn))
-        return {"attempt": attempt, "verdict": verdict, "learned": []}
+        return {"attempt": attempt, "verdict": verdict, "learned": [],
+                "retired": verdict == "bad" and attempt == self.used}
 
     def rejected_attempts(self):
         return [1, 2]
@@ -542,6 +600,44 @@ class RepairScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(review.marks[1], (2, "bad", False))
             release.set()
             await self.wait_for(pilot, lambda: not app.is_running)
+
+    async def test_marking_the_used_take_bad_renders_its_passage_again(self):
+        from epub_tts_narrator.renderer.progress import live_board, report_book_state, report_rebuild_handler
+        from epub_tts_narrator.run_shell_screens import TakesScreen
+        review, rebuilt, release = FakeRepair(), [], __import__("threading").Event()
+        review.used = 1
+
+        def command():
+            with live_board(print) as notify:
+                report_book_state(notify, "/books/fixture-book", "rendering")
+                report_rebuild_handler(notify, lambda number: rebuilt.append(number) or True)
+                notify.__self__.rejected_take({"request_hash": review.request_hash, "attempt": 1,
+                                               "reasons": ["text_mismatch"], "detail": ""}, review)
+                release.wait(10)
+            return 0
+
+        app = self.make_app(command)
+        app._player = FakePlayer()
+        async with app.run_test(size=(160, 45)) as pilot:
+            await self.wait_for(pilot, lambda: bool(self.model.rejections))
+            self.model.rejections[0]["scope"].update(chapter=38, block=82)
+            await pilot.press("6")
+            await pilot.pause()
+            app.query_one("#rejected").focus()
+            await pilot.press("enter")
+            await self.wait_for(pilot, lambda: isinstance(app.screen, TakesScreen))
+            await pilot.press("b")
+            await self.wait_for(pilot, lambda: rebuilt == [38])
+            await self.wait_for(pilot, lambda: "renders this passage again" in str(
+                app.screen.query_one("#takes-error").render()))
+            self.assertIn("no longer used", str(app.screen.query_one("#takes-error").render()))
+            # A bad mark on a take that is not used rebuilds nothing.
+            await pilot.press("down", "b")
+            await self.wait_for(pilot, lambda: len(review.marks) == 2)
+            await pilot.pause()
+            self.assertEqual(rebuilt, [38])
+            release.set()
+            await self.wait_for(pilot, lambda: self.model.state == "finished")
 
     async def test_a_finished_render_with_unjudged_rejected_takes_stays_open_on_them(self):
         from epub_tts_narrator.renderer.progress import live_board, report_book_state

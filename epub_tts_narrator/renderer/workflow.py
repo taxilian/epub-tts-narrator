@@ -462,6 +462,19 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
     accepted = None
     missing_accepted_attempt = None
     demoted_attempt = None
+    judged_bad = frozenset()
+    if purpose == "speech":
+        # A take a person listened to and marked bad is never used again: a
+        # used one is retired (renamed) and no recheck, resume or choice
+        # brings it back, so the passage renders again.
+        from .take_feedback import judged_bad_audio
+        from .take_review import retire_judged_bad
+        try:
+            judged_bad = judged_bad_audio(directory)
+            if judged_bad and retire_judged_bad(directory):
+                notify("  You marked the take used for this passage bad; rendering it again.")
+        except (ValueError, OSError) as exc:
+            raise RenderBlocked(f"Could not read the takes marked while listening: {exc}") from exc
     if accepted_path.exists() or accepted_path.is_symlink():
         try:
             accepted = read_json(regular_file(accepted_path))
@@ -694,7 +707,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     if direction_session is None or not direction_session.abandoned(number)]
         latest = resolution_session.records[max(eligible)]
         name = latest.get("audio_file")
-        if isinstance(name, str) and audio_present(directory / name):
+        if (isinstance(name, str) and audio_present(directory / name)
+                and latest.get("audio_sha256") not in judged_bad):
             name = validate_audio_filename(name, suffix=".wav")
             if audio_hash(directory / name) != latest.get("audio_sha256"):
                 raise RenderBlocked("Speech recovery candidate changed on disk")
@@ -782,6 +796,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 raw = directory / validate_audio_filename(previous["raw_file"], suffix=".wav")
             elif audio_present(directory / (prefix + "-raw.wav")):
                 raw = directory / (prefix + "-raw.wav")
+            if previous.get("audio_file") is not None and previous.get("audio_sha256") in judged_bad:
+                # A person listened and marked it bad: whatever verification
+                # said, it is never rechecked or used; a new take follows.
+                last_report = previous.get("report", {})
+                continue
             if (fresh_speech and not audio_present(wav) and attempt != missing_accepted_attempt
                     and not previous.get("report", {}).get("passed")):
                 # No waveform exists to recheck, even if verification settings
@@ -2943,6 +2962,15 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
     retry_threads = []
     try:
         book_lock = _lock_book_audio(bundle)
+        # Passages whose used take a person marked bad lose that take before
+        # any chapter checkpoint or the speech cache can reuse it.
+        from .take_review import retire_all_judged_bad
+        try:
+            rejected = retire_all_judged_bad(work)
+        except (ValueError, OSError) as exc:
+            raise RenderBlocked(f"Could not read the takes marked while listening: {exc}") from exc
+        if rejected:
+            notify(f"Rendering {len(rejected)} passage(s) again whose used take you marked bad.")
         profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
         voice_lock = store.lock()
         store.persist_aliases()

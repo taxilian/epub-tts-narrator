@@ -12,7 +12,10 @@ where the audio is.
 
 The file lives in the render work directory, which already holds the book's
 text and audio; the export is written there unless a path is given. Nothing
-here changes which take is used or any verification policy.
+here changes verification policy. A take judged bad is never used again:
+``judged_bad_audio`` names those takes' audio, and ``take_review`` retires a
+passage's acceptance when its used take is one of them, so the passage renders
+again.
 """
 
 from __future__ import annotations
@@ -98,6 +101,19 @@ def verdicts(work, request_hash):
     """``{attempt: verdict}`` for one passage's takes."""
     takes = load(work)["takes"]
     return {entry["attempt"]: entry["verdict"] for entry in takes.values() if entry.get("request_hash") == request_hash}
+
+
+def judged_bad_audio(clip_directory):
+    """Audio hashes of every take a person marked bad in this passage folder's render work.
+
+    Only passage folders directly in ``render-work/clips`` have person
+    verdicts; any other folder has none.
+    """
+    directory = Path(clip_directory)
+    if directory.parent.name != "clips":
+        return frozenset()
+    return frozenset(entry["audio_sha256"] for entry in load(directory.parent.parent)["takes"].values()
+                     if entry.get("verdict") == "bad" and isinstance(entry.get("audio_sha256"), str))
 
 
 def disagreement(entry):

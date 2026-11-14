@@ -6,6 +6,8 @@
 * ``TakesScreen`` — every retained take of a failed passage: play them, compare
   what the recognizer heard with the passage, and accept one a person judges
   good (optionally teaching the recognizer); returns ``{"attempt", "learn"}``.
+  Marking the used take bad retires it at once and calls ``on_retired`` so its
+  chapter renders the passage again.
 
 Import only after ``tui_support.wants_tui`` said yes.
 """
@@ -97,7 +99,10 @@ class TakesScreen(Dialog):
     """Every take of one passage, to compare by ear, choose the one used, and judge verification.
 
     Dismisses with ``{"attempt", "learn"}`` when a person chooses a take to
-    use; marks (good/bad) are saved at once and the dialog stays open.
+    use; marks (good/bad) are saved at once and the dialog stays open. A bad
+    mark on the used take retires it, and ``on_retired(attempt)`` (called on a
+    worker thread) arranges for the passage to render again and returns the
+    message to show.
     """
 
     DEFAULT_CSS = BASE_CSS + """
@@ -115,10 +120,11 @@ class TakesScreen(Dialog):
         Binding("c", "mark(None)", "Clear mark"),
     ]
 
-    def __init__(self, title, review, player, *, highlight=None):
+    def __init__(self, title, review, player, *, highlight=None, on_retired=None):
         super().__init__()
         self.title_text, self.review, self.player = title, review, player
         self.highlight = highlight
+        self.on_retired = on_retired
         self.rows = []
 
     # The name the failed-passage dialog first used for its handle.
@@ -134,7 +140,8 @@ class TakesScreen(Dialog):
             yield Static("", id="takes-heard")
             yield Static("", id="takes-error", classes="dialog-error")
             yield Static(Text("Enter/p plays · Space stops · u uses this take · g marks it good (wrongly rejected) · "
-                              "b marks it bad · c clears the mark · Escape closes"), classes="dialog-help")
+                              "b marks it bad (the used take is then rendered again) · c clears the mark · "
+                              "Escape closes"), classes="dialog-help")
 
     def on_mount(self):
         self.query_one("#takes-table", DataTable).add_columns("Take", "Used", "Verification", "Length",
@@ -253,8 +260,12 @@ class TakesScreen(Dialog):
             self.app.call_from_thread(self._error, f"Could not save the mark: {error}")
             return
         learned = "; ".join(f"{expected} → {heard}" for expected, heard in outcome["learned"])
-        self.app.call_from_thread(self._error, f"Take {row['attempt']}: " + (
-            f"marked {verdict}" if verdict else "mark cleared") + (f"; learned {learned}" if learned else ""))
+        message = f"Take {row['attempt']}: " + (
+            f"marked {verdict}" if verdict else "mark cleared") + (f"; learned {learned}" if learned else "")
+        if outcome.get("retired"):
+            follow = self.on_retired(row["attempt"]) if callable(self.on_retired) else None
+            message += "; it is no longer used. " + (follow or "The next render makes a new take of this passage.")
+        self.app.call_from_thread(self._error, message)
         self.app.call_from_thread(self.reload)
 
     def action_close(self):

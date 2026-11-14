@@ -164,9 +164,18 @@ def select_retained(directory, request, client, *, failure_report=None):
     # of this passage at all, so it is never a best-effort candidate.
     echoes = {item['summary']['candidate_id']: echo for item in retained
               if (echo := candidate_echo(item['record'], logical_text(request))) is not None}
-    candidates = [item for item in retained if item['summary']['candidate_id'] not in echoes]
+    # A take a person listened to and marked bad is never chosen either.
+    from .take_feedback import judged_bad_audio
+    bad_audio = judged_bad_audio(directory)
+    judged_bad = {item['summary']['candidate_id'] for item in retained
+                  if item['record'].get('audio_sha256') in bad_audio}
+    candidates = [item for item in retained
+                  if item['summary']['candidate_id'] not in echoes and item['summary']['candidate_id'] not in judged_bad]
     if not candidates:
         context = _failure_context(failure_report) + f'. Inspect {directory}'
+        if judged_bad:
+            raise ValueError('Every usable retained take was marked bad by a person listening, so none is '
+                             'published' + context)
         if echoes:
             raise ValueError('Every retained take repeats an earlier line of chapter history (history echo); '
                              'none is a rendition of this passage, so none is published' + context)
@@ -184,10 +193,11 @@ def select_retained(directory, request, client, *, failure_report=None):
         saved = read_json(regular_file(path))
         offered = {item.get('candidate_id') for item in
                    saved.get('audit', {}).get('payload', {}).get('candidates', [])}
-        if offered & set(echoes):
-            # A pending choice that offered echoes is retired, not trusted.
+        if offered & (set(echoes) | judged_bad):
+            # A pending choice that offered echoes or takes a person marked
+            # bad is retired, not trusted.
             archive(directory, ['exhaustion-selection.json'],
-                    {'retired_candidates': sorted(offered & set(echoes))})
+                    {'retired_candidates': sorted(offered & (set(echoes) | judged_bad))})
     if path.exists() or path.is_symlink():
         saved = read_json(regular_file(path))
         state = {key: value for key, value in saved.items() if key != 'record_sha256'}
