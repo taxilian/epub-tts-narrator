@@ -110,9 +110,16 @@ def _chapter_spans(document):
 
 
 def toc(document):
-    """Summarize passages and outstanding review work per rendered chapter."""
+    """Summarize passages and outstanding review work per rendered chapter.
+
+    Chapters with no passages are hidden from the list; each kept row's ``id``
+    stays the original partition index so render chapter numbers, failure
+    linkage, and playback keep matching the exported scripts and the M4B.
+    """
     rows = []
     for index, (partition, _, chapter_segments) in enumerate(_chapter_spans(document)):
+        if not chapter_segments:
+            continue
         rows.append({
             "id": index,
             "title": partition["title"],

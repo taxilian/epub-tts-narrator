@@ -61,7 +61,9 @@ class ReviewApp:
         self.pending = {}
         self.running = True
         self.view = "toc"
-        self.chapter_index = 0
+        rows = toc(self.document)
+        self.toc_index = 0
+        self.chapter_index = rows[0]["id"] if rows else 0
         self.passage_index = 0
         self.passage_scroll = 0
         self.info_segment_id: str | None = None
@@ -138,8 +140,10 @@ class ReviewApp:
         self.notice = "Unsaved changes" if self.pending else "No unsaved changes"
 
     def _move_chapter(self, amount):
-        count = len(self._toc_rows())
-        self.chapter_index = max(0, min(count - 1, self.chapter_index + amount))
+        rows = self._toc_rows()
+        self.toc_index = max(0, min(len(rows) - 1, self.toc_index + amount))
+        if rows:
+            self.chapter_index = rows[self.toc_index]["id"]
 
     def _move_passage(self, amount):
         count = len(self._passage_rows())
@@ -520,8 +524,9 @@ class ReviewApp:
             elif key == "NPAGE":
                 self._move_chapter(self.page_size)
             elif key == "ENTER":
-                self.passage_index = self.passage_scroll = 0
-                self.view = "passages"
+                if self._toc_rows():
+                    self.passage_index = self.passage_scroll = 0
+                    self.view = "passages"
             elif key in {"f", "F"}:
                 self._jump_to_failure()
         elif self.view == "passages":
@@ -634,23 +639,25 @@ class ReviewApp:
     def _draw_toc(self, screen):
         height, _ = screen.size()
         rows = self._toc_rows()
-        self._header(screen, f"Review chapters  {self.chapter_index + 1}/{len(rows)}")
+        self._header(screen, f"Review chapters  {self.toc_index + 1 if rows else 0}/{len(rows)}")
+        if not rows:
+            screen.write(3, 0, "No chapters with passages. Press Q to quit.", 0)
         self.page_size = max(1, height - 5)
-        start = max(0, min(self.chapter_index - self.page_size + 1, len(rows) - self.page_size))
+        start = max(0, min(self.toc_index - self.page_size + 1, len(rows) - self.page_size))
         start = max(0, start)
         for line, row in enumerate(rows[start:start + self.page_size], 3):
             index = start + line - 3
-            marker = "> " if index == self.chapter_index else "  "
+            marker = "> " if index == self.toc_index else "  "
             prefix = f"FAILED {row['failure']['error_type']}  " if row.get("failure") else ""
             text = (f"{marker}{prefix}{row['title']}  {row['passage_count']} passages; "
                     f"{row['review_count']} review; {row['unassigned_count']} unassigned")
-            screen.write(line, 0, text, _selected(index == self.chapter_index))
+            screen.write(line, 0, text, _selected(index == self.toc_index))
         self._footer(screen, "Up/Down select  Enter passages  F failed passage  S save  Q quit")
 
     def _draw_passages(self, screen):
         height, _ = screen.size()
         rows = self._passage_rows()
-        chapter = self._toc_rows()[self.chapter_index]
+        chapter = self._toc_rows()[self.toc_index]
         title = chapter["title"] + f"  Passage {self.passage_index + 1}/{len(rows)}"
         if chapter.get("failure"):
             title = "FAILED  " + title + "  " + _flat(chapter["failure"]["error"])

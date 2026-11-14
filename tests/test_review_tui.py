@@ -25,7 +25,7 @@ from tests.test_contracts import valid_document
 Document = dict[str, Any]
 
 
-def review_document(*, two_chapters=False, unresolved=False, long_passage=False) -> Document:
+def review_document(*, two_chapters=False, unresolved=False, long_passage=False, empty_chapters=()) -> Document:
     document: Document = valid_document()
     if long_passage:
         text = " ".join(f"word{index}" for index in range(30)) + "."
@@ -50,13 +50,19 @@ def review_document(*, two_chapters=False, unresolved=False, long_passage=False)
             "attribution": {"basis": "explicit", "reason": "Narrative.", "evidence": [],
                             "candidates": [], "review_required": False},
         })
+    for offset, (position, title) in enumerate(empty_chapters):
+        document["source"]["chapters"].insert(position, {
+            "id": f"ch-empty-{offset}", "title": title,
+            "source_href": f"text/ch-empty-{offset}.xhtml", "block_ids": [],
+        })
     return document
 
 
-def publish_book(root, *, two_chapters=False, unresolved=False, long_passage=False):
+def publish_book(root, *, two_chapters=False, unresolved=False, long_passage=False, empty_chapters=()):
     """Publish a self-contained temporary book through the real exporter/loader contract."""
     directory = Path(root) / "review-book"
-    document = review_document(two_chapters=two_chapters, unresolved=unresolved, long_passage=long_passage)
+    document = review_document(two_chapters=two_chapters, unresolved=unresolved,
+                               long_passage=long_passage, empty_chapters=empty_chapters)
     registry = fresh_registry(directory)
     linked = link_analysis(document, registry)
     publish_directory(linked, registry, directory, export_bundle)
@@ -70,7 +76,7 @@ def write_wave(path):
         output.writeframes(b"\x01\x00" * 80)
 
 
-def add_render_work(directory, *, drift=False) -> dict[str, Any]:
+def add_render_work(directory, *, drift=False, chapter_number=1) -> dict[str, Any]:
     """Build chapter-local rendered state from the real one-chapter source plan."""
     from epub_tts_narrator.renderer.book_context import resolve_book_config
     from epub_tts_narrator.renderer.bundle import load_bundle, make_plan
@@ -78,7 +84,7 @@ def add_render_work(directory, *, drift=False) -> dict[str, Any]:
 
     bundle = load_bundle(directory)
     settings: dict[str, Any] = deepcopy(DEFAULTS)
-    settings["render"].update(chapter_numbers=[1], max_chunk_chars=40)
+    settings["render"].update(chapter_numbers=[chapter_number], max_chunk_chars=40)
     settings = resolve_book_config(bundle, settings)
     plan: dict[str, Any] = make_plan(bundle, settings)
     chunks: list[dict[str, Any]] = plan["chapters"][0]["chunks"]
@@ -109,10 +115,11 @@ def add_render_work(directory, *, drift=False) -> dict[str, Any]:
                            "report": {"passed": True}})
         clips[request_hash] = {"directory": clip, "audio_paths": audio_paths,
                                "chunk_id": checkpoint_chunk_id, "segment_id": segment_id}
-    checkpoint = work / "completed-chapters" / "chapter-0001.json"
+    checkpoint = work / "completed-chapters" / f"chapter-{chapter_number:04d}.json"
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     checkpoint.write_text(json.dumps({"format": "audiobook-chapter-checkpoint", "version": 1,
-                                      "chapter_number": 1, "acceptance": acceptance}), encoding="utf-8")
+                                      "chapter_number": chapter_number, "acceptance": acceptance}),
+                          encoding="utf-8")
     unrelated = work / "clips" / ("f" * 64)
     unrelated.mkdir(parents=True)
     (unrelated / "accepted.json").write_text("{not json", encoding="utf-8")
@@ -267,8 +274,10 @@ class ReviewAppTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root: Path = Path(temporary.name).resolve()
 
-    def app(self, *, two_chapters=False, unresolved=False, error=None, rewrite_manifest=False):
-        directory, document = publish_book(self.root, two_chapters=two_chapters, unresolved=unresolved)
+    def app(self, *, two_chapters=False, unresolved=False, error=None, rewrite_manifest=False,
+            empty_chapters=()):
+        directory, document = publish_book(self.root, two_chapters=two_chapters, unresolved=unresolved,
+                                           empty_chapters=empty_chapters)
         revision = RevisionStub(directory, error=error, rewrite_manifest=rewrite_manifest)
         related_calls = []
 
@@ -279,11 +288,12 @@ class ReviewAppTests(unittest.TestCase):
         app = ReviewApp(directory, document, revise_directories=revision, related_directories=related)
         return app, revision, related_calls
 
-    def rendered_app(self, *, root=None, long_passage=False, drift=False, playback=None):
+    def rendered_app(self, *, root=None, long_passage=False, drift=False, playback=None,
+                     empty_chapters=(), chapter_number=1):
         root = Path(root) if root is not None else self.root
         root.mkdir(parents=True, exist_ok=True)
-        directory, document = publish_book(root, long_passage=long_passage)
-        fixture = add_render_work(directory, drift=drift)
+        directory, document = publish_book(root, long_passage=long_passage, empty_chapters=empty_chapters)
+        fixture = add_render_work(directory, drift=drift, chapter_number=chapter_number)
         revision = RevisionStub(directory)
         takes = TakeSelectionStub(fixture)
         playback = playback if playback is not None else PlaybackStub()
@@ -315,6 +325,100 @@ class ReviewAppTests(unittest.TestCase):
         self.assertIn("> Chapter Two", second.text)
         self.assertEqual(app.view, "passages")
         self.assertIn("Later, Lena waited.", third.text)
+
+    def test_toc_hides_empty_chapters_and_navigation_skips_them(self):
+        app, _, _ = self.app(two_chapters=True, empty_chapters=((0, "Cover"), (2, "Interlude")))
+        first = FakeScreen()
+        app.draw(first)
+
+        app.handle_key("DOWN")
+        second = FakeScreen()
+        app.draw(second)
+        app.handle_key("ENTER")
+        third = FakeScreen()
+        app.draw(third)
+
+        self.assertNotIn("Cover", first.text)
+        self.assertNotIn("Interlude", first.text)
+        self.assertIn("Chapter One", first.text)
+        self.assertIn("Chapter Two", first.text)
+        self.assertEqual(app.chapter_index, 3)
+        self.assertIn("> Chapter Two", second.text)
+        self.assertEqual(app.view, "passages")
+        self.assertIn("Later, Lena waited.", third.text)
+        self.assertNotIn("Hello", third.text)
+
+    def test_toc_hides_a_trailing_empty_chapter(self):
+        app, _, _ = self.app(two_chapters=True, empty_chapters=((2, "End Matter"),))
+        screen = FakeScreen()
+        app.draw(screen)
+
+        app.handle_key("DOWN")
+        app.handle_key("DOWN")
+        second = FakeScreen()
+        app.draw(second)
+        app.handle_key("ENTER")
+        third = FakeScreen()
+        app.draw(third)
+
+        self.assertIn("Chapter Two", screen.text)
+        self.assertNotIn("End Matter", screen.text)
+        self.assertEqual(app.chapter_index, 1)
+        self.assertIn("> Chapter Two", second.text)
+        self.assertEqual(app.view, "passages")
+        self.assertIn("Later, Lena waited.", third.text)
+
+    def test_all_empty_chapters_draw_safely_and_enter_stays_in_toc(self):
+        app, _, _ = self.app()
+        app.document["segments"] = []
+        screen = FakeScreen()
+        app.draw(screen)
+
+        app.handle_key("DOWN")
+        app.handle_key("ENTER")
+        app.draw(FakeScreen())
+
+        self.assertEqual(app.view, "toc")
+        self.assertIn("0/0", screen.text)
+        self.assertIn("No chapters with passages", screen.text)
+
+    def test_failure_lookup_uses_original_chapter_numbers_when_earlier_chapters_are_hidden(self):
+        app, _, _ = self.app(two_chapters=True, empty_chapters=((0, "Cover"),))
+        add_failure_status(app.directory, 3, segment_ids=["s4"])
+        screen = FakeScreen()
+        app.draw(screen)
+
+        app.handle_key("DOWN")
+        app.handle_key("f")
+
+        self.assertIn("FAILED SpeechVerificationFailed  Chapter Two", screen.text)
+        self.assertEqual(app.view, "passages")
+        rows = app._passage_rows()
+        self.assertEqual(rows[0]["segment_id"], "s4")
+        self.assertTrue(rows[0]["failed"])
+
+    def test_playback_and_take_acceptance_use_the_original_chapter_number(self):
+        app, fixture, takes, playback = self.rendered_app(empty_chapters=((0, "Cover"),),
+                                                          chapter_number=2)
+        self.assertEqual(app.chapter_index, 1)
+        self.open_second_passage(app)
+
+        app.handle_key("p", screen=FakeScreen())
+
+        self.assertEqual(len(playback.calls), 1)
+        self.assertEqual(app.notice, "Playback finished")
+
+        app.handle_key("t")
+        app.handle_key("a")
+        app.handle_key("y")
+
+        s2_hash = next(key for key, clip in fixture["clips"].items() if clip["segment_id"] == "s2")
+        self.assertEqual([call[1] for call in takes.list_calls], [s2_hash] * 3)
+        self.assertEqual(len(takes.select_calls), 1)
+        self.assertIn("--chapters-only 2", app.notice)
+        self.assertFalse(fixture["checkpoint"].exists())
+        archived = list(fixture["checkpoint"].parent.glob("chapter-0002.json.superseded-*"))
+        self.assertEqual(len(archived), 1)
 
     def test_passage_rows_use_cast_role_colors_and_review_badges(self):
         app, _, _ = self.app()

@@ -81,6 +81,47 @@ class ReviewModelTests(unittest.TestCase):
              "review_count": 0, "unassigned_count": 0},
         ])
 
+    def test_toc_hides_zero_passage_chapters_and_keeps_original_partition_ids(self):
+        document = review_document()
+
+        def empty_chapter(position, chapter_id, title):
+            document["source"]["chapters"].insert(position, {
+                "id": chapter_id, "title": title, "source_href": f"text/{chapter_id}.xhtml",
+                "block_ids": [],
+            })
+
+        empty_chapter(0, "ch0", "Cover")
+        empty_chapter(2, "ch9", "Interlude")
+        document["source"]["chapters"].append({
+            "id": "ch2", "title": "Chapter Two", "source_href": "text/ch2.xhtml", "block_ids": ["b3"],
+        })
+        document["source"]["blocks"].append({
+            "id": "b3", "chapter_id": "ch2", "text": "Later.",
+            "source": {"href": "text/ch2.xhtml", "element_id": None, "tag": "p"},
+        })
+        document["segments"].append({
+            "id": "s4", "block_id": "b3", "start": 0, "end": 6, "text": "Later.",
+            "kind": "narration", "role_id": "narrator", "voice_id": "vn",
+            "delivery": {"direction": "", "evidence": []},
+            "attribution": {"basis": "explicit", "reason": "Narrative.", "evidence": [],
+                            "candidates": [], "review_required": False},
+        })
+        empty_chapter(4, "chz", "End Matter")
+
+        rows = toc(document)
+
+        self.assertEqual(validate_document(document), [])
+        self.assertEqual([(row["id"], row["title"], row["passage_count"]) for row in rows], [
+            (1, "Chapter One", 3), (3, "Chapter Two", 1),
+        ])
+        self.assertEqual([row["text"] for row in passages(document, 3)], ["Later."])
+
+    def test_toc_returns_no_rows_when_every_chapter_has_no_passages(self):
+        document = review_document()
+        document["segments"] = []
+
+        self.assertEqual(toc(document), [])
+
     def test_one_source_chapter_splits_into_rendered_chapters_at_numbered_headings(self):
         document = review_document()
         document["source"]["chapters"][0]["title"] = "Volume One"
