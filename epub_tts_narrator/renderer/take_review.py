@@ -34,9 +34,11 @@ NOTE = "Accepted by a person listening in the run shell"
 class TakeReview:
     """Takes of one passage, and a person's decisions about them. Safe to call from a UI thread."""
 
-    def __init__(self, work, config, verifier, request_hash, *, directory=None):
+    def __init__(self, work, config, verifier, request_hash, *, directory=None, book=None):
         from .take_feedback import clip_folder
         self.work = Path(work)
+        # The book (bundle) directory, for edits a person makes to the passage.
+        self.book = Path(book) if book is not None else None
         # The take folder: ``clips/HASH``, or ``clips/HASH/parts/PART`` for one
         # part of a passage split into shorter parts.
         self.directory = (Path(directory) if directory is not None
@@ -84,6 +86,78 @@ class TakeReview:
                 })
                 rows.sort(key=lambda row: row["attempt"] if type(row["attempt"]) is int else 0)
         return rows
+
+    def _records(self):
+        """Every saved attempt record of this passage, oldest first, including attempts that made no audio."""
+        from .common import read_json, regular_file
+        records = []
+        if self.directory.is_symlink() or not self.directory.is_dir():
+            return records
+        for path in sorted(self.directory.glob("attempt-[0-9][0-9][0-9]*.json")):
+            if not path.name[len("attempt-"):-len(".json")].isdigit():
+                continue
+            try:
+                record = read_json(regular_file(path))
+            except (ValueError, OSError):
+                continue
+            if isinstance(record, dict) and record.get("request_hash") == self.request_hash:
+                records.append(record)
+        return sorted(records, key=lambda record: record.get("attempt") if type(record.get("attempt")) is int else 0)
+
+    def passage(self):
+        """``{"text", "kind", "segment_ids", "directions"}`` of the passage, from its saved request, or None."""
+        records = self._records()
+        request = records[-1].get("request") if records else None
+        if not isinstance(request, dict) and self.used() is not None:
+            request = self.used().get("request")
+        chunk = request.get("chunk") if isinstance(request, dict) else None
+        if not isinstance(chunk, dict):
+            return None
+        turns = chunk.get("paragraph_turns")
+        segments = [row.get("segment") for row in (turns if isinstance(turns, list) else [chunk])
+                    if isinstance(row, dict) and isinstance(row.get("segment"), dict)]
+        text = chunk.get("spoken_text")
+        if not isinstance(text, str):
+            text = " ".join(str(row.get("spoken_text") or "") for row in turns or [] if isinstance(row, dict))
+        return {"text": text, "kind": request.get("kind"),
+                "segment_ids": [segment.get("id") for segment in segments if isinstance(segment.get("id"), str)],
+                "directions": [str((segment.get("delivery") or {}).get("direction") or "")
+                               for segment in segments]}
+
+    def attempts(self):
+        """What every attempt did, oldest first: ``{"attempt", "audio", "passed", "reasons", "error", "pending"}``.
+
+        Attempts that made no audio (an engine error, an interrupted take)
+        are listed too, with their error; their takes cannot be heard.
+        """
+        rows = []
+        for record in self._records():
+            report = record.get("report") if isinstance(record.get("report"), dict) else {}
+            error = report.get("provider_error") or report.get("error") or ""
+            if report.get("error_type") and error and not str(error).startswith(str(report["error_type"])):
+                error = f"{report['error_type']}: {error}"
+            rows.append({"attempt": record.get("attempt"), "audio": isinstance(record.get("audio_file"), str),
+                         "passed": report.get("passed") is True, "reasons": list(report.get("reasons") or []),
+                         "error": str(error), "echo": "history_echo" in report,
+                         "pending": report.get("reasons") == ["generation_incomplete"]})
+        return rows
+
+    def reset_for_fresh_takes(self):
+        """Before a person's fresh retry: set aside this passage's saved best-effort choice and clip repair.
+
+        A pending best-effort choice would otherwise be resumed instead of
+        making new takes, and a finished clip repair would not be tried
+        again. They are renamed under a ``fresh-retry`` suffix beside a
+        ``fresh-retry-*.json`` record, never deleted; an accepted take is
+        never touched. Returns the names set aside.
+        """
+        if (self.directory / "accepted.json").exists() or (self.directory / "accepted.json").is_symlink():
+            return []
+        names = [name for name in RETIRED_FILES[1:]
+                 if (self.directory / name).exists() or (self.directory / name).is_symlink()]
+        if not names:
+            return []
+        return retire_files(self.directory, names, "fresh-retry", {"reason": "person_requested_fresh_takes"})
 
     def rejected_attempts(self):
         """Attempt numbers of this passage's rejected takes with audio (cheap: no audio is read)."""
@@ -237,17 +311,22 @@ def retire_acceptance(directory, record, label, evidence):
     saved in ``LABEL-SUFFIX.json`` with the names it retired. Nothing is
     deleted. Returns the retired names.
     """
+    return retire_files(directory, RETIRED_FILES, label,
+                        {**evidence, "attempt": record.get("attempt"), "audio_sha256": record.get("audio_sha256")})
+
+
+def retire_files(directory, names, label, evidence):
+    """Rename the named files of a passage's take folder under ``label``; never deletes. Returns the new names."""
     from datetime import datetime, timezone
     import os
     from .common import digest, write_json
     directory = Path(directory)
-    evidence = {**evidence, "attempt": record.get("attempt"), "audio_sha256": record.get("audio_sha256"),
-                "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    evidence = {**evidence, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     # The same take can be retired again (restored by hand, say): each
     # retirement keeps its own names.
     suffix = digest({**evidence, "nonce": os.urandom(8).hex()})[:12]
     moved = []
-    for name in RETIRED_FILES:
+    for name in names:
         source = directory / name
         if not source.exists() and not source.is_symlink():
             continue

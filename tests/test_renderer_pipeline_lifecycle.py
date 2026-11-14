@@ -452,6 +452,52 @@ class PipelineLifecycleTests(unittest.TestCase):
         self.assertEqual(seen[1], "manual_take_selection")
         self.assertTrue((self.root / "output" / result["audio"]["audiobook"]["path"]).is_file())
 
+    def test_a_passage_whose_takes_made_no_audio_shows_each_attempt_and_retries_with_fresh_takes(self):
+        from epub_tts_narrator.renderer.progress import shell_board
+        from epub_tts_narrator.run_events import EventBus
+        self._four_chapter_bundle("silence-bundle")
+        pool = self.pool_for("pipeline")
+        self.publish_voices(pool)
+        original = self.engine.synthesize
+        broken = {"on": True}
+
+        def generate(*args, **kwargs):
+            if broken["on"] and args[0] == "The second boat crossed the harbor.":
+                raise RuntimeError("Fish HTTP 500: Drama 3 did not finish the text: 'silence'")
+            return original(*args, **kwargs)
+
+        seen = {}
+
+        def on_event(event):
+            if event.kind == "failure":
+                repair = event.data["repair"]
+                seen["record"] = dict(event.data["record"])
+                seen["passage"] = repair.passage()
+                seen["attempts"] = repair.attempts()
+                seen["takes"] = repair.takes()
+                broken["on"] = False  # the engine works again; the person asks for fresh takes
+                repair.reset_for_fresh_takes()
+                self.assertTrue(event.data["retry"]())
+
+        bus = EventBus()
+        bus.subscribe(on_event)
+        with patch.object(self.engine, "synthesize", side_effect=generate), shell_board(bus) as board:
+            result = render(self.bundle, self.config, pool, self.verifier, notify=board.log)
+        self.assertEqual(result["status"], "complete")
+        record = seen["record"]
+        self.assertEqual((record["number"], record["block"], record["speakers"]), (2, 2, ["Narrator"]))  # the heading is block 1
+        self.assertIn("did not finish the text: 'silence'", record["error"])
+        self.assertEqual(seen["passage"]["text"], "The second boat crossed the harbor.")
+        self.assertEqual(seen["passage"]["segment_ids"], record["segment_ids"])
+        # Every attempt is listed with its error, though none made audio (so there is no take to hear).
+        self.assertEqual([(row["attempt"], row["audio"], row["passed"]) for row in seen["attempts"]],
+                         [(1, False, False), (2, False, False), (3, False, False)])
+        self.assertTrue(all("did not finish the text: 'silence'" in row["error"] for row in seen["attempts"]))
+        self.assertEqual(seen["takes"], [])
+        # The retry made new takes after the three failed ones, and one passed.
+        accepted = read_json(self.root / "work" / "clips" / record["request_hash"] / "accepted.json")
+        self.assertEqual(accepted["attempt"], 4)
+
     def test_node_activity_shows_which_block_holds_each_speech_and_verify_slot(self):
         from epub_tts_narrator.renderer.node_activity import ACTIVITY
         self._four_chapter_bundle("nodes-bundle")

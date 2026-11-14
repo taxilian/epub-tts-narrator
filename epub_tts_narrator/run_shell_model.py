@@ -514,6 +514,14 @@ class RunModel:
             chapters = [item for item in mine if item["kind"] == "chapter" and item.get("state", "failed") == "failed"]
         return failure, chapters
 
+    def chapter_failure(self, book, chapter):
+        """This attempt's newest failure of one chapter (failed or being retried), or None."""
+        with self._lock:
+            return next((item for item in reversed(self.failures)
+                         if item["kind"] == "chapter" and item["attempt"] == self.attempt
+                         and item["scope"].get("book") == book and item["scope"].get("chapter") == chapter
+                         and item.get("state", "failed") in ("failed", "retrying")), None)
+
     def request_rebuild(self, book, chapter):
         """Rebuild one chapter with a newly chosen take: ``"now"``, ``"after"`` it finishes, or ``None``."""
         with self._lock:

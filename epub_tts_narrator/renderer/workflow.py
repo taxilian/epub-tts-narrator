@@ -113,6 +113,46 @@ def _failure_linkage(error):
             "request_hash": digest(request)}
 
 
+def _failure_passage(bundle, chapter, linkage):
+    """Where a failed passage sits and who speaks it: ``{"block", "speakers"}`` (numbers and cast names only).
+
+    ``block`` is the passage's 1-based place among the chapter's blocks; the
+    speakers are the cast names of its source segments (``Narrator`` for
+    narration). A failure without passage linkage adds nothing.
+    """
+    chunk_id = linkage.get("chunk_id")
+    if not isinstance(chunk_id, str):
+        return {}
+    result = {}
+    chunks = chapter.get("chunks") if isinstance(chapter.get("chunks"), list) else []
+    position = next((index for index, chunk in enumerate(chunks)
+                     if isinstance(chunk, dict) and chunk.get("chunk_id") == chunk_id), None)
+    if position is not None:
+        result["block"] = position + 1
+    cast = bundle.get("cast") if isinstance(bundle.get("cast"), dict) else {}
+    roles = {role.get("id"): role for role in cast.get("roles") or [] if isinstance(role, dict)}
+    names = {row.get("id"): row.get("name") for row in cast.get("characters") or [] if isinstance(row, dict)}
+    wanted = set(linkage.get("segment_ids") or [])
+    speakers = []
+    for chunk in chunks[position:position + 1] if position is not None else []:
+        turns = chunk.get("paragraph_turns")
+        for row in turns if isinstance(turns, list) else [chunk]:
+            segment = row.get("segment") if isinstance(row, dict) else None
+            if not isinstance(segment, dict) or (wanted and segment.get("id") not in wanted):
+                continue
+            ids = ([item.get("role_id") for item in segment["simultaneous_speakers"] if isinstance(item, dict)]
+                   if isinstance(segment.get("simultaneous_speakers"), list) else [segment.get("role_id")])
+            for role_id in ids:
+                role = roles.get(role_id) or {}
+                name = ("Narrator" if role.get("kind") == "narration"
+                        else names.get(role.get("character_id")) or str(role_id or "unknown speaker"))
+                if name not in speakers:
+                    speakers.append(name)
+    if speakers:
+        result["speakers"] = speakers
+    return result
+
+
 # Six of nine investigated narrator-read dead ends repeated Drama 3 truncation on 700+ character chunks.
 _TRUNCATION_SPLIT_THRESHOLD = 2
 
@@ -3135,8 +3175,9 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                         raise
                     stop_if_requested()
                     reason = safe_error_text(exc, secrets=configured_secrets(config))
+                    linkage = _failure_linkage(exc)
                     failure = {"number": chapter["number"], "error_type": type(exc).__name__,
-                               "error": reason, **_failure_linkage(exc)}
+                               "error": reason, **linkage, **_failure_passage(bundle, chapter, linkage)}
                     with plan_lock:
                         chapter_failures[chapter["number"]] = failure
                     notify(f"=== Failed {chapter_label}: {reason}; continuing remaining chapters. ===")
@@ -3145,7 +3186,8 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     if retries is not None and failure.get("request_hash"):
                         # The shell can play this passage's takes and accept one a person judges good.
                         from .take_review import TakeReview
-                        repair = TakeReview(work, config, verifier, failure["request_hash"])
+                        repair = TakeReview(work, config, verifier, failure["request_hash"],
+                                            book=bundle.get("directory"))
                     report_chapter_failure(notify, failure, retry=(
                         None if retries is None else lambda index=chapter_index: retries.request(index)),
                         repair=repair)

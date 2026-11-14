@@ -62,14 +62,24 @@ class FailureScreen(Dialog):
     """A failure's detail and the repairs that apply to it."""
 
     DEFAULT_CSS = BASE_CSS + """
-    FailureScreen #failure-detail { height: auto; max-height: 20; }
-    FailureScreen OptionList { height: auto; margin-top: 1; }
+    FailureScreen #failure-detail { height: auto; max-height: 60vh; }
+    FailureScreen OptionList { height: auto; max-height: 12; margin-top: 1; }
     """
-    BINDINGS = [Binding("escape", "close", "Close", priority=True)]
+    BINDINGS = [Binding("escape", "close", "Close", priority=True),
+                Binding("pageup", "scroll_detail(-1)", "Scroll up", show=False),
+                Binding("pagedown", "scroll_detail(1)", "Scroll down", show=False)]
 
     def __init__(self, item, hint, actions, *, details=()):
+        """``actions`` are names in ``ACTIONS`` or ``(name, label)`` pairs; Close is always last."""
         super().__init__()
-        self.item, self.hint, self.actions = item, hint, [*actions, "close"]
+        self.labels = {}
+        names = []
+        for action in actions:
+            name, label = action if isinstance(action, tuple) else (action, ACTIONS[action])
+            names.append(name)
+            self.labels[name] = label
+        self.item, self.hint, self.actions = item, hint, [*names, "close"]
+        self.labels["close"] = ACTIONS["close"]
         self.details = list(details)
 
     def compose(self) -> ComposeResult:
@@ -78,8 +88,12 @@ class FailureScreen(Dialog):
             yield Label(Text(title), classes="dialog-title")
             with VerticalScroll(id="failure-detail"):
                 yield Static(Text(text), id="detail-text")
-            yield OptionList(*[Option(Text(ACTIONS[name]), id=name) for name in self.actions], id="actions")
-            yield Static("Enter chooses · Escape closes", classes="dialog-help")
+            yield OptionList(*[Option(Text(self.labels[name]), id=name) for name in self.actions], id="actions")
+            yield Static("Enter chooses · PageUp/PageDown scroll the detail · Escape closes", classes="dialog-help")
+
+    def action_scroll_detail(self, direction):
+        detail = self.query_one("#failure-detail", VerticalScroll)
+        (detail.scroll_page_down if direction > 0 else detail.scroll_page_up)()
 
     def on_mount(self):
         self.query_one("#actions", OptionList).focus()

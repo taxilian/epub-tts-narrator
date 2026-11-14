@@ -30,7 +30,7 @@ from .run_shell_model import CHAPTER_STATES, RunModel, next_severity, repair_hin
 from .tui_support import prompt_streams, screen_host
 from .tui_widgets import (
     BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, DetailScreen, KeysScreen, PromptBridge,
-    SEVERITY_STYLES, format_seconds, highlighted_key, sync_table,
+    SEVERITY_STYLES, TextEditScreen, format_seconds, highlighted_key, sync_table,
 )
 
 
@@ -53,6 +53,61 @@ def _verdict_cell(verdict):
     """A rejected take's verdict in the Rejected table."""
     return {"good": Text("good", style="green"), "bad": Text("bad", style="red"), "?": "?"}.get(
         verdict, Text("not judged", style="bold yellow"))
+
+
+def _error_cell(error, width=160):
+    """The error's first line for the Errors table; a longer error says so (Enter shows it all)."""
+    if not error:
+        return ""
+    lines = error.splitlines()
+    first = lines[0] if lines else ""
+    if len(first) <= width and len(lines) == 1:
+        return first
+    return first[:width - 1].rstrip() + "… (Enter: full error)"
+
+
+def _passage_lines(item, *, attempts=True):
+    """Where a chapter failure happened: its passage (block, speakers, text) and, optionally, every attempt."""
+    record, scope = item["record"], item["scope"]
+    where = [f"Chapter {record.get('number') or scope.get('chapter')}"]
+    if record.get("block"):
+        where.append(f"block {record['block']}")
+    if record.get("speakers"):
+        where.append("spoken by " + ", ".join(record["speakers"]))
+    review = item.get("repair")
+    if not record.get("request_hash"):
+        return [", ".join(where) + " (the chapter stopped outside any one passage's takes)"]
+    lines = ["Failed passage: " + ", ".join(where)]
+    try:
+        passage = review.passage() if callable(getattr(review, "passage", None)) else None
+        rows = review.attempts() if callable(getattr(review, "attempts", None)) and attempts else []
+    except (ValueError, OSError) as error:
+        return [*lines, f"  Its saved takes could not be read: {error}"]
+    if passage:
+        lines.append(f"  Text: {passage['text']}")
+        directions = [text for text in passage["directions"] if text]
+        if directions:
+            lines.append("  Direction: " + " | ".join(directions))
+    if not attempts:
+        return lines
+    if not rows:
+        lines.append("  No attempt of this passage is saved.")
+        return lines
+    lines += ["", f"Attempts ({len(rows)}):"]
+    for row in rows:
+        if row["passed"]:
+            outcome = "passed"
+        elif row["pending"]:
+            outcome = "no result (interrupted, or still being made)"
+        else:
+            outcome = ", ".join(row["reasons"]) or "rejected"
+        line = f"  {row['attempt']}: {'audio' if row['audio'] else 'no audio'}, {outcome}"
+        if row["echo"]:
+            line += " (repeated an earlier line: history echo)"
+        if row["error"]:
+            line += f"\n     {row['error']}"
+        lines.append(line)
+    return lines
 
 
 def _failure_takes_cell(counts):
@@ -301,7 +356,7 @@ class RunApp(CapturePrintMixin, App):
                                           scope.get("book") or "", str(scope.get("chapter") or ""),
                                           item["record"].get("error_type") or item["kind"],
                                           _failure_takes_cell(model.failure_takes(item)),
-                                          (item["error"] or "").splitlines()[0][:160] if item["error"] else "")))
+                                          _error_cell(item["error"]))))
         sync_table(self.query_one("#errors", DataTable), failures)
         tabs = self.query_one("#tabs", TabbedContent)
         current = len(model.current_failures())
@@ -547,14 +602,20 @@ class RunApp(CapturePrintMixin, App):
         if (failure is not None and failure.get("state", "failed") == "failed" and self.model.running
                 and callable(failure.get("retry"))):
             actions.append("retry_book")
-        if self.resumable and not self.model.running:
+        elif failure is not None and failure.get("state") == "retrying":
+            pass  # already back in the queue; its state says so
+        elif self.resumable and not self.model.running:
             actions.append("resume_book" if book is not None else "resume")
+        for entry in chapters:
+            number = entry["scope"].get("chapter")
+            actions.append((f"chapter:{number}", f"Open chapter {number}: what failed, every attempt, and its repairs"))
         actions.append("chapters")
-        details = [f"Chapter {entry['scope'].get('chapter')}"
-                   + (f" ({entry['record']['error_type']})" if entry["record"].get("error_type") else "")
-                   + f": {entry['error'] or 'no message'}" for entry in chapters]
+        details = []
+        for entry in chapters:
+            details += [*_passage_lines(entry, attempts=False),
+                        f"  {entry['record'].get('error_type') or 'Error'}: {entry['error'] or 'no message'}", ""]
         if details:
-            details = ["Failed chapters (Errors, 5, has each one's repairs):", *details]
+            details = ["Failed chapters:", *details]
 
         def chosen(action):
             if action == "retry_book":
@@ -565,6 +626,12 @@ class RunApp(CapturePrintMixin, App):
                 self._resume()
             elif action == "chapters":
                 self._show_book(book)
+            elif isinstance(action, str) and action.startswith("chapter:"):
+                entry = next((entry for entry in chapters if f"chapter:{entry['scope'].get('chapter')}" == action), None)
+                if entry is not None:
+                    self._open_failure(entry)
+        if failure is None and not chapters:
+            details.append("No error reached the screen for this book; the Log (4) has its messages.")
         self.push_screen(FailureScreen(item, repair_hint(item), actions, details=details), chosen)
         return True
 
@@ -572,6 +639,12 @@ class RunApp(CapturePrintMixin, App):
         chapter = next((item for row_key, item in self.model.visible_chapters() if row_key == key), None)
         if chapter is None:
             return
+        if chapter["state"] in ("failed", "blocked", "retrying"):
+            failure = self.model.chapter_failure(chapter["book"], chapter["chapter"])
+            if failure is not None:
+                # A failed chapter opens its failure: what failed, every attempt, and its repairs.
+                self._open_failure(failure)
+                return
         snapshot = chapter["snapshot"]
         lines = [f"State: {_state_label(chapter)}"]
         if chapter["title"]:
@@ -616,35 +689,147 @@ class RunApp(CapturePrintMixin, App):
         return self._failure_at(highlighted_key(errors))
 
     def _open_failure(self, item):
+        """A failure's full error, its passage and every attempt, and the repairs that apply; never a dead end."""
+        if item["kind"] == "book":
+            if not self._open_book_failure(item["scope"].get("book")):
+                self.notify("This book has no failure now.", severity="information")
+            return
         from .run_shell_screens import FailureScreen
-        actions = []
-        if item.get("state", "failed") == "failed" and self.model.running and callable(item.get("retry")):
-            actions.append("retry" if item["kind"] == "chapter" else "retry_book")
-        if item.get("repair") is not None:
+        review = item.get("repair")
+        running, state = self.model.running, item.get("state", "failed")
+        scope = item["scope"]
+        actions, notes = [], []
+        takes = []
+        if review is not None:
+            try:
+                takes = review.takes()
+            except (ValueError, OSError) as error:
+                notes.append(f"Its takes could not be read ({error}).")
+        retry_offered = running and state == "failed" and callable(item.get("retry"))
+        if state == "retrying":
+            notes.append("This chapter is being rendered again now; its row in Chapters (2) shows its progress.")
+        elif retry_offered:
+            if callable(getattr(review, "reset_for_fresh_takes", None)):
+                actions.append(("retry_fresh", "Retry this passage now with fresh takes: a new allowance of "
+                                "attempts, its saved best-effort choice and repair set aside (the chapter's other "
+                                "passages keep their verified clips)"))
+            actions.append(("retry", "Retry the chapter now, ahead of everything waiting: a new allowance of "
+                            "attempts, continuing any saved best-effort choice or repair (verified clips are reused)"))
+        elif running:
+            notes.append("The run is stopping after a run-wide error and takes no more retries; when it ends, "
+                         "resume renders this chapter again with fresh takes.")
+        if takes:
             actions.append("takes")
-        if item["scope"].get("book") is not None and self.resumable:
-            actions.append("resume_book")
+        elif review is not None:
+            notes.append("No attempt made audio (each one stopped with the error listed), so there is no take to "
+                         "hear or use; retry for new takes.")
+        passage = None
+        if callable(getattr(review, "passage", None)):
+            try:
+                passage = review.passage()
+            except (ValueError, OSError):
+                passage = None
+        if passage and getattr(review, "book", None) is not None and len(passage["segment_ids"]) == 1:
+            actions.append(("edit_direction", "Change this passage's direction (how it is performed), saved to "
+                            "the book; the book's next render makes new takes with it"))
+        elif passage and len(passage["segment_ids"]) > 1:
+            notes.append(f"This passage joins {len(passage['segment_ids'])} lines of one paragraph; change a line's "
+                         "direction with review-ui for this book, then render it again.")
+        if not running and self.resumable and scope.get("book") is not None:
+            actions.append(("resume_book", "Render this book again now: failed passages get fresh takes "
+                            "(completed work is reused)"))
+        elif not running and self.resumable:
+            actions.append("resume")
+        actions.append(("log", "Show this chapter's messages in the Log"))
+        details = [*_passage_lines(item), *([""] + notes if notes else [])]
 
         def chosen(action):
-            if action in ("retry", "retry_book"):
-                self._retry(item)
+            if action in ("retry", "retry_fresh"):
+                self._retry(item, fresh=action == "retry_fresh")
             elif action == "takes":
                 self._takes(item)
+            elif action == "edit_direction":
+                self._edit_direction(item, passage)
             elif action == "resume_book":
-                self._resume(books=[item["scope"]["book"]])
-        self.push_screen(FailureScreen(item, repair_hint(item), actions), chosen)
+                self._resume(books=[scope["book"]])
+            elif action == "resume":
+                self._resume()
+            elif action == "log":
+                self.model.filter.book, self.model.filter.chapter = scope.get("book"), scope.get("chapter")
+                self.action_tab("log")
+                self.refresh_view(force=True)
+        self.push_screen(FailureScreen(item, repair_hint(item), actions, details=details), chosen)
 
-    def _retry(self, item):
+    def _edit_direction(self, item, passage):
+        from .renderer.passage_edit import check_direction
+        review = item["repair"]
+
+        def saved(text):
+            if text is None:
+                return
+            self.run_worker(lambda: self._save_direction(item, review, passage, text), thread=True,
+                            group="edit-direction")
+        current = passage["directions"][0] if passage["directions"] else ""
+        self.push_screen(TextEditScreen(
+            f"Chapter {item['scope'].get('chapter')}: direction for this passage", current, single_line=True,
+            help_text="How the line is performed, for example 'quietly, tired'. At most 240 characters. "
+                      "Enter or Ctrl+S saves to the book · Escape cancels. The words themselves are the book's "
+                      "and cannot be changed here; for a word said wrong, use pronounce.",
+            validate=check_direction), saved)
+
+    def _save_direction(self, item, review, passage, text):
+        from .renderer.passage_edit import save_direction
+        chapter = item["scope"].get("chapter")
+        try:
+            save_direction(review.book, passage["segment_ids"], text)
+        except (ValueError, OSError) as error:
+            message = f"The direction was not saved: {error}"
+            self.bus.log(message, scope=dict(item["scope"]), severity="error")
+            self.call_from_thread(self.notify, message, severity="error", timeout=12)
+            return
+        self.bus.log(f"Saved a new direction for the failed passage of chapter {chapter}: {text!r}",
+                     scope=dict(item["scope"]), severity="warning")
+        message = (f"Saved to the book. This run renders from the script it loaded, so chapter {chapter} uses the "
+                   "new direction when the book renders again: "
+                   + ("when this run ends (F ends the wait for retries), R renders it with fresh takes."
+                      if self.model.running else "R renders it now with fresh takes."))
+        self.call_from_thread(self.notify, message, timeout=15)
+
+    def _retry(self, item, *, fresh=False):
+        scope = item["scope"]
+        if (fresh and callable(getattr(item.get("repair"), "reset_for_fresh_takes", None))
+                and item.get("state", "failed") == "failed"):
+            try:
+                set_aside = item["repair"].reset_for_fresh_takes()
+            except (ValueError, OSError) as error:
+                self.notify(f"Could not set aside the passage's saved recovery ({error}); retrying the chapter "
+                            "as it is.", severity="warning", timeout=10)
+            else:
+                if set_aside:
+                    self.bus.log(f"Set aside the saved recovery of chapter {scope.get('chapter')}'s failed passage "
+                                 f"for fresh takes: {', '.join(set_aside)}", scope=dict(scope), severity="warning")
         if self.model.retry(item):
             if item["kind"] == "book":
-                self.notify(f"{item['scope'].get('book')} is back in the queue in its command-line place: it "
+                self.notify(f"{scope.get('book')} is back in the queue in its command-line place: it "
                             "goes ahead of books listed after it as soon as their current chapters are done.")
             else:
-                self.notify(f"Retrying chapter {item['scope'].get('chapter')} first; other chapters keep going.")
+                self.notify(f"Retrying chapter {scope.get('chapter')} first, with a new allowance of attempts; "
+                            "other chapters keep going.")
+        elif item.get("state") == "retrying":
+            self.notify(f"{'This book' if item['kind'] == 'book' else 'Chapter ' + str(scope.get('chapter'))} "
+                        "is already being rendered again.")
+        elif not self.model.running and self.resumable:
+            # The run has ended: resuming is how it renders again, so do that.
+            self.notify("The run had ended, so this renders the book again: failed passages get fresh takes and "
+                        "completed work is reused.")
+            self._resume(books=[scope["book"]] if scope.get("book") is not None else None)
+            return
         elif self.model.running:
-            self.notify("This failure cannot be retried in place; R resumes after the run.", severity="warning")
+            self.notify("The run is stopping after a run-wide error and takes no more retries; when it ends, R "
+                        "renders this again with fresh takes.", severity="warning", timeout=10)
         else:
-            self.notify("The run has ended; R resumes, reusing completed work.", severity="warning")
+            self.notify("Running this command again would redo finished work, so it is not rerun here; run it "
+                        "yourself if you mean to.", severity="warning", timeout=10)
         self.refresh_view(force=True)
 
     def action_retry(self):
@@ -738,7 +923,8 @@ class RunApp(CapturePrintMixin, App):
 
     def _open_rejection(self, item):
         if item.get("review") is None:
-            self.notify("This take cannot be reviewed here", severity="warning")
+            self.notify("This take was reported without its take folder, so it cannot be opened here; its "
+                        "passage's failure in Errors (5) lists every attempt.", severity="warning", timeout=10)
             return
         self._open_takes(item["scope"], item["review"], highlight=item["attempt"])
 

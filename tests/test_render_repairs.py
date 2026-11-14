@@ -567,7 +567,8 @@ class RepairScreenTests(unittest.IsolatedAsyncioTestCase):
             errors.focus()
             await pilot.press("enter")
             self.assertIsInstance(app.screen, FailureScreen)
-            self.assertEqual(app.screen.actions, ["retry", "takes", "resume_book", "close"])
+            # Resuming is offered after the run; while it runs, retrying is how the chapter renders again.
+            self.assertEqual(app.screen.actions, ["retry", "takes", "log", "close"])
             await pilot.press("down", "enter")  # "Listen to the takes"
             await self.wait_for(pilot, lambda: isinstance(app.screen, TakesScreen))
             await pilot.press("enter")

@@ -1,6 +1,7 @@
 """The run shell: events from render boards, the run model, and the headless Textual screen."""
 
 import asyncio
+from pathlib import Path
 import io
 import threading
 import time
@@ -479,8 +480,8 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             from epub_tts_narrator.run_shell_screens import FailureScreen, failure_text
             self.assertIsInstance(app.screen, FailureScreen)
             self.assertIn('"chunk_id": "c-7"', failure_text(app.screen.item, app.screen.hint)[1])
-            # After the run, the repair on offer is resuming the book; Escape just closes.
-            self.assertEqual(app.screen.actions, ["close"])
+            # After the run, the repairs on offer are rendering it again and reading its messages.
+            self.assertEqual(app.screen.actions, ["resume", "log", "close"])
             await pilot.press("escape")
             await pilot.press("R")
             await self.wait_for(pilot, lambda: not app.is_running)
@@ -626,6 +627,61 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             return 0 if outcome[-1] else 2
         return command
 
+    async def test_a_failed_passage_shows_its_full_error_every_attempt_and_fresh_retry(self):
+        long_error = "Speech verification failed after 3 attempts in this run. " + "x" * 300 + " END-OF-ERROR"
+        calls = []
+        retried = threading.Event()
+
+        class Review:
+            book = Path("/books/fixture")
+
+            def passage(self):
+                return {"text": "Nobody answered the door.", "kind": "speech", "segment_ids": ["s9"],
+                        "directions": ["softly"]}
+
+            def attempts(self):
+                return [{"attempt": number, "audio": False, "passed": False,
+                         "reasons": ["generation_or_verification_error"], "echo": False, "pending": False,
+                         "error": "EngineError: Drama 3 did not finish the text: 'silence'"} for number in (1, 2, 3)]
+
+            def takes(self):
+                return []
+
+            def reset_for_fresh_takes(self):
+                calls.append("reset")
+                return ["exhaustion-selection.fresh-retry-abc.json"]
+
+        def command():
+            with live_board(print) as notify:
+                report_chapter_failure(notify, {"number": 4, "error_type": "SpeechVerificationFailed",
+                                                "error": long_error, "request_hash": "h" * 64, "block": 7,
+                                                "speakers": ["Mara"], "segment_ids": ["s9"]},
+                                       retry=lambda: retried.set() or True, repair=Review())
+                if not retried.wait(10):
+                    return 1
+            return 0
+
+        from epub_tts_narrator.run_shell import _error_cell
+        self.assertTrue(_error_cell(long_error).endswith("… (Enter: full error)"))
+        app = self.make_app(command)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await self.wait_for(pilot, lambda: bool(self.model.current_failures()))
+            await pilot.press("5")
+            app.query_one("#errors").focus()
+            await pilot.press("enter")
+            from epub_tts_narrator.run_shell_screens import FailureScreen, failure_text
+            self.assertIsInstance(app.screen, FailureScreen)
+            text = failure_text(app.screen.item, app.screen.hint, app.screen.details)[1]
+            self.assertIn("END-OF-ERROR", text)  # never cut short
+            self.assertIn("Failed passage: Chapter 4, block 7, spoken by Mara", text)
+            self.assertIn("Text: Nobody answered the door.", text)
+            self.assertEqual(text.count("EngineError: Drama 3 did not finish the text: 'silence'"), 3)
+            self.assertIn("No attempt made audio", text)
+            self.assertEqual(app.screen.actions, ["retry_fresh", "retry", "edit_direction", "log", "close"])
+            await pilot.press("enter")  # the first repair: fresh takes for this passage
+            await self.wait_for(pilot, lambda: not self.model.running)
+        self.assertEqual((calls, retried.is_set(), app.result), (["reset"], True, 0))
+
     async def test_enter_on_a_failed_book_in_summary_shows_why_and_resumes_it(self):
         from epub_tts_narrator.renderer.progress import report_book_state
         retried = threading.Event()
@@ -659,8 +715,9 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(app.screen, FailureScreen)
             text = failure_text(app.screen.item, app.screen.hint, app.screen.details)[1]
             self.assertIn("Voices are missing: Mara", text)
-            self.assertIn("Chapter 3 (RenderBlocked): bad clip", text)
-            self.assertEqual(app.screen.actions, ["retry_book", "chapters", "close"])
+            self.assertIn("Chapter 3 (the chapter stopped outside any one passage's takes)\n  RenderBlocked: bad clip",
+                          text)
+            self.assertEqual(app.screen.actions, ["retry_book", "chapter:3", "chapters", "close"])
             await pilot.press("enter")  # the first repair: resume it now
             await self.wait_for(pilot, lambda: not self.model.running)
         self.assertTrue(retried.is_set())
@@ -882,8 +939,10 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([key.value for key in table.rows], ["fixture\x1f3"])
             self.assertIn("Showing 1 of 3", str(app.query_one("#chapter-breakdown").render()))
             await pilot.press("enter")
-            from epub_tts_narrator.tui_widgets import DetailScreen
-            self.assertIsInstance(app.screen, DetailScreen)
+            # A failed chapter opens its failure, with its full error and repairs.
+            from epub_tts_narrator.run_shell_screens import FailureScreen
+            self.assertIsInstance(app.screen, FailureScreen)
+            self.assertEqual(app.screen.item["scope"].get("chapter"), 3)
             await pilot.press("escape")
             release.set()
             # A failed chapter keeps the screen open after the command ends.
