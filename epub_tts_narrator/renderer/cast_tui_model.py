@@ -48,6 +48,12 @@ def label(row):
     return display(_label(row))
 
 
+def _scope_list(value):
+    if value is None:
+        return []
+    return list(value) if isinstance(value, (list, tuple, set, frozenset)) else [value]
+
+
 def canonical(row):
     return row.get("canonical_voice_id", row["voice_id"])
 
@@ -67,7 +73,8 @@ def voice_status(row, active=None):
         return "needs regeneration", note.strip()
     selected = row.get("selected")
     if selected is None:
-        return ("pending", f"{len(row['candidates'])} take(s), none accepted") if row.get("candidates") else ("missing", "")
+        return (("pending", f"{len(row['candidates'])} take(s), none accepted") if row.get("candidates")
+                else ("missing", "no voice yet; g generates one"))
     if row.get("derived_from"):
         base = row["derived_from"].get("voice_id")
         stale = "; its main voice changed since cloning" if row.get("clone_stale") else ""
@@ -270,7 +277,9 @@ class CastController:
                 raise ValueError("That take has no saved audio")
             return item["audio"]
         if row.get("selected") is None:
-            raise ValueError("No accepted take yet; generate one (g) or pick a take to play")
+            if not row.get("candidates"):
+                raise ValueError(f"{label(row)} has no voice yet: press g to generate it")
+            raise ValueError(f"{label(row)} has no accepted take yet: Tab to its takes to play or accept one")
         return row["selected"]["reference_audio"]
 
     def play(self, row, candidate_id=None):
@@ -505,6 +514,33 @@ class CastController:
 
     def retry(self, job_id):
         return self.jobs.retry(job_id)
+
+    def cancel(self, *, job_id=None, row=None):
+        """Cancel a queued job (``job_id``), or every queued job for ``row``'s voice; a running job finishes.
+
+        Returns the cancelled jobs; raises ``ValueError`` saying why when there is nothing queued to cancel.
+        """
+        jobs = {job.job_id: job for job in self.jobs.jobs()}
+        if job_id is not None:
+            job = jobs.get(job_id)
+            if job is None or job.state not in ("queued", RUNNING):
+                raise ValueError("That job is not waiting to run, so there is nothing to cancel")
+            if job.state == RUNNING:
+                raise ValueError("That job is already running; it finishes on its own")
+            cancelled = self.jobs.cancel_queued(lambda queued: queued.job_id == job_id)
+        elif row is not None:
+            voice = canonical(row)
+            cancelled = self.jobs.cancel_queued(lambda queued: voice in _scope_list(queued.scope.get("voice")))
+            if not cancelled:
+                running = any(job.state == RUNNING and voice in _scope_list(job.scope.get("voice"))
+                              for job in jobs.values())
+                raise ValueError(f"{label(row)} has a running job, which finishes on its own" if running
+                                 else f"{label(row)} has no queued job to cancel")
+        else:
+            raise ValueError("Highlight a queued job or a voice first")
+        for job in cancelled:
+            self.log(f"Cancelled: {job.label}", "warning")
+        return cancelled
 
     def failures(self):
         return self.jobs.failures()

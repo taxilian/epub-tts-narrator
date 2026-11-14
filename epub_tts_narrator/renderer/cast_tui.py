@@ -25,7 +25,7 @@ from .cast_tui_model import DESIGNERS, FIELDS, STATUS_FILTERS, CastController, c
 
 STATUS_STYLES = {
     "failed": "bold red", "generating": "bold cyan", "queued": "cyan", "needs regeneration": "yellow",
-    "missing": "yellow", "pending": "magenta", "accepted": "green", "shared": "blue",
+    "missing": "bold black on yellow", "pending": "magenta", "accepted": "green", "shared": "blue",
     "derived": "blue", "inherited": "dim green",
 }
 
@@ -108,6 +108,13 @@ REVISE_SCOPES = (("this", "This voice"), ("untaken", "Every voice without an acc
                  ("all", "Every voice"))
 
 
+def _described(error):
+    """An error as a person reads it: its message, or its kind when it has none."""
+    text = str(error).strip()
+    return text if isinstance(error, (ValueError, RuntimeError, OSError)) and text else (
+        f"{type(error).__name__}: {text}" if text else type(error).__name__)
+
+
 class CastApp(CapturePrintMixin, App):
     """The casting screen. ``controller`` owns all state; this class only displays it."""
 
@@ -156,6 +163,8 @@ class CastApp(CapturePrintMixin, App):
         Binding("M", "prepare_missing", "All missing", show=False,
                 tooltip="Prepare every voice without an accepted take"),
         Binding("R", "retry", "Retry", tooltip="Retry a failed job (highlighted in Jobs, else this voice's last)"),
+        Binding("X", "cancel_job", "Cancel",
+                tooltip="Cancel a queued job (highlighted in Jobs, else this voice's queued jobs)"),
     ]
 
     def __init__(self, controller: CastController, *, title="Cast", startup=True):
@@ -224,8 +233,8 @@ class CastApp(CapturePrintMixin, App):
     def _reload(self):
         try:
             self.controller.refresh()
-        except (ValueError, OSError) as error:
-            self.call_from_thread(self.controller.log, f"Could not reread the cast: {error}", "error")
+        except Exception as error:  # noqa: BLE001 - a worker's error would otherwise close the whole screen
+            self.call_from_thread(self.controller.log, f"Could not reread the cast: {_described(error)}", "error")
         self.call_from_thread(self.render_all)
 
     def _tick(self):
@@ -239,6 +248,8 @@ class CastApp(CapturePrintMixin, App):
         counts = controller.counts()
         flt = controller.filter
         summary = f"{controller.ready()}/{len(controller.rows)} ready"
+        if counts.get("missing"):
+            summary += f" · {counts['missing']} missing (f shows them)"
         if counts.get("failed"):
             summary += f" · {counts['failed']} failed"
         if flt.status or flt.text:
@@ -368,8 +379,10 @@ class CastApp(CapturePrintMixin, App):
     def _play(self, row, take):
         try:
             self.controller.play(row, take)
-        except (ValueError, RuntimeError, OSError) as error:
-            self.call_from_thread(self.controller.log, f"Could not play: {error}", "error")
+        except Exception as error:  # noqa: BLE001 - playback trouble is reported, never closes the screen
+            text = _described(error)
+            self.call_from_thread(self.controller.log, f"Could not play: {text}", "error")
+            self.call_from_thread(self.notify, text, severity="warning")
         self.call_from_thread(self.render_all)
 
     def action_stop(self):
@@ -553,6 +566,21 @@ class CastApp(CapturePrintMixin, App):
             self.notify("No failed job to retry", severity="warning")
             return
         self._attempt(lambda: self.controller.retry(target.job_id))
+
+    def action_cancel_job(self):
+        jobs = self.query_one("#jobs", JobsTable)
+        key = highlighted_key(jobs) if self.focused is jobs else None
+        if key is not None:
+            attempt = lambda: self.controller.cancel(job_id=int(key))  # noqa: E731
+        else:
+            row = self._require_row()
+            if row is None:
+                return
+            attempt = lambda: self.controller.cancel(row=row)  # noqa: E731
+        cancelled = self._attempt(attempt)
+        if cancelled:
+            self.notify(f"Cancelled {len(cancelled)} queued job(s)")
+            self.render_all()
 
     def action_quit_cast(self):
         running = self.controller.jobs.running()

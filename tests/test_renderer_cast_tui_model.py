@@ -89,7 +89,7 @@ class ControllerTests(unittest.TestCase):
         self.controller.play(self.row("v-ava"))
         self.controller.play(self.row("v-ava"), "c-ava-1")
         self.assertEqual(self.player.started, ["/voices/c-ava-2.wav", "/voices/c-ava-1.wav"])
-        with self.assertRaisesRegex(ValueError, "No accepted take"):
+        with self.assertRaisesRegex(ValueError, "has no voice yet: press g"):
             self.controller.play(self.row("v-ben"))
         self.controller.stop()
         self.assertIsNone(self.controller.playing)
@@ -128,6 +128,29 @@ class ControllerTests(unittest.TestCase):
         ])
         self.assertTrue(any(text.startswith("Done: Generate Ava with Gemini")
                             for _, _, text in self.controller.messages))
+
+    def test_a_queued_job_can_be_cancelled_by_job_or_by_voice_but_a_running_one_finishes(self):
+        import threading
+        gate = threading.Event()
+        self.session.regenerate = lambda voice_id, voice_designer=None: gate.wait(5)
+        running = self.controller.regenerate(self.row("v-ben"), "local")
+        queued = self.controller.regenerate(self.row("v-cole"), "local")
+        other = self.controller.regenerate(self.row("v-eli"), "local")
+        for _ in range(100):
+            if running.state == RUNNING:
+                break
+            threading.Event().wait(0.02)
+        self.assertEqual(self.controller.cancel(job_id=queued.job_id), [queued])
+        self.assertEqual(self.controller.cancel(row=self.row("v-eli")), [other])
+        with self.assertRaisesRegex(ValueError, "already running"):
+            self.controller.cancel(job_id=running.job_id)
+        with self.assertRaisesRegex(ValueError, "running job"):
+            self.controller.cancel(row=self.row("v-ben"))
+        gate.set()
+        self.settle()
+        self.assertEqual((queued.state, other.state, running.state), ("cancelled", "cancelled", "done"))
+        with self.assertRaisesRegex(ValueError, "no queued job"):
+            self.controller.cancel(row=self.row("v-cole"))
 
     def test_the_accent_cue_is_shown_offered_from_the_description_and_saved(self):
         ava = self.row("v-ava")

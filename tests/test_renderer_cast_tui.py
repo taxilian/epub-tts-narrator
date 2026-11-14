@@ -47,6 +47,39 @@ class CastAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("A calm voice for Ava.", detail)
             self.assertEqual(self.app.query_one("#takes", DataTable).row_count, 2)
 
+    async def test_playing_never_closes_the_screen_and_a_missing_voice_is_easy_to_spot(self):
+        def broken(path):
+            raise KeyError("reference_audio")  # any unexpected failure while starting playback
+        self.player.start = broken
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await self.settle(pilot)
+            self.assertIn("1 missing (f shows them)", self.app.sub_title)
+            status = self.app.query_one("#voices", DataTable).get_row("v-ben")[1]
+            self.assertIn("on yellow", str(status.style))
+            for voice_id in ("v-ben", "v-ava"):  # no voice at all, then an accepted take
+                await self.select(pilot, voice_id)
+                await pilot.press("p")
+                await pilot.pause(0.3)
+                self.assertTrue(self.app.is_running)
+            messages = [text for _, _, text in self.controller.messages]
+            self.assertTrue(any("Ben has no voice yet: press g" in text for text in messages))
+            self.assertTrue(any("KeyError" in text for text in messages))
+
+    async def test_x_cancels_this_voices_queued_job(self):
+        import threading
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        self.session.regenerate = lambda voice_id, voice_designer=None: gate.wait(5)
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await pilot.pause()
+            self.controller.regenerate(self.controller.row("v-ben"), "local")
+            queued = self.controller.regenerate(self.controller.row("v-cole"), "local")
+            await self.select(pilot, "v-cole")
+            await pilot.press("X")
+            await pilot.pause()
+            self.assertEqual(queued.state, "cancelled")
+            gate.set()
+
     async def test_filter_and_status_keys_narrow_the_list(self):
         async with self.app.run_test(size=(160, 45)) as pilot:
             await pilot.press("f")
