@@ -148,6 +148,21 @@ class FilteredFallbackTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertFalse((self.directory / "accepted.json").exists())
 
+    def test_a_filtered_take_is_validated_as_the_take_it_came_from(self):
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer.exhaustion_selection import validate_record
+        seen = []
+        record = {"request": {"kind": "speech"}, "audio_sha256": "b" * 64,
+                  "engine_metadata": {"synthesis_text": "x", "clip_repair": {"audio_sha256": "a" * 64},
+                                      "tone_filter": {"version": 1, "source_attempt": 4,
+                                                      "source_audio_sha256": "a" * 64}}}
+        with patch("epub_tts_narrator.renderer.clip_repair_contract.confirm_plan_metadata",
+                   side_effect=lambda request, metadata: seen.append(sorted(metadata))):
+            validate_record(record)  # the repair's proof matches the source audio, not the filtered audio
+        self.assertEqual(seen, [["clip_repair", "synthesis_text"]])
+        with self.assertRaisesRegex(ValueError, "unknown record"):
+            validate_record({**record, "engine_metadata": {"tone_filter": {"version": 2}}})
+
     def test_a_filtered_take_is_never_chapter_history(self):
         from epub_tts_narrator.renderer.continuity import _NOT_HISTORY
         from epub_tts_narrator.renderer.steady_tone import MARKER

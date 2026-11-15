@@ -108,6 +108,16 @@ def validate_selection(request, marker):
 
 def validate_record(record):
     metadata = record.get('engine_metadata', {})
+    if 'tone_filter' in metadata:
+        # A take with a steady tone filtered out (steady_tone.filtered_fallback):
+        # its generation proof is the take it was filtered from.
+        notice = metadata['tone_filter']
+        if not isinstance(notice, dict) or notice.get('version') != 1 or not isinstance(
+                notice.get('source_audio_sha256'), str):
+            raise ValueError('Saved tone filtering has an unknown record')
+        validate_record({**record, 'audio_sha256': notice['source_audio_sha256'],
+                         'engine_metadata': {key: value for key, value in metadata.items() if key != 'tone_filter'}})
+        return
     if 'manual_selection' in metadata:
         from .take_selection import validate_manual_selection
         validate_manual_selection(record)
