@@ -21,6 +21,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 import time
+import wave
 from pathlib import Path
 
 VERSION = 1
@@ -182,7 +183,8 @@ def retire_tonal(work, *, notify=None):
             continue
         try:
             measured = check(path.parent / record["audio_file"])
-        except (OSError, EOFError, ValueError):
+        except (OSError, EOFError, ValueError, wave.Error):
+            # Unreadable audio is the speech cache's to refuse ("audio changed").
             continue
         if measured is not None:
             retire_acceptance(path.parent, record, "steady-tone", {"reason": REASON, **measured})
