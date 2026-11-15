@@ -234,6 +234,8 @@ class ChapterContinuity:
                  # The line's role, for a history-echo retry's role tag.
                  "kind": segments[0].get("kind") if segments else None,
                  "position": position,
+                 # Chosen readings the line uses, for the "reading" recovery.
+                 "readings": readings,
                  # Simultaneous lanes overlap in time; none of them is the
                  # next turn of the chapter.
                  "history": "performer" not in request}
@@ -367,6 +369,10 @@ def compose(text, voices):
             mapping[index] = order.index(asset)
         return mapping
     takes = scope["takes"]
+    if recovery_mode() == "reading":
+        # Only the turns saying the line's chosen readings right (after a
+        # steady tone, which grows through history).
+        takes = [take for take in takes if set(take.get("readings", ())) & set(scope.get("readings", ()))]
     turn = _CONTINUATION.get()
     if turn is not None:
         # A completion's kept start takes the latest turn's place: Fish's

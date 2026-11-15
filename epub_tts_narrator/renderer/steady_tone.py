@@ -113,20 +113,29 @@ def check(path, *, exclude=()):
     return measured if found(measured) else None
 
 
-def tonal_attempts(directory, request_hash):
-    """Attempt numbers of this request's takes rejected for a steady tone (records only, no audio read)."""
+def history_mode(directory, request_hash):
+    """The history a request's next take hears after takes carrying the tone (``None``: ordinary).
+
+    The tone grows through chapter history (takes made without it measured
+    clean), so after one the next takes hear only the turn saying the line's
+    chosen readings right (``"reading"``: without it Drama 3 falls back to a
+    similar familiar word, Ce'Nedra → Sendaria), and no history at all once a
+    take made that way carried the tone too (``"none"``).
+    """
     from .common import read_json
-    found = []
+    mode = None
     for path in sorted(Path(directory).glob("attempt-*.json")):
         try:
             record = read_json(path)
         except (ValueError, OSError):
             continue
         report = record.get("report") if isinstance(record, dict) else None
-        if (isinstance(report, dict) and record.get("request_hash") == request_hash
+        if not (isinstance(report, dict) and record.get("request_hash") == request_hash
                 and REASON in (report.get("reasons") or [])):
-            found.append(record.get("attempt"))
-    return found
+            continue
+        recovery = (record.get("engine_metadata") or {}).get("history_recovery") or {}
+        mode = "none" if mode == "none" or recovery.get("requested") in ("reading", "none") else "reading"
+    return mode
 
 
 def describe(report):

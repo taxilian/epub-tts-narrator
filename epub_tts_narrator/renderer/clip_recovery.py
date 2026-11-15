@@ -144,7 +144,7 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
                 # Likewise after a take carrying a steady tone (it grows through history).
                 from .steady_tone import REASON as TONE
                 tonal = any(TONE in ((item['record'].get('report') or {}).get('reasons') or []) for item in candidates)
-                with history_recovery('none' if echoed or tonal else None):
+                with history_recovery('none' if echoed else 'reading' if tonal else None):
                     result = execute_plan(session, generate_plan_part, verifier, config,
                                           budget=budget, episode=episode, reserve=reserve, notify=notify)
                 if result is not None:

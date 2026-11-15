@@ -121,8 +121,53 @@ class NoHistoryAfterToneTests(unittest.TestCase):
             _, accepted = verified_take("Hello there.", generate, directory, {"fixture": "tone-history"},
                                         consensus.PrimaryVerifier("Hello there."), config(), purpose="speech",
                                         notify=lambda _: None)
-        self.assertEqual(modes, [None, "none"])
+        self.assertEqual(modes, [None, "reading"])
         self.assertEqual(accepted["attempt"], 2)
+
+    def test_a_tone_again_under_the_reading_turn_leaves_no_history(self):
+        from epub_tts_narrator.renderer.steady_tone import history_mode
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, directory)
+
+        def attempt(number, reasons, requested=None):
+            metadata = {"history_recovery": {"version": 1, "requested": requested}} if requested else {}
+            write_json(directory / f"attempt-{number:03d}.json", {
+                "request_hash": "h", "attempt": number, "engine_metadata": metadata,
+                "report": {"passed": False, "reasons": reasons}})
+        self.assertIsNone(history_mode(directory, "h"))
+        attempt(1, ["steady_tone"])
+        attempt(2, ["pronunciation_mismatch"], "reading")
+        self.assertEqual(history_mode(directory, "h"), "reading")
+        attempt(3, ["steady_tone"], "reading")
+        self.assertEqual(history_mode(directory, "h"), "none")
+        self.assertIsNone(history_mode(directory, "other"))
+
+    def test_the_reading_rung_keeps_only_turns_saying_the_line_s_readings(self):
+        from epub_tts_narrator.renderer import continuity
+        from epub_tts_narrator.renderer.history_echo import apply_recovery
+        voice = {"asset_hash": "n"}
+        chapter = type("Chapter", (), {"voices_by_asset": {"n": voice}})()
+        takes = [{"marker": {"speakers": ["n"], "text": "<|speaker:0|> first"}, "path": "a", "readings": frozenset()},
+                 {"marker": {"speakers": ["n"], "text": "<|speaker:0|> Ce'Nedra"}, "path": "b",
+                  "readings": frozenset({"ce'nedra"})}]
+        from unittest.mock import patch
+
+        def composed(mode, readings):
+            token = continuity._CURRENT.set({"chapter": chapter, "takes": takes, "readings": readings})
+            try:
+                with continuity.history_recovery(mode):
+                    return continuity.compose("<|speaker:0|> line", [voice])[1]
+            finally:
+                continuity._CURRENT.reset(token)
+        with patch("epub_tts_narrator.renderer.continuity_codes.load_codes", return_value={"codes": [[1]]}):
+            history = composed("reading", frozenset({"ce'nedra"}))
+            everything = composed(None, frozenset({"ce'nedra"}))
+            none = composed("reading", frozenset())
+        self.assertEqual([text for text, _ in history], ["<|speaker:0|> Ce'Nedra"])
+        self.assertEqual(len(everything), 2)
+        self.assertEqual(apply_recovery("reading", "t", history, (), kind=None)[0], "reading")
+        self.assertEqual(none, [])
+        self.assertEqual(apply_recovery("reading", "t", none, (), kind=None)[:3], ("none", "t", []))
 
 
 @unittest.skipUnless(importlib.util.find_spec("numpy"), "requires numpy (renderer environment)")

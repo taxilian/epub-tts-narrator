@@ -183,6 +183,10 @@ def role_tagged(text, kind):
 
 def apply_recovery(requested, text, history, layouts, *, kind):
     """``(applied, text, history, layout)`` for the requested rung or the first usable one after it."""
+    if requested == "reading":
+        # Chapter history was cut to the turns saying the line's chosen
+        # readings right (``continuity.compose``); with none, no history.
+        return ("reading", text, history, "directing") if history else ("none", text, [], "directing")
     if requested is None or not history:
         return None, text, history, "directing"
     if requested not in LADDER:
