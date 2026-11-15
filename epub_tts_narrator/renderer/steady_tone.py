@@ -113,6 +113,22 @@ def check(path, *, exclude=()):
     return measured if found(measured) else None
 
 
+def tonal_attempts(directory, request_hash):
+    """Attempt numbers of this request's takes rejected for a steady tone (records only, no audio read)."""
+    from .common import read_json
+    found = []
+    for path in sorted(Path(directory).glob("attempt-*.json")):
+        try:
+            record = read_json(path)
+        except (ValueError, OSError):
+            continue
+        report = record.get("report") if isinstance(record, dict) else None
+        if (isinstance(report, dict) and record.get("request_hash") == request_hash
+                and REASON in (report.get("reasons") or [])):
+            found.append(record.get("attempt"))
+    return found
+
+
 def describe(report):
     """``a steady 7.1 kHz tone`` for a report rejected for one, else ``""``."""
     measured = (report or {}).get(REASON)

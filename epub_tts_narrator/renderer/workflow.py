@@ -1019,6 +1019,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     from .continuity import history_recovery
                     from .history_echo import ladder_mode
                     echo_mode = ladder_mode(directory, request_hash, text) if purpose == "speech" else None
+                    if echo_mode is None and purpose == "speech":
+                        # A steady tone grows through chapter history (takes made
+                        # without it measured clean): after one, take no history.
+                        from .steady_tone import tonal_attempts
+                        if tonal_attempts(directory, request_hash):
+                            echo_mode = "none"
                     completing, completion_source = completion_source, None
                     with generation_activity(notify), history_recovery(echo_mode):
                         if direction_marker is not None:

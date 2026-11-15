@@ -98,6 +98,34 @@ class SteadyToneTests(unittest.TestCase):
 
 
 @unittest.skipUnless(importlib.util.find_spec("numpy"), "requires numpy (renderer environment)")
+class NoHistoryAfterToneTests(unittest.TestCase):
+    """After a take carrying a steady tone, the passage's next takes are made without chapter history."""
+
+    def test_the_take_after_a_tonal_one_hears_no_history(self):
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer.continuity import recovery_mode
+        from epub_tts_narrator.renderer.workflow import verified_take
+        import test_renderer_reference_consensus as consensus
+        from test_renderer_stall_recovery import config
+        directory = Path(tempfile.mkdtemp()) / "takes"
+        directory.mkdir()
+        self.addCleanup(__import__("shutil").rmtree, directory.parent)
+        modes = []
+
+        def generate(path, seed):
+            modes.append(recovery_mode())
+            write_speechlike(path, tone_hz=7100 if len(modes) == 1 else None)
+            return {"seed": seed}
+        with patch("epub_tts_narrator.renderer.workflow.normalize_clip",
+                   side_effect=lambda raw, wav, **kw: Path(wav).write_bytes(Path(raw).read_bytes())):
+            _, accepted = verified_take("Hello there.", generate, directory, {"fixture": "tone-history"},
+                                        consensus.PrimaryVerifier("Hello there."), config(), purpose="speech",
+                                        notify=lambda _: None)
+        self.assertEqual(modes, [None, "none"])
+        self.assertEqual(accepted["attempt"], 2)
+
+
+@unittest.skipUnless(importlib.util.find_spec("numpy"), "requires numpy (renderer environment)")
 class FilteredFallbackTests(unittest.TestCase):
     """When every take of a passage carries the tone, the faintest is filtered and used if its words verify."""
 
