@@ -404,8 +404,24 @@ def _resume_books(argv, books):
     return resume
 
 
+def _stack_dumps_on_signal():
+    """``kill -USR1 PID`` writes every thread's stack to a temporary file (names and lines only)."""
+    import faulthandler
+    import os
+    import signal
+    import tempfile
+    if not hasattr(signal, "SIGUSR1"):
+        return None
+    path = Path(tempfile.gettempdir()) / f"audiobook-render-{os.getpid()}-thread-stacks.txt"
+    stream = open(path, "a", encoding="utf-8")  # kept open: faulthandler writes to its descriptor
+    faulthandler.register(signal.SIGUSR1, file=stream, all_threads=True)
+    return path
+
+
 def main(argv=None, *, in_shell=False):
     args = parser().parse_args(argv)
+    if args.command == "render" and not in_shell:
+        _stack_dumps_on_signal()
     cast_bulk = args.command == "cast" and getattr(args, "action", None) in CAST_SHELL_ACTIONS
     if not in_shell and (args.command in SHELL_COMMANDS or cast_bulk):
         from epub_tts_narrator.tui_support import wants_tui
