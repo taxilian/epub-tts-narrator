@@ -555,6 +555,14 @@ def _generation_identity(request, voices_by_asset=None, *, engine_metadata=None)
     chunk = request.get("chunk")
     if not isinstance(chunk, Mapping):
         raise ValueError("Speech request is missing its chunk")
+    if isinstance(engine_metadata, Mapping) and "tone_filter" in engine_metadata:
+        # A take with a steady tone filtered out (steady_tone.filtered_fallback)
+        # was generated exactly as the take it was filtered from.
+        record = engine_metadata["tone_filter"]
+        if not isinstance(record, Mapping) or record.get("version") != 1 or type(record.get("source_attempt")) is not int:
+            raise ValueError("Saved tone filtering has an unknown record")
+        return generation_identity(request, voices_by_asset, engine_metadata={
+            key: value for key, value in engine_metadata.items() if key != "tone_filter"})
     if isinstance(engine_metadata, Mapping) and 'manual_selection' in engine_metadata:
         from .take_selection import selected_generation_identity
         return selected_generation_identity(request, voices_by_asset, engine_metadata)

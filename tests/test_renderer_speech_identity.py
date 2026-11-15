@@ -494,6 +494,15 @@ class CompletedTakeIdentityTests(unittest.TestCase):
         self.assertEqual(self.identity(request, [first, second], self.completed(text, start, tail)),
                          self.identity(request, [first, second]))
 
+    def test_a_take_with_its_tone_filtered_out_is_identified_as_the_take_it_came_from(self):
+        voice = reference()
+        request = speech_request(voice, "They rode on.")
+        plain = {"synthesis_text": "They rode on."}
+        filtered = {**plain, "tone_filter": {"version": 1, "source_attempt": 4, "notches_hz": [7050]}}
+        self.assertEqual(self.identity(request, [voice], filtered), self.identity(request, [voice], plain))
+        with self.assertRaisesRegex(ValueError, "unknown record"):
+            self.identity(request, [voice], {**plain, "tone_filter": {"version": 9}})
+
     def test_a_completion_of_another_passage_or_a_broken_join_is_refused(self):
         voice = reference()
         text = "They rode on. The night was cold."
