@@ -378,6 +378,8 @@ class RunModelTests(unittest.TestCase):
             self.assertIsNotNone(live["snapshot"])
         board.chapter_state("/q/b1", 2, "assembling")
         board.chapter_state("/q/b1", 2, "done")
+        # Done once its assembly is saved, and again when the run publishes it in order.
+        board.chapter_state("/q/b1", 2, "done")
         board.chapter_state("/q/b1", 1, "done", reused=True)
         board.chapter_failure({"number": 3, "error_type": "SpeechVerificationFailed", "error": "take 3 skipped words"},
                               book="b1", retry=lambda: True)

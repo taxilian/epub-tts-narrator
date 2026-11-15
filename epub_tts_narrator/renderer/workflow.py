@@ -3357,9 +3357,13 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                     # Legacy keeps exactly one outstanding assembly, in order.
                     finish_completed(final=True)
                 report_chapter_state(notify, book_key, chapter["number"], "assembling")
-                pending_assembly[chapter_index] = (
-                    assembly_executor.submit(compose, chapter, clips, context, chapter_acceptance),
-                    chapter_acceptance, chapter_label, chapter_started)
+                future = assembly_executor.submit(compose, chapter, clips, context, chapter_acceptance)
+                # Publication bookkeeping stays in manifest order (finish_completed),
+                # but a chapter is shown done as soon as its own assembly is saved.
+                future.add_done_callback(lambda done, number=chapter["number"]: (
+                    not done.cancelled() and done.exception() is None
+                    and report_chapter_state(notify, book_key, number, "done")))
+                pending_assembly[chapter_index] = (future, chapter_acceptance, chapter_label, chapter_started)
             else:
                 completed(chapter_index, composed, chapter_acceptance, chapter_label, chapter_started, reused=True)
 
