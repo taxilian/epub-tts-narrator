@@ -81,6 +81,12 @@ def _quoted(text):
     return "\u201c" + (text if len(text) <= 120 else text[:117] + "\u2026") + "\u201d"
 
 
+def _tone(report):
+    """``a steady 7.1 kHz tone (…)`` when a take was rejected for one, else ``""``."""
+    from .steady_tone import describe
+    return describe(report)
+
+
 def _misread(report):
     """``Ce'Nedra heard as sendera`` when a chosen pronunciation was heard rearranged, else ``""``."""
     from .name_shape import describe
@@ -134,6 +140,7 @@ class TakeReview:
                 "audio_path": str(row["audio_path"]), "learnable": self._learnable(report) is not None,
                 "verdict": marks.get(row["attempt"]), "finished_from": _finished_from(record),
                 "stopped": report.get("generation_stopped"), "misread": _misread(report),
+                "tone": _tone(report),
             })
         if used is not None and not any(row["accepted"] for row in rows):
             # The used take is not one of the listed attempts' audio (a repaired or

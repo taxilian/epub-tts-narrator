@@ -210,6 +210,9 @@ class TakesScreen(Dialog):
         self.query_one("#takes-heard", Static).update(
             Text("Heard: " + row["transcript"]) if row and row["transcript"] else "")
         differs = Text()
+        if row and row.get("tone") and not row["passed"]:
+            # Rejected before recognition: there is no transcript to compare.
+            differs.append(f"Rejected for {row['tone']} over the voice.\n", style="yellow")
         if row and row["transcript"] and not row["passed"]:
             if row.get("stopped") == "silence":
                 differs.append("The take went silent and stopped before the end.\n", style="yellow")

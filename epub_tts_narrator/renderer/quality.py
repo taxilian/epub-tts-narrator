@@ -1196,6 +1196,18 @@ def _checked_audio_report(path, expected_text: str, verifier,
     reasons.extend(acoustic)
     if reasons:
         return report
+    if purpose == "speech":
+        # A steady high-pitched tone over the voice (steady_tone): rejected
+        # before recognition, and so never heard by later takes as history.
+        try:
+            from .steady_tone import REASON as TONE, check as tone_check
+            tone = tone_check(path)
+        except ImportError:
+            tone = None
+        if tone is not None:
+            report["steady_tone"] = tone
+            reasons.append(TONE)
+            return report
     try:
         # This call deliberately has no access to expected_text or any prompt.
         transcribe = getattr(verifier, "transcribe_reference", None) if purpose == "reference" else None

@@ -3165,6 +3165,15 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         if misread:
             notify(f"Rendering {len(misread)} passage(s) again whose chosen pronunciation was heard "
                    "with its syllables rearranged.")
+        # Takes in use carrying a steady high-pitched tone (accepted before the
+        # check existed) are rendered again, so later takes stop hearing it.
+        from .steady_tone import retire_tonal
+        try:
+            tonal = retire_tonal(work, notify=notify)
+        except (ValueError, OSError) as exc:
+            raise RenderBlocked(f"Could not check the takes in use for a steady tone: {exc}") from exc
+        if tonal:
+            notify(f"Rendering {len(tonal)} passage(s) again whose take carries a steady high-pitched tone.")
         profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
         voice_lock = store.lock()
         store.persist_aliases()
