@@ -224,40 +224,49 @@ class SpeechCache:
         return saved
 
     def find(self, identity, *, request=None):
+        # The lock covers the shared index only. Reading records and hashing
+        # audio (a FLAC take is decoded first) happen outside it: every
+        # chapter of a book shares this cache, and hashing under the lock
+        # queued whole chapters behind one another's lookups for minutes.
+        key = digest(identity)
         with self.lock:
             self._load()
-            key = digest(identity)
             entry = self._current_entry(key)
-            if entry is not None:
-                saved = self._verified_entry(entry)
-                if saved is not None:
-                    self._publish(key, entry)
-                    return saved[1:]
-                self.entries.pop(key, None)
+            candidates = []
             if request is not None:
                 # Search only identical text/reference/settings candidates. The
                 # original engine retains revision evidence that canonical
                 # local identities may replace with checkpoint file hashes.
-                candidates = self.performances.get(self._performance_key(identity), ())
-                for candidate_key in sorted(candidates):
+                for candidate_key in sorted(self.performances.get(self._performance_key(identity), ())):
                     candidate = self._current_entry(candidate_key)
-                    if candidate is None:
-                        continue
-                    saved = self._verified_entry(candidate, verify_audio=False)
-                    if saved is None:
-                        continue
-                    record = saved[2]
-                    if generation_compatible(candidate["identity"], identity,
-                            saved_engine=record["request"]["engine"], current_engine=request["engine"],
-                            engine_metadata=record.get("engine_metadata")):
-                        saved = self._verified_entry(candidate)
-                        if saved is None:
-                            continue
-                        # Add a lookup alias, preserving the original request,
-                        # successful verification, and waveform byte-for-byte.
-                        self._publish(key, self._entry(identity, saved))
-                        return saved[1:]
-            return None
+                    if candidate is not None:
+                        candidates.append(candidate)
+        if entry is not None:
+            saved = self._verified_entry(entry)
+            with self.lock:
+                if saved is not None:
+                    self._publish(key, entry)
+                    return saved[1:]
+                if self.entries.get(key) is entry:
+                    self.entries.pop(key, None)
+        for candidate in candidates:
+            saved = self._verified_entry(candidate, verify_audio=False)
+            if saved is None:
+                continue
+            record = saved[2]
+            if generation_compatible(candidate["identity"], identity,
+                    saved_engine=record["request"]["engine"], current_engine=request["engine"],
+                    engine_metadata=record.get("engine_metadata")):
+                saved = self._verified_entry(candidate)
+                if saved is None:
+                    continue
+                # Add a lookup alias, preserving the original request,
+                # successful verification, and waveform byte-for-byte.
+                alias = self._entry(identity, saved)
+                with self.lock:
+                    self._publish(key, alias)
+                return saved[1:]
+        return None
 
     def find_earlier_history(self, identity, *, request, exclude=()):
         """This chunk's accepted take that heard a since-changed earlier take.
@@ -299,19 +308,20 @@ class SpeechCache:
                 shared = len(current & {take.get("audio_sha256")
                                         for take in entry["identity"]["continuity"]["takes"]})
                 ranked.append((-shared, entry["request_hash"], key, entry))
-            for _, _, _, entry in sorted(ranked, key=lambda item: item[:3]):
-                saved = self._verified_entry(entry)
-                if saved is not None:
-                    return saved[1:]
-            return None
+        # Audio is hashed outside the shared index lock (see find).
+        for _, _, _, entry in sorted(ranked, key=lambda item: item[:3]):
+            saved = self._verified_entry(entry)
+            if saved is not None:
+                return saved[1:]
+        return None
 
     def remember(self, identity, record):
+        if record.get("report", {}).get("passed") is not True:
+            raise ValueError("Only successful speech can enter the cache")
+        saved = self._accepted(record["request_hash"])
+        if saved is None or saved[2] != record or audio_hash(saved[1]) != record["audio_sha256"]:
+            raise ValueError("Speech cache publication requires unchanged verified audio")
         with self.lock:
-            if record.get("report", {}).get("passed") is not True:
-                raise ValueError("Only successful speech can enter the cache")
-            saved = self._accepted(record["request_hash"])
-            if saved is None or saved[2] != record or audio_hash(saved[1]) != record["audio_sha256"]:
-                raise ValueError("Speech cache publication requires unchanged verified audio")
             if identity != self.identity(record["request"], engine_metadata=record.get("engine_metadata")):
                 raise ValueError("Speech cache identity does not match the accepted performance")
             entry = self._entry(identity, saved)
@@ -329,15 +339,16 @@ class SpeechCache:
         """
         from .continuity import without_history
         identity = self.identity(request)
+        # Audio is hashed outside the shared index lock (see find).
+        saved = self._accepted(accepted.get("request_hash"))
+        if saved is None:
+            return False
+        path, audio, record = saved
+        if (record["audio_sha256"] != accepted.get("audio_sha256")
+                or audio_hash(audio) != record["audio_sha256"]):
+            raise ValueError("Cached chapter speech audio changed")
         with self.lock:
             self._load()
-            saved = self._accepted(accepted.get("request_hash"))
-            if saved is None:
-                return False
-            path, audio, record = saved
-            if (record["audio_sha256"] != accepted.get("audio_sha256")
-                    or audio_hash(audio) != record["audio_sha256"]):
-                raise ValueError("Cached chapter speech audio changed")
             entry = self._current_entry(digest(identity))
             if (entry is not None and entry["request_hash"] == record["request_hash"]
                     and entry["accepted_sha256"] == file_hash(path)):

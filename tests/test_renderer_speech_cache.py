@@ -251,6 +251,37 @@ class SpeechCacheTests(unittest.TestCase):
 
         self.assertEqual(second.find(self.identity), (audio, accepted))
 
+    def test_one_lookup_hashing_its_audio_never_holds_up_another(self):
+        import threading
+        from unittest.mock import patch
+        import epub_tts_narrator.renderer.speech_cache as speech_cache
+        audio, accepted = self.accepted()
+        self.cache.remember(self.identity, accepted)
+        other_request = deepcopy(self.request)
+        other_request["chunk"]["spoken_text"] = "A different line."
+        other_identity = self.cache.identity(other_request)
+        hashing, release = threading.Event(), threading.Event()
+        real_hash = speech_cache.audio_hash
+
+        def slow_hash(path):
+            if threading.current_thread().name == "slow-lookup":
+                hashing.set()
+                release.wait(10)
+            return real_hash(path)
+        results = {}
+        with patch.object(speech_cache, "audio_hash", side_effect=slow_hash):
+            slow = threading.Thread(target=lambda: results.update(slow=self.cache.find(self.identity)),
+                                    name="slow-lookup")
+            slow.start()
+            self.assertTrue(hashing.wait(10))
+            other = threading.Thread(target=lambda: results.update(other=self.cache.find(other_identity)))
+            other.start()
+            other.join(5)
+            self.assertFalse(other.is_alive(), "a lookup waited for another lookup's audio hashing")
+            release.set()
+            slow.join(10)
+        self.assertEqual(results, {"slow": (audio, accepted), "other": None})
+
     def test_switching_back_finds_an_older_model_when_alias_points_to_another_take(self):
         original = deepcopy(self.request)
         original["engine"]["cache_model_alias"] = "shared-model-family"
