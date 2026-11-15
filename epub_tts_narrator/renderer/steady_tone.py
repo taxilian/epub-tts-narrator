@@ -123,19 +123,24 @@ def history_mode(directory, request_hash):
     history). Without that turn Drama 3 says a similar familiar word instead
     (Ce'Nedra → Sendaria, every time on belgariad-5), so it is kept even when
     a take made with it carries the tone too: such takes are candidates for
-    ``filtered_fallback``.
+    ``filtered_fallback``. Once a take made with only that turn replayed it
+    (a history echo, ``report.history_echo``), the next takes hear no history
+    (``"none"``).
     """
     from .common import read_json
+    tonal = echoed = False
     for path in sorted(Path(directory).glob("attempt-*.json")):
         try:
             record = read_json(path)
         except (ValueError, OSError):
             continue
         report = record.get("report") if isinstance(record, dict) else None
-        if (isinstance(report, dict) and record.get("request_hash") == request_hash
-                and REASON in (report.get("reasons") or [])):
-            return "reading"
-    return None
+        if not isinstance(report, dict) or record.get("request_hash") != request_hash:
+            continue
+        tonal = tonal or REASON in (report.get("reasons") or [])
+        recovery = (record.get("engine_metadata") or {}).get("history_recovery") or {}
+        echoed = echoed or (recovery.get("applied") == "reading" and bool(report.get("history_echo")))
+    return ("none" if echoed else "reading") if tonal else None
 
 
 def describe(report):
