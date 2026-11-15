@@ -14,10 +14,25 @@ class ClipRecoveryUnavailable(RuntimeError):
     pass
 
 
+class ClipRepairRefused(RuntimeError):
+    """The provider refused this repair request itself (HTTP 400/413/422, context too long).
+
+    Not an outage: sending the same request again cannot succeed, so only this
+    passage's repair ends and its other recoveries go on.
+    """
+
+
+_REFUSED_STATUS = {400, 413, 422}
+
+
 def model_call(client, prompt, payload):
     try:
         return client.complete(prompt, deepcopy(payload))
-    except (ProviderError, OSError, RuntimeError, ValueError) as exc:
+    except ProviderError as exc:
+        if getattr(exc, "status_code", None) in _REFUSED_STATUS or getattr(exc, "code", None) == "context_length_exceeded":
+            raise ClipRepairRefused(f"The recovery model refused the repair request ({exc})") from exc
+        raise ClipRecoveryUnavailable('Clip recovery model unavailable; pending progress retained') from exc
+    except (OSError, RuntimeError, ValueError) as exc:
         raise ClipRecoveryUnavailable('Clip recovery model unavailable; pending progress retained') from exc
 
 
@@ -43,6 +58,11 @@ class ClipRepairState:
     def prepare(self, failures, remaining):
         if self.state['phase'] in {'rejected', 'evaluated', 'failed'}:
             return None
+        if self.state['audit'] is not None and not self.state.get('proposal_received'):
+            # Nothing was received for the saved request, so it is rebuilt from
+            # the current failures: a request saved before failure records were
+            # compacted (exhaustion_candidates) could be too large to ever send.
+            self.state['audit'] = None
         if self.state['audit'] is None:
             payload = {'mode': 'clip_repair', 'request': deepcopy(self.request),
                        'request_sha256': digest(self.request),
@@ -63,7 +83,12 @@ class ClipRepairState:
             self.save()
             return None
         if not self.state['proposal_received']:
-            audit['proposal'] = model_call(self.client, PLAN, audit['payload'])
+            try:
+                audit['proposal'] = model_call(self.client, PLAN, audit['payload'])
+            except ClipRepairRefused:
+                self.state.update(phase='failed', error_code='request_refused')
+                self.save()
+                return None
             self.state['proposal_received'] = True
             self.save()
         try:
@@ -116,11 +141,16 @@ class ClipRepairState:
             for future in as_completed(futures):
                 try:
                     future.result()
-                except ClipRecoveryUnavailable as exc:
+                except (ClipRecoveryUnavailable, ClipRepairRefused) as exc:
                     errors.append(exc)
         finally:
             if executor is not None:
                 executor.shutdown(wait=True)
+        if any(isinstance(error, ClipRepairRefused) for error in errors):
+            self.state.update(phase='failed', error_code='request_refused')
+            self.state.pop('pending_reviews', None)
+            self.save()
+            return None
         if errors:
             raise errors[0]
         try:

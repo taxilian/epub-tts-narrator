@@ -101,7 +101,8 @@ def validate_selection(request, marker):
     if (not isinstance(physical, dict) or not all(type(physical.get(key)) in (int, float) and math.isfinite(physical[key])
                 for key in ('duration_seconds', 'peak_dbfs', 'rms_dbfs'))
             or physical['duration_seconds'] <= 0
-            or candidate_summary(original, selected, physical) != matches[0]):
+            or matches[0] not in (candidate_summary(original, selected, physical),
+                                  candidate_summary(original, selected, physical, compact=False))):
         raise ValueError('Selected audio evidence changed')
     return selected
 

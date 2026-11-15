@@ -4,6 +4,7 @@ from difflib import SequenceMatcher
 import math
 from pathlib import Path
 import re
+from threading import Lock
 import sys
 import wave
 
@@ -62,7 +63,24 @@ def stylized_spelling_advisory(text):
                         'fluent collapsed form may be the intended vocal realization.'}
 
 
-def candidate_summary(request, record, physical):
+def _compact_inputs(value):
+    """A take's generation record with every nested review audit replaced by its digest.
+
+    A take made by a clip repair records that repair's audit, whose request
+    holds the earlier failed takes' own records, and so on: repeated repairs
+    of one passage nested into a multi-megabyte request no model accepts.
+    The digest keeps the record bound; the model never needed the audits.
+    """
+    if isinstance(value, dict):
+        return {key: ({'audit_sha256': digest(item)} if key == 'audit' and isinstance(item, dict)
+                      else _compact_inputs(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_compact_inputs(item) for item in value]
+    return deepcopy(value)
+
+
+def candidate_summary(request, record, physical, *, compact=True):
+    """A failed take as the chooser and repair planner see it (``compact=False``: the form saved before 2026-11-15)."""
     expected, heard = logical_text(request), record.get('report', {}).get('transcript') or ''
     expected_words, heard_words = re.findall(r'\w+', expected.lower()), re.findall(r'\w+', heard.lower())
     clusters = [{'kind': kind, 'expected': expected_words[a:b], 'heard': heard_words[c:d]}
@@ -73,7 +91,8 @@ def candidate_summary(request, record, physical):
             'attempt': record['attempt'], 'audio_sha256': record['audio_sha256'],
             'record_sha256': digest(record), 'request_sha256': record['request_hash'],
             'transcript': heard, 'original_report': deepcopy(record.get('report', {})),
-            'actual_inputs': deepcopy(record.get('engine_metadata', {})), 'physical': physical,
+            'actual_inputs': (_compact_inputs if compact else deepcopy)(record.get('engine_metadata', {})),
+            'physical': physical,
             'warnings': {'transcript_available': bool(heard), 'word_counts': [len(expected_words), len(heard_words)],
                          'rough_syllables': [len(re.findall(r'[aeiouy]+', text.lower())) for text in (expected, heard)],
                          'difference_clusters': clusters,
@@ -82,12 +101,56 @@ def candidate_summary(request, record, physical):
                                       for words in (expected_words, heard_words)]}}
 
 
+_SPANS = {}
+_SPANS_LOCK = Lock()
+
+
+def _span_key(request):
+    """Equal for two requests exactly when ``same_span`` holds."""
+    return digest({key: value for key, value in request.items() if key != 'recovery'})
+
+
+def _folder_spans(folder):
+    """The span keys of a take folder's attempt requests, reread only after the folder changed.
+
+    Every record write replaces its file, which changes the folder's
+    modification time, so a cached answer is current while that time is.
+    """
+    try:
+        stamp = folder.stat().st_mtime_ns
+    except OSError:
+        return frozenset()
+    with _SPANS_LOCK:
+        cached = _SPANS.get(str(folder))
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    spans = set()
+    for path in folder.glob('attempt-*.json'):
+        if not re.fullmatch(r'attempt-\d+\.json', path.name):
+            continue
+        try:
+            record = read_json(path)
+        except (ValueError, OSError):
+            continue
+        actual = record.get('request') if isinstance(record, dict) else None
+        if isinstance(actual, dict):
+            spans.add(_span_key(actual))
+    with _SPANS_LOCK:
+        _SPANS[str(folder)] = (stamp, frozenset(spans))
+    return frozenset(spans)
+
+
 def retained_candidates(directory, request):
     directory = Path(directory)
     folders = {directory}
-    # Sibling join directories belong only if their complete original request matches.
+    # Sibling join directories belong only if their complete original request
+    # matches. A book holds tens of thousands of take folders, so which request
+    # each holds is indexed once and refreshed per changed folder, instead of
+    # every record of the book being read for each passage's recovery.
     if directory.parent.name == 'clips':
-        folders.update(path.parent for path in directory.parent.glob('*/attempt-*.json'))
+        wanted = _span_key(request)
+        folders.update(folder for folder in directory.parent.iterdir()
+                       if folder.is_dir() and not folder.is_symlink() and wanted in _folder_spans(folder))
     candidates = []
     for folder in sorted(folders):
         if folder.is_symlink():

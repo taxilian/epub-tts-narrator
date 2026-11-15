@@ -42,6 +42,31 @@ class ExhaustionCandidatesTests(unittest.TestCase):
         self.assertFalse(found[1]['summary']['warnings']['transcript_available'])
         self.assertEqual(found[0]['summary']['warnings']['negation'], [['not'], []])
 
+    def test_a_take_made_by_a_repair_carries_its_audit_only_as_a_digest(self):
+        from epub_tts_narrator.renderer.exhaustion_candidates import candidate_summary
+        audit = {'payload': {'failures': [{'actual_inputs': {'clip_repair': {'audit': {'payload': 'x' * 10000}}}}]}}
+        record = {'request_hash': 'r', 'attempt': 1, 'audio_sha256': 'a', 'report': {},
+                  'engine_metadata': {'synthesis_text': 'Do not leave.', 'clip_repair': {'audit': audit, 'parts': [1]}}}
+        summary = candidate_summary(self.request, record, {'duration_seconds': 1.0})
+        self.assertEqual(summary['actual_inputs'], {'synthesis_text': 'Do not leave.',
+                                                    'clip_repair': {'audit': {'audit_sha256': digest(audit)}, 'parts': [1]}})
+        legacy = candidate_summary(self.request, record, {'duration_seconds': 1.0}, compact=False)
+        self.assertEqual(legacy['actual_inputs'], record['engine_metadata'])
+
+    def test_sibling_folders_are_found_and_a_changed_folder_is_reread(self):
+        clips = self.directory / 'clips'
+        own, sibling = clips / ('a' * 64), clips / ('b' * 64)
+        own.mkdir(parents=True)
+        sibling.mkdir()
+        self.directory = sibling
+        child = dict(self.request, recovery={'kind': 'join'})
+        self.candidate(1, request=child, transcript='Do not leave.')
+        self.directory = own
+        self.assertEqual([item['record']['attempt'] for item in retained_candidates(own, self.request)], [1])
+        self.directory = sibling
+        self.candidate(2, request=child, transcript='Do not leave.')
+        self.assertEqual([item['record']['attempt'] for item in retained_candidates(own, self.request)], [1, 2])
+
     def test_empty_silent_corrupt_and_nonfinite_audio_are_not_usable(self):
         for name, frames in [('empty', b''), ('silent', bytes(88200))]:
             path = self.directory / (name + '.wav')

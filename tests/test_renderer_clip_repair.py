@@ -90,6 +90,53 @@ class TerminalClipRepairResumeTests(unittest.TestCase):
                 self.assertEqual(len(self.calls), 1)
 
 
+class RefusedRepairRequestTests(unittest.TestCase):
+    """A repair request the provider refuses ends that repair; an outage still blocks."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        self.request = speech_request(reference('character'), 'Hello.')
+
+    def state(self, error):
+        class Client:
+            identity = {'model': 'offline'}
+            calls = []
+
+            def complete(self, prompt, payload):
+                self.calls.append(payload)
+                raise error
+        return ClipRepairState(self.directory, self.request, Client())
+
+    def test_a_request_too_large_for_the_model_fails_only_this_repair(self):
+        from epub_tts_narrator.provider import ProviderError
+        state = self.state(ProviderError('too long', status_code=400, code='context_length_exceeded'))
+        self.assertIsNone(state.prepare([{'candidate_id': 'c'}], 4))
+        saved = read_json(self.directory / 'clip-repair.json')
+        self.assertEqual((saved['phase'], saved['error_code']), ('failed', 'request_refused'))
+
+    def test_an_outage_still_keeps_the_repair_pending(self):
+        from epub_tts_narrator.provider import ProviderError
+        from epub_tts_narrator.renderer.clip_repair_state import ClipRecoveryUnavailable
+        state = self.state(ProviderError('busy', status_code=503, retryable=True))
+        with self.assertRaises(ClipRecoveryUnavailable):
+            state.prepare([{'candidate_id': 'c'}], 4)
+        self.assertEqual(read_json(self.directory / 'clip-repair.json')['phase'], 'pending')
+
+    def test_a_request_never_answered_is_rebuilt_from_the_current_failures(self):
+        from epub_tts_narrator.provider import ProviderError
+        from epub_tts_narrator.renderer.clip_repair_state import ClipRecoveryUnavailable
+        state = self.state(ProviderError('busy', status_code=503, retryable=True))
+        with self.assertRaises(ClipRecoveryUnavailable):
+            state.prepare([{'candidate_id': 'old', 'actual_inputs': 'x' * 1000}], 4)
+        again = self.state(ProviderError('busy', status_code=503, retryable=True))
+        with self.assertRaises(ClipRecoveryUnavailable):
+            again.prepare([{'candidate_id': 'new'}], 3)
+        self.assertEqual(again.client.calls[-1]['failures'], [{'candidate_id': 'new'}])
+        self.assertEqual(again.client.calls[-1]['remaining_starts'], 3)
+
+
 @unittest.skipUnless(FFMPEG and FFPROBE, 'FFmpeg and ffprobe required')
 class BroadRepairTests(unittest.TestCase):
     setUpFixture = fixtures.DirectionRepairTests.setUp
