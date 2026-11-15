@@ -124,7 +124,7 @@ class NoHistoryAfterToneTests(unittest.TestCase):
         self.assertEqual(modes, [None, "reading"])
         self.assertEqual(accepted["attempt"], 2)
 
-    def test_a_tone_again_under_the_reading_turn_leaves_no_history(self):
+    def test_a_tone_again_under_the_reading_turn_keeps_the_reading_turn(self):
         from epub_tts_narrator.renderer.steady_tone import history_mode
         directory = Path(tempfile.mkdtemp())
         self.addCleanup(__import__("shutil").rmtree, directory)
@@ -139,7 +139,7 @@ class NoHistoryAfterToneTests(unittest.TestCase):
         attempt(2, ["pronunciation_mismatch"], "reading")
         self.assertEqual(history_mode(directory, "h"), "reading")
         attempt(3, ["steady_tone"], "reading")
-        self.assertEqual(history_mode(directory, "h"), "none")
+        self.assertEqual(history_mode(directory, "h"), "reading")
         self.assertIsNone(history_mode(directory, "other"))
 
     def test_the_reading_rung_keeps_only_turns_saying_the_line_s_readings(self):
@@ -211,6 +211,25 @@ class FilteredFallbackTests(unittest.TestCase):
         self.assertEqual(read_json(self.directory / "accepted.json")["audio_file"], path.name)
         self.assertTrue((self.directory / "attempt-002-fixture-take.wav").exists())  # the original is kept
         self.assertTrue(any("filtered out" in line for line in said))
+
+    def test_when_the_clean_takes_all_misread_a_name_a_tonal_take_is_filtered_and_heard(self):
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer import clip_recovery
+        import test_renderer_reference_consensus as consensus
+        self.take(1, 0.02)
+        misread = ValueError("Every usable retained take misread a name whose pronunciation you chose (x)")
+        with patch.object(clip_recovery, "select_retained", side_effect=misread):
+            path, record = clip_recovery.select_or_filter(
+                self.directory, self.request, None, {}, "Hello there.",
+                consensus.PrimaryVerifier("Hello there."), self.config, notify=lambda _: None)
+        self.assertTrue(record["report"]["passed"])
+        self.assertTrue(path.name.endswith("-tone-filtered.wav"))
+        silent = ValueError("Every retained take went silent before finishing its text")
+        with patch.object(clip_recovery, "select_retained", side_effect=silent), \
+                self.assertRaisesRegex(ValueError, "went silent"):
+            clip_recovery.select_or_filter(self.directory, self.request, None, {}, "Hello there.",
+                                           consensus.PrimaryVerifier("Hello there."), self.config,
+                                           notify=lambda _: None)
 
     def test_a_filtered_take_whose_words_fail_is_not_used(self):
         from epub_tts_narrator.renderer.steady_tone import filtered_fallback

@@ -114,28 +114,27 @@ def check(path, *, exclude=()):
 
 
 def history_mode(directory, request_hash):
-    """The history a request's next take hears after takes carrying the tone (``None``: ordinary).
+    """The history a request's next take hears after a take carrying the tone (``None``: ordinary).
 
     The tone grows through chapter history (takes made without it measured
-    clean), so after one the next takes hear only the turn saying the line's
-    chosen readings right (``"reading"``: without it Drama 3 falls back to a
-    similar familiar word, Ce'Nedra → Sendaria), and no history at all once a
-    take made that way carried the tone too (``"none"``).
+    clean), so after one the next takes hear only the turns saying the line's
+    chosen readings right (``"reading"``; a line without such turns hears no
+    history). Without that turn Drama 3 says a similar familiar word instead
+    (Ce'Nedra → Sendaria, every time on belgariad-5), so it is kept even when
+    a take made with it carries the tone too: such takes are candidates for
+    ``filtered_fallback``.
     """
     from .common import read_json
-    mode = None
     for path in sorted(Path(directory).glob("attempt-*.json")):
         try:
             record = read_json(path)
         except (ValueError, OSError):
             continue
         report = record.get("report") if isinstance(record, dict) else None
-        if not (isinstance(report, dict) and record.get("request_hash") == request_hash
+        if (isinstance(report, dict) and record.get("request_hash") == request_hash
                 and REASON in (report.get("reasons") or [])):
-            continue
-        recovery = (record.get("engine_metadata") or {}).get("history_recovery") or {}
-        mode = "none" if mode == "none" or recovery.get("requested") in ("reading", "none") else "reading"
-    return mode
+            return "reading"
+    return None
 
 
 def describe(report):

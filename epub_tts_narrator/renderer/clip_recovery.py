@@ -151,16 +151,27 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
                     return result
         notify('  Selecting the best physically usable full-clip take under the best-effort exhaustion policy.')
         failure_context = failure_report if failure_report is not None else _saved_failure_report(directory, request)
-        try:
-            return select_retained(directory, request, client, failure_report=failure_context)
-        except ValueError as exc:
-            if 'steady high-pitched tone' not in str(exc):
-                raise
-            # Every take carried the tone: the faintest, filtered, if its words verify.
-            from .steady_tone import filtered_fallback
-            result = filtered_fallback(directory, request, text, verifier, config, notify=notify)
-            if result is None:
-                raise
-            return result
+        return select_or_filter(directory, request, client, failure_context, text, verifier, config,
+                                notify=notify)
     except ClipRecoveryUnavailable as exc:
         raise VerificationUnavailable(str(exc)) from exc
+
+
+def select_or_filter(directory, request, client, failure_context, text, verifier, config, *, notify):
+    """The exhaustion chooser's take, else the faintest tonal take filtered when its words verify.
+
+    Filtering is tried when every usable take carried the tone, or the takes
+    without it all misread a chosen name. Tonal takes were never heard (the
+    tone is rejected before recognition), so they may say the name right.
+    """
+    try:
+        return select_retained(directory, request, client, failure_report=failure_context)
+    except ValueError as exc:
+        if ('steady high-pitched tone' not in str(exc)
+                and 'misread a name whose pronunciation you chose' not in str(exc)):
+            raise
+        from .steady_tone import filtered_fallback
+        result = filtered_fallback(directory, request, text, verifier, config, notify=notify)
+        if result is None:
+            raise
+        return result
