@@ -206,6 +206,20 @@ class ExhaustionCandidateTests(unittest.TestCase):
         self.assertEqual([row["attempt"] for row in client.calls[0]["candidates"]], [2])
         self.assertEqual(chosen["attempt"], 2)
 
+    def test_a_misread_take_whose_report_never_ran_the_name_check_is_not_offered_either(self):
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer.exhaustion_selection import select_retained
+        from test_renderer_recovery_boundaries import FormatClient, valid_choice
+        self.candidate(1, " Sol nodded.")  # verified where the check was skipped: text_mismatch only
+        self.candidate(2, " Sal nodded again.")
+        client = FormatClient([valid_choice])
+        rearranged = lambda expected, transcript, performance: (
+            [{"text": "Sal", "heard": "sol"}] if "Sol" in (transcript or "") else [])
+        with patch("epub_tts_narrator.renderer.name_shape.check", side_effect=rearranged):
+            _, chosen = select_retained(self.directory, self.request, client)
+        self.assertEqual([row["attempt"] for row in client.calls[0]["candidates"]], [2])
+        self.assertEqual(chosen["attempt"], 2)
+
     def test_a_take_carrying_a_steady_tone_is_never_offered(self):
         from epub_tts_narrator.renderer.exhaustion_selection import select_retained
         from test_renderer_recovery_boundaries import FormatClient, valid_choice

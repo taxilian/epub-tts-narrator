@@ -188,9 +188,11 @@ def select_retained(directory, request, client, *, failure_report=None):
                or 'completion' in (item['record'].get('engine_metadata') or {})}
     # A take that misread a name whose pronunciation a person chose is never
     # published, however good the rest of it is (``name_shape``).
-    from .name_shape import REASON as MISREAD, describe
-    misread = {item['summary']['candidate_id']: describe(item['record'].get('report') or {}) for item in retained
-               if MISREAD in ((item['record'].get('report') or {}).get('reasons') or [])}
+    # Judged again from each take's transcript: a take verified where the
+    # check was once skipped carries no rejection reason (name_shape.misread).
+    from .name_shape import misread as misread_words
+    misread = {item['summary']['candidate_id']: words for item in retained
+               if (words := misread_words(item['record']))}
     # Nor is a take carrying a steady high-pitched tone (steady_tone).
     from .steady_tone import REASON as TONE
     tonal = {item['summary']['candidate_id'] for item in retained

@@ -222,6 +222,31 @@ def describe(report):
     return "; ".join(f"{item['text']} heard as {item['heard']}" for item in words)
 
 
+def misread(record):
+    """``Ce'Nedra heard as Sendera`` when a take misread a chosen reading, else ``""``.
+
+    Judged from its saved transcript as well as its report: a take verified
+    by a path that once skipped this check (clip repair before 2026-11-15)
+    carries no rejection reason, yet must never be published either.
+    """
+    report = record.get("report") if isinstance(record, dict) else None
+    if not isinstance(report, dict):
+        return ""
+    if REASON in (report.get("reasons") or []):
+        return describe(report) or "a chosen pronunciation heard rearranged"
+    request = record.get("request")
+    if not isinstance(request, dict):
+        return ""
+    try:
+        from .performance_runtime import verification_options
+        performance = verification_options(request).get("performance")
+    except (ValueError, KeyError, TypeError):
+        return ""
+    found = check(report.get("expected_text") or "", report.get("verified_transcript") or report.get("transcript"),
+                  performance)
+    return "; ".join(f"{item['text']} heard as {item['heard']}" for item in found or [])
+
+
 def retire_misread(work):
     """Retire every take in use whose chosen reading was heard rearranged; their take folders.
 
