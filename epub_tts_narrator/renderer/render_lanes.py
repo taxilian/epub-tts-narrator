@@ -21,7 +21,9 @@ Public API for scheduling integration:
   ``contextvars.copy_context()`` at submit time, so scoped stop conditions
   (owner loss, session epochs) travel with the job. Pending work is bounded:
   beyond ``max_pending`` submissions raise ``LaneFull`` and the caller owns
-  backpressure. Jobs are considered in global submission order.
+  backpressure. Jobs are considered by ``RANK`` (the submitting
+  transaction's: a retried chapter, then an earlier queued book, first),
+  each rank in global submission order.
 * ``submit(..., reserve=callable)`` gates dequeue on an external resource:
   the lane calls ``reserve()`` under its own lock in submission order;
   ``None`` leaves that job queued while a later job with an available
@@ -50,7 +52,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import Future
-from contextvars import copy_context
+from contextvars import ContextVar, copy_context
 from threading import Condition, Thread, get_ident
 
 from .interrupts import stop_if_owner_requested, stop_if_requested
@@ -61,11 +63,19 @@ class LaneFull(RuntimeError):
     """The lane's bounded pending queue is full; the caller owns backpressure."""
 
 
+# The dispatch rank of the logical transaction submitting work (set by
+# ``render_pipeline.LogicalClipScheduler``): a retried chapter -1, then a
+# render queue's book order. A lane starts the lowest-ranked waiting job
+# first; equal ranks keep submission order.
+RANK = ContextVar("render_dispatch_rank", default=0)
+
+
 class _Job:
     __slots__ = ("context", "function", "args", "kwargs", "future", "operation",
-                 "reserve", "release")
+                 "reserve", "release", "rank")
 
     def __init__(self, context, function, args, kwargs, future, operation, reserve=None):
+        self.rank = context.get(RANK, 0)
         self.reserve = reserve
         self.release = None
         self.context = context
@@ -199,8 +209,9 @@ class ResourceLane:
             job.operation.cancel()
 
     def _take(self):
-        # The lane condition is held: consider jobs in global submission order.
-        for job in self._jobs:
+        # The lane condition is held: consider jobs by rank (an earlier book's
+        # first), each rank in global submission order (a stable sort).
+        for job in sorted(self._jobs, key=lambda queued: queued.rank):
             if job.reserve is not None and (not self._closed or self._drain) and not job.future.cancelled():
                 release = job.reserve()
                 if release is None:

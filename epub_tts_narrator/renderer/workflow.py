@@ -3229,6 +3229,11 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         # remote alike, so duplicate work coordinates instead of racing.
         take_locks, take_locks_guard = {}, Lock()
         run_key = digest(plan)[:12]
+        rank_group = getattr(scheduler, "set_group_rank", None)
+        if callable(rank_group):
+            # A render queue's earlier book takes the workers first, block by
+            # block, not only when its chapters start.
+            rank_group(run_key, queue_position)
         if config.get("_link_checkpoint_records") is not None:
             _link_completed_chapters(work, config["_link_checkpoint_records"], notify=notify)
 

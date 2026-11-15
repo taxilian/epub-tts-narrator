@@ -125,6 +125,29 @@ class FifoTests(SchedulerTestCase):
             future.result(10)
         self.assertEqual(self.starts.order[-2:], ["3-a", "r-c"])
 
+    def test_an_earlier_queued_book_starts_first_and_each_owner_keeps_its_order(self):
+        scheduler = self.start_scheduler(1, 2, pending_limit=8)
+        scheduler.set_group_rank("book-5", 0)
+        scheduler.set_group_rank("book-4", 1)
+        gate = Event()
+        self.addCleanup(gate.set)
+        priming = self.submit(("book-4", 1), "4-prime", gate=gate)
+        self.starts.expect("4-prime")
+        later = [self.submit(("book-4", 2), "4-a"), self.submit(("book-4", 2), "4-b"),
+                 self.submit(("book-5", 39), "5-a"), self.submit(("book-5", 39), "5-b")]
+        gate.set()
+        for future in (priming, *later):
+            future.result(10)
+        self.assertEqual(self.starts.order, ["4-prime", "5-a", "5-b", "4-a", "4-b"])
+
+    def test_a_transaction_s_rank_reaches_the_lanes_it_submits_to(self):
+        from epub_tts_narrator.renderer.render_lanes import RANK
+        scheduler = self.start_scheduler(1, 2)
+        scheduler.set_group_rank("book-2", 3)
+        self.assertEqual(scheduler.submit(("book-2", 1), RANK.get).result(10), 3)
+        scheduler.set_priority(("book-2", 1))
+        self.assertEqual(scheduler.submit(("book-2", 1), RANK.get).result(10), -1)
+
     def test_a_retried_owner_also_waits_ahead_of_blocked_submitters(self):
         scheduler = self.start_scheduler(1, 2, pending_limit=1)
         gate = Event()

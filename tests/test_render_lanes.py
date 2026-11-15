@@ -172,6 +172,25 @@ class ResourceLaneContractTests(LaneTestCase):
             ResourceLane(name="bad", workers=1, stage="synthesis", max_pending=0)
 
 
+class LaneRankTests(LaneTestCase):
+    def test_a_lower_ranked_job_starts_first_and_equal_ranks_keep_their_order(self):
+        from epub_tts_narrator.renderer.render_lanes import RANK
+        lane = self.make_lane(name="ranked", workers=1, stage="synthesis", max_pending=8)
+        blocker, order = Blocker(), []
+        held = lane.submit(blocker)
+        self.assertTrue(blocker.entered.wait(WORKER_WAIT))
+
+        def submit_ranked(rank, label):
+            context = contextvars.copy_context()
+            return context.run(lambda: (RANK.set(rank), lane.submit(Recorder(label, order)))[1])
+        futures = [submit_ranked(1, "later-book-a"), submit_ranked(1, "later-book-b"),
+                   submit_ranked(0, "first-book"), submit_ranked(-1, "retry")]
+        blocker.release.set()
+        for future in (held, *futures):
+            future.result(WORKER_WAIT)
+        self.assertEqual(order, ["retry", "first-book", "later-book-a", "later-book-b"])
+
+
 class LaneCancellationTests(LaneTestCase):
     def test_cancelled_queued_operations_never_execute_and_release_the_queued_gauge(self):
         lane = self.make_lane(name="cancel", workers=1, stage="synthesis",

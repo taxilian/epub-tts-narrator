@@ -1,9 +1,10 @@
 """Shared FIFO logical-clip scheduling for pooled rendering.
 
 One bounded global executor runs logical clip transactions across all
-chapter coordinators in submission order. Owner metadata remains only for
-cancellation and retirement; it never changes dispatch order. Pending
-submissions also wait in FIFO order for capacity.
+chapter coordinators in submission order, except that a retried chapter's
+transactions go first and, in a render queue, an earlier book's go before a
+later book's (``set_group_rank``); each owner's transactions always start in
+its own order. Pending submissions wait for capacity in the same order.
 
 Chapter coordinators never run on this executor: it executes only
 functions submitted through :meth:`LogicalClipScheduler.submit`, and
@@ -24,6 +25,8 @@ touches engine/verifier identity, prompts, or acceptance policy.
 from __future__ import annotations
 
 from collections import deque
+from heapq import heappop, heappush
+from itertools import count
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextvars import copy_context
 from threading import Condition, local
@@ -44,13 +47,18 @@ class AdmissionClosed(RuntimeError):
     """The owner's chapter admission closed after a terminal transaction."""
 
 
-def _checked(function, args, kwargs):
+def _checked(function, args, kwargs, rank=0):
+    from .render_lanes import RANK
+    RANK.set(rank)  # the stage lanes this transaction submits to start it by rank
     stop_if_requested()
     return function(*args, **kwargs)
 
 
-class _PriorityMarker:
-    priority = True
+class _Waiter:
+    """A blocked submitter's place: lower ``rank`` waits ahead (retries -1, then book order)."""
+
+    def __init__(self, rank):
+        self.rank = rank
 
 
 class LogicalClipScheduler:
@@ -68,11 +76,14 @@ class LogicalClipScheduler:
         self._executor = ThreadPoolExecutor(max_workers=global_limit, thread_name_prefix=name)
         self._cond = Condition()
         self._owners = {}
-        self._order = deque()
-        # Owners a person asked to render again go to the front: their
-        # transactions (still in their own order) dispatch before any other.
+        # Waiting transactions as a heap of (rank, submission number, owner,
+        # future): owners a person asked to render again first (rank -1),
+        # then by their group's rank (a render queue's book order, earliest
+        # first), each in submission order.
+        self._order = []
+        self._submitted = count()
         self._priority_owners = set()
-        self._priority_order = deque()
+        self._group_ranks = {}
         self._submit_waiters = deque()
         self._inflight = 0
         self._pending = 0
@@ -99,21 +110,33 @@ class LogicalClipScheduler:
                 self._priority_owners.discard(owner)
             self._cond.notify_all()
 
+    def set_group_rank(self, group, rank):
+        """Rank the owners ``(group, …)`` (a render queue's book order): lower dispatches first."""
+        if type(rank) is not int or rank < 0:
+            raise ValueError("rank must be a nonnegative integer")
+        with self._cond:
+            self._group_ranks[group] = rank
+            self._cond.notify_all()
+
+    def _rank(self, owner):
+        if owner in self._priority_owners:
+            return -1
+        group = owner[0] if isinstance(owner, tuple) and owner else None
+        return self._group_ranks.get(group, 0)
+
     def submit(self, owner, function, *args, **kwargs):
         """Queue one logical transaction for ``owner``; blocks while full."""
         if not callable(function):
             raise ValueError("function must be callable")
         context = copy_context()
         future = Future()
-        marker = object()
         with self._cond:
-            if owner in self._priority_owners:
-                # A retried chapter also waits ahead of other submitters.
-                position = sum(1 for waiter in self._submit_waiters if getattr(waiter, "priority", False))
-                marker = _PriorityMarker()
-                self._submit_waiters.insert(position, marker)
-            else:
-                self._submit_waiters.append(marker)
+            rank = self._rank(owner)
+            # A retried chapter, then an earlier book, also waits ahead of
+            # other submitters; equal ranks keep their arrival order.
+            marker = _Waiter(rank)
+            position = sum(1 for waiter in self._submit_waiters if waiter.rank <= rank)
+            self._submit_waiters.insert(position, marker)
             try:
                 while True:
                     if self._closed:
@@ -134,7 +157,7 @@ class LogicalClipScheduler:
                     entry = {"queue": deque(), "active": 0}
                     self._owners[owner] = entry
                 entry["queue"].append((future, function, args, kwargs, context))
-                (self._priority_order if owner in self._priority_owners else self._order).append((owner, future))
+                heappush(self._order, (rank, next(self._submitted), owner, future))
                 self._pending += 1
                 self._pump()
             finally:
@@ -201,20 +224,26 @@ class LogicalClipScheduler:
                     self._pending -= 1
             self._owners.clear()
             self._order.clear()
-            self._priority_order.clear()
             self._cond.notify_all()
         for future in popped:
             future.cancel()
         self._executor.shutdown(wait=wait)
 
     def _pump(self):
-        # Caller holds self._cond: dispatch globally in submission order,
-        # prioritized (retried) owners first.
-        while self._inflight < self._limit and (self._priority_order or self._order):
-            owner, future = (self._priority_order or self._order).popleft()
+        # Caller holds self._cond: dispatch by rank, then submission order.
+        # Each owner's own transactions always start in its order: a heap
+        # item dispatches its owner's oldest queued transaction, and an item
+        # whose transaction already started (or was cancelled) is skipped.
+        while self._inflight < self._limit and self._order:
+            item = heappop(self._order)
+            owner, future = item[2], item[3]
             entry = self._owners.get(owner)
-            if entry is None or not entry["queue"] or entry["queue"][0][0] is not future:
+            if entry is None or not any(queued[0] is future for queued in entry["queue"]):
                 continue
+            if entry["queue"][0][0] is not future:
+                # Ranked ahead of its owner's older transaction (a retry
+                # prioritized mid-chapter): start that one; this one waits.
+                heappush(self._order, item)
             self._dispatch(owner, entry)
 
     def _close_owner_admission_locked(self, entry):
@@ -227,6 +256,7 @@ class LogicalClipScheduler:
 
     def _dispatch(self, owner, entry):
         future, function, args, kwargs, context = entry["queue"].popleft()
+        rank = self._rank(owner)
         self._pending -= 1
         if not future.set_running_or_notify_cancel():
             return
@@ -237,7 +267,7 @@ class LogicalClipScheduler:
             previous = getattr(self._threads, "logical", False)
             self._threads.logical = True
             try:
-                result = context.run(_checked, function, args, kwargs)
+                result = context.run(_checked, function, args, kwargs, rank)
             except BaseException as error:
                 result = None
                 # The chapter's admission closes at the failure instant:
