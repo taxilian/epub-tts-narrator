@@ -2536,7 +2536,9 @@ def _recheck_saved_whole_take(text, directory, request, verifier, config, *, not
         # Hiding model judgment hooks must never turn a permissive configured
         # WER threshold into permission to skip a missing or extra full word.
         policy = {**config["quality"], "max_wer": 0.0}
-        report = validate_audio(wav, text, RecognitionOnly(), policy, purpose="speech")
+        from .performance_runtime import verification_options
+        report = validate_audio(wav, text, RecognitionOnly(), policy, purpose="speech",
+                                **verification_options(request))
         if metadata.get("speech_resolution") is not None:
             from .recurring_resolution import confirm_rewritten_report
             try:

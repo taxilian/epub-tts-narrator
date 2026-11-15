@@ -58,12 +58,14 @@ def recheck_retained_candidates(session, verifier, config, *, notify):
         checked += 1
         notify(f"  Rechecking retained candidate {number} with complete reviewable wording; no new synthesis.")
         record = deepcopy(saved)
+        from .performance_runtime import verification_options
+        options = verification_options(session.request)
         record["report"] = validate_audio(audio, text, verifier,
-                                         {**config["quality"], "max_wer": 0.0}, purpose="speech")
+                                         {**config["quality"], "max_wer": 0.0}, purpose="speech", **options)
         marker = record.get("engine_metadata", {}).get("speech_resolution")
         if marker is not None:
             record["report"] = confirm_rewritten_report(record["report"], marker)
-        key = validation_key(text, verifier, config["quality"], purpose="speech")
+        key = validation_key(text, verifier, config["quality"], purpose="speech", **options)
         if record["report"].get("passed") is True:
             record["validation_key"] = key
             return record

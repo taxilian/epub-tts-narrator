@@ -178,7 +178,10 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
         pending = {**base, 'audio_file': target.name, 'audio_sha256': state['joined_sha256'], 'engine_metadata': metadata,
                    'report': {'passed': False, 'reasons': ['verification_pending']}}
         write_json(candidate_path, pending)
-        report = validate_audio(target, logical_text(request), verifier, config['quality'], purpose='speech')
+        # The passage's own verification options: without them a chosen
+        # pronunciation is never checked (name_shape) and a misread name passes.
+        report = validate_audio(target, logical_text(request), verifier, config['quality'], purpose='speech',
+                                **verification_options(request))
         if text_confirmation_unavailable(report):
             raise ClipRecoveryUnavailable('Clip repair verification unavailable; completed synthesis retained')
         record = {**pending, 'report': report}
