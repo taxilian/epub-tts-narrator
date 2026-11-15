@@ -112,6 +112,8 @@ seed = 1729
 sample_rate = 44100
 normalize_pauses = true
 normalize_take_pauses = true
+level_takes = true
+take_level_tolerance_db = 3.0
 sentence_pause_ms = 500
 clause_pause_ms = 250
 paragraph_pause_ms = 700
@@ -125,6 +127,8 @@ ffprobe = "ffprobe"
 max_wer = 0.0
 max_close_mismatch_fraction = 0.25
 ```
+
+Takes of one chapter can differ by several dB in speech level for no reason in the text, and `normalize_loudness` moves the whole chapter, not one take against another. With `level_takes`, assembly measures each take's speech level and compares it with where it should sit: the chapter's typical take, 6 dB lower for a line directed whispered, soft, quiet or murmured, and 4 dB higher for one directed shouted or yelled (its delivery direction, or a whisper or other delivery control covering most of it). A take within `take_level_tolerance_db` of that is left as it is, so ordinary contrast stays; one further off is brought back to the edge of that range, by at most 12 dB and never past -1 dBFS peak. Saved takes are never changed: only the assembled chapter is, and its record lists every take's level and gain. Changing either setting assembles every chapter again without generating any speech.
 
 `max_new_tokens` is the most Drama 3 codec frames any take may use (2048 is about 95 seconds). Each take also gets a budget from its own text: 10 seconds plus half a second per spoken letter (three per digit; speaker tags and bracketed directions do not count), never more than `max_new_tokens`. Drama 3 sometimes stops speaking without ending the take and keeps generating near-silence; the budget ends such a take long before the full limit, and it is rejected and retried as an unfinished take. No accepted take of a measured 12,734-passage book exceeded its budget, so takes that end on their own are unchanged and the budget is not part of any cache identity.
 

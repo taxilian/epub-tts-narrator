@@ -291,7 +291,8 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     normalize_pauses: bool = True, sentence_pause_ms: float = 260,
                     clause_pause_ms: float = 120, censorship_policy=None,
                     ffmpeg: str | None = None, normalize_take_pauses: bool = False,
-                    take_timings=None) -> dict:
+                    take_timings=None, level_takes: bool = False,
+                    take_level_tolerance_db: float = 3.0) -> dict:
     """Join verified PCM clips, retaining exact source and sample-frame ranges.
 
     ``wav_path=None`` is reserved for deliberate no-speech controls (for
@@ -304,6 +305,10 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
     With ``normalize_take_pauses`` the sentence/clause targets also apply to
     boundaries inside a take, located from ``take_timings`` (chunk ID ->
     verification ``expected_text`` and ``words``); see ``take_pauses``.
+
+    With ``level_takes`` each take is moved toward the chapter's speech
+    level beyond ``take_level_tolerance_db`` (``take_levels``) on a gained
+    copy; the result reports what was measured and applied as ``take_levels``.
     """
     _rate(sample_rate)
     paragraph_frames = _pause_frames(paragraph_pause_ms, sample_rate)
@@ -325,6 +330,11 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
     target.parent.mkdir(parents=True, exist_ok=True)
     timings, cursor, pending_pause, previous_tail = [], 0, 0, 0
     pending_punctuation = 0
+    level_report = None
+    take_gains = {}
+    if level_takes:
+        from .take_levels import gains
+        take_gains, level_report = gains(clips, tolerance_db=take_level_tolerance_db)
     with tempfile.TemporaryDirectory(prefix=".compose-", dir=target.parent) as temporary:
         staged = Path(temporary) / target.name
         with wave.open(str(staged), "wb") as destination:
@@ -339,7 +349,7 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     remaining -= count
                 cursor += frames
 
-            for clip in clips:
+            for clip_index, clip in enumerate(clips):
                 row = clip["segment"]
                 spoken = row.get("spoken_text", row["text"])
                 start, end = clip["spoken_start"], clip["spoken_end"]
@@ -404,12 +414,17 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                 if clip.get("wav_path") is not None:
                     count = 0
                     write_masks, read_path = masked_lanes, source
+                    if clip_index in take_gains and masked_lanes is None:
+                        # Same length, so trims and pause edits from the untouched take still apply.
+                        from .take_levels import gained_copy
+                        read_path = gained_copy(source, Path(temporary) / f"leveled-{len(timings)}.wav",
+                                                take_gains[clip_index])
                     preset = (row.get("voice_effect") or {}).get("preset")
                     if preset:
                         if not ffmpeg:
                             raise ValueError("FFmpeg is required to apply voice effects")
                         from .voice_effects import apply_effect
-                        effect_input = source
+                        effect_input = read_path
                         if masked_lanes is not None:
                             # Mask the dry take first, then hear the masked words through the effect.
                             effect_input = Path(temporary) / f"masked-{len(timings)}.wav"
@@ -505,8 +520,11 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
             target.hardlink_to(staged)
         except OSError as exc:
             raise ValueError(f"Unable to publish chapter PCM {target}: {exc}") from exc
-    return {"wav_path": str(target), "sample_rate": sample_rate, "channels": 1,
-            "frames": cursor, "segments": timings}
+    result = {"wav_path": str(target), "sample_rate": sample_rate, "channels": 1,
+              "frames": cursor, "segments": timings}
+    if level_report is not None:
+        result["take_levels"] = level_report
+    return result
 
 
 def extract_cover(epub: str | Path, output_dir: str | Path,

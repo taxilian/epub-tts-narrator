@@ -467,7 +467,8 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
             normalize_pauses=settings["normalize_pauses"],
             sentence_pause_ms=settings["sentence_pause_ms"], clause_pause_ms=settings["clause_pause_ms"],
             censorship_policy=censorship_policy, ffmpeg=settings["ffmpeg"],
-            normalize_take_pauses=settings["normalize_take_pauses"], take_timings=take_timings)
+            normalize_take_pauses=settings["normalize_take_pauses"], take_timings=take_timings,
+            level_takes=settings["level_takes"], take_level_tolerance_db=settings["take_level_tolerance_db"])
         composed.update(metadata)
         normalization = _normalize(Path(composed["wav_path"]), settings)
         encoded = None

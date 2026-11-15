@@ -58,6 +58,11 @@ RENDER_CONTRACT = {
                          "chapter": True, "checked": True, "remote_safe": True},
     "normalize_take_pauses": {"default": True, "kind": "bool",
                               "chapter": True, "checked": True, "remote_safe": True},
+    # Bring each take toward the chapter's speech level, keeping contrast
+    # within this many dB and directed soft/loud lines (take_levels).
+    "level_takes": {"default": True, "kind": "bool", "chapter": True, "checked": True, "remote_safe": True},
+    "take_level_tolerance_db": {"default": 3.0, "kind": "float", "range": (0, 12),
+                                "chapter": True, "checked": True, "remote_safe": True},
     "keep_intermediate_audio": {"default": False, "kind": "bool"},
     # Local only: a remote chapter service applies its own configuration.
     "history_reuse": {"default": "tolerant", "kind": "enum", "choices": ("tolerant", "strict")},
