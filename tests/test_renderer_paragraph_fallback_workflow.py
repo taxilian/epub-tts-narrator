@@ -159,6 +159,26 @@ class ParagraphFallbackWorkflowTests(unittest.TestCase):
         self.assertTrue(all(row["book_end_frame"] > row["book_start_frame"] for row in rows))
         self.assertLessEqual(rows[0]["book_end_frame"], rows[1]["book_start_frame"])
 
+    def test_a_paragraph_whose_takes_carry_a_steady_tone_is_retried_as_its_passages(self):
+        import epub_tts_narrator.renderer.quality as quality
+        original = deepcopy(self.target())
+        checked = quality._checked_audio_report
+
+        def tonal(path, expected_text, *args, **kwargs):
+            report = checked(path, expected_text, *args, **kwargs)
+            if expected_text == original["spoken_text"]:
+                report = dict(report, passed=False, reasons=["steady_tone"],
+                              steady_tone={"frequency_hz": 7100.0, "level_db": 11.0, "presence": 0.9})
+            return report
+        with patch.object(quality, "_checked_audio_report", side_effect=tonal):
+            completed = self.chapters()
+        self.assertEqual(completed["status"], "chapters_complete")
+        self.assert_individual_plan(original)
+        accepted_target = [record for record in self.accepted_clips().values()
+                           if record["request"]["chunk"]["segment"]["block_id"] == "b000004"]
+        self.assertEqual({record["request"]["chunk"]["chunk_id"] for record in accepted_target},
+                         {turn["chunk_id"] for turn in original["paragraph_turns"]})
+
     def test_interruption_before_first_fallback_child_persists_split_and_reuses_prior_audio(self):
         original = deepcopy(self.target())
         self.verifier.wrong_texts.add(original["spoken_text"])
