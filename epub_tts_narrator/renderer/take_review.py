@@ -36,8 +36,11 @@ def word_differences(expected, heard, *, limit=6):
     """Where ``heard`` differs from ``expected``, word by word, in plain words (at most ``limit``).
 
     Case, punctuation and hyphens are ignored (``sun-browned`` and
-    ``sunbrowned`` are one word), so only real differences remain:
+    ``sunbrowned`` are one word), and so are words the recognizer only
+    spelled another way (``Pulgera`` for ``Polgara``: the same Double
+    Metaphone sounds), so only real differences remain:
     ``missing at the end: "with their hands close to their weapons."``.
+    A chosen name heard rearranged is reported separately (``name_shape``).
     """
     import difflib
     import re
@@ -49,6 +52,8 @@ def word_differences(expected, heard, *, limit=6):
     for tag, a, b, c, d in difflib.SequenceMatcher(None, said_keys, got_keys, autojunk=False).get_opcodes():
         if tag == "equal" or "".join(said_keys[a:b]) == "".join(got_keys[c:d]):
             continue  # also "sun browned" for "sun-browned": the same letters
+        if tag == "replace" and _sounds_alike("".join(said_keys[a:b]), "".join(got_keys[c:d])):
+            continue
         wanted, instead = " ".join(said[a:b]), " ".join(got[c:d])
         if tag == "delete":
             where = "at the end" if b == len(said) and d == len(got) else "after " + _quoted(" ".join(said[max(0, a - 3):a]))
@@ -62,8 +67,24 @@ def word_differences(expected, heard, *, limit=6):
     return lines
 
 
+def _sounds_alike(left, right):
+    """Whether two spellings share a Double Metaphone key (a recognizer's spelling of the same sound)."""
+    try:
+        from metaphone import doublemetaphone
+    except ImportError:
+        return False
+    keys = lambda word: {key for key in doublemetaphone(word) if key}  # noqa: E731
+    return bool(left and right and not left.isdigit() and not right.isdigit() and keys(left) & keys(right))
+
+
 def _quoted(text):
     return "\u201c" + (text if len(text) <= 120 else text[:117] + "\u2026") + "\u201d"
+
+
+def _misread(report):
+    """``Ce'Nedra heard as sendera`` when a chosen pronunciation was heard rearranged, else ``""``."""
+    from .name_shape import describe
+    return describe(report)
 
 
 def _finished_from(record):
@@ -112,7 +133,7 @@ class TakeReview:
                 "transcript": row["transcript"], "expected_text": report.get("expected_text") or "",
                 "audio_path": str(row["audio_path"]), "learnable": self._learnable(report) is not None,
                 "verdict": marks.get(row["attempt"]), "finished_from": _finished_from(record),
-                "stopped": report.get("generation_stopped"),
+                "stopped": report.get("generation_stopped"), "misread": _misread(report),
             })
         if used is not None and not any(row["accepted"] for row in rows):
             # The used take is not one of the listed attempts' audio (a repaired or

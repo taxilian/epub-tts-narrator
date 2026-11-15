@@ -62,8 +62,10 @@ class FailedTakeRepairTests(unittest.TestCase):
         passage = "The cavalry patrolling the banks rode warily with their hands close to their weapons."
         self.assertEqual(word_differences(passage, "The cavalry patrolling the banks rode warily."),
                          ["missing at the end: \u201cwith their hands close to their weapons.\u201d"])
-        self.assertEqual(word_differences("Lady Polgara went in.", "Lady Pulgera went in."),
-                         ["\u201cPolgara\u201d heard as \u201cPulgera\u201d"])
+        # Another spelling of the same sound is not a difference.
+        self.assertEqual(word_differences("Lady Polgara went in.", "Lady Pulgera went in."), [])
+        self.assertEqual(word_differences("Lady Polgara went in.", "Lady Garion went in."),
+                         ["\u201cPolgara\u201d heard as \u201cGarion\u201d"])
         self.assertEqual(word_differences("She went in.", "She went quickly in."),
                          ["extra after \u201cShe went\u201d: \u201cquickly\u201d"])
         self.assertEqual(word_differences("twisted, sprucelike trees and sun-browned grass.",
@@ -483,6 +485,47 @@ class GlanceTests(unittest.TestCase):
         self.assertIn("Retry the chapter", repair_hint(item("odd")))
 
 
+class LongPassageTakesTests(unittest.IsolatedAsyncioTestCase):
+    """A long passage is never cut off in the Takes dialog: it fits, or it scrolls to its last word."""
+
+    PASSAGE = " ".join(f"Sentence {n} of the long passage rolls on across the grass toward the river." for n in range(30))
+
+    async def asyncSetUp(self):
+        __import__("asyncio").get_running_loop().slow_callback_duration = 10
+
+    async def show(self, size):
+        from textual.app import App
+        from epub_tts_narrator.run_shell_screens import TakesScreen
+        repair = FakeRepair()
+        rows = repair.takes()
+        rows[0].update(expected_text=self.PASSAGE, transcript=self.PASSAGE.rsplit(" toward", 1)[0])
+        repair.takes = lambda: rows
+        screen = TakesScreen("Chapter 25: every take of this passage", repair, FakePlayer())
+
+        class Host(App):
+            def on_mount(self):
+                self.push_screen(screen)
+        return Host(), screen, size
+
+    async def test_a_passage_too_long_for_the_screen_scrolls_to_its_end(self):
+        host, screen, size = await self.show((120, 30))
+        async with host.run_test(size=size) as pilot:
+            await pilot.pause()
+            pane = screen.query_one("#takes-passage")
+            self.assertTrue(str(screen.query_one("#takes-expected").render()).endswith("toward the river."))
+            self.assertGreater(pane.max_scroll_y, 0)
+            await pilot.press("pagedown", "pagedown", "pagedown", "pagedown")
+            await pilot.pause()
+            self.assertEqual(pane.scroll_y, pane.max_scroll_y)
+            self.assertIn("missing at the end", str(screen.query_one("#takes-differs").render()))
+
+    async def test_on_a_large_screen_the_whole_passage_is_shown_at_once(self):
+        host, screen, size = await self.show((220, 70))
+        async with host.run_test(size=size) as pilot:
+            await pilot.pause()
+            self.assertEqual(screen.query_one("#takes-passage").max_scroll_y, 0)
+
+
 class FakeRepair:
     player_command = ["fixture-player"]
 
@@ -602,7 +645,12 @@ class RepairScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.screen.actions, ["retry", "takes", "log", "close"])
             await pilot.press("down", "enter")  # "Listen to the takes"
             await self.wait_for(pilot, lambda: isinstance(app.screen, TakesScreen))
+            # The whole passage is there, never cut off to fit: it scrolls when it is longer than the pane.
+            self.assertEqual(str(app.screen.query_one("#takes-expected").render()), "Passage: Kvothe smiled")
+            await pilot.press("pagedown", "shift+pagedown")
             # What the take got wrong is said in words, not left to comparing the two texts.
+            await pilot.press("up")
+            await pilot.pause()
             self.assertIn("Differs: \u201cKvothe\u201d heard as \u201cquote\u201d",
                           str(app.screen.query_one("#takes-differs").render()))
             await pilot.press("enter")

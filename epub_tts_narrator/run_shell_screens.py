@@ -121,10 +121,11 @@ class TakesScreen(Dialog):
     """
 
     DEFAULT_CSS = BASE_CSS + """
-    TakesScreen #takes-expected { height: auto; max-height: 14; }
-    TakesScreen #takes-table { height: auto; max-height: 14; margin-top: 1; }
-    TakesScreen #takes-heard { height: auto; max-height: 14; margin-top: 1; }
-    TakesScreen #takes-differs { height: auto; max-height: 8; margin-top: 1; }
+    TakesScreen .dialog { width: 95%; max-width: 220; height: 95%; max-height: 95%; }
+    TakesScreen #takes-passage { height: 1fr; min-height: 3; }
+    TakesScreen #takes-table { height: auto; max-height: 12; margin-top: 1; }
+    TakesScreen #takes-detail { height: 1fr; min-height: 3; margin-top: 1; }
+    TakesScreen #takes-differs { margin-top: 1; }
     """
     BINDINGS = [
         Binding("escape", "close", "Close", priority=True),
@@ -135,6 +136,11 @@ class TakesScreen(Dialog):
         Binding("b", "mark('bad')", "Bad"),
         Binding("t", "mark('truncated')", "Truncated"),
         Binding("c", "mark(None)", "Clear mark"),
+        # Before the table's own paging: the table is short, the passage may not be.
+        Binding("pageup", "scroll_pane('passage', -1)", "Scroll passage up", show=False, priority=True),
+        Binding("pagedown", "scroll_pane('passage', 1)", "Scroll passage down", show=False, priority=True),
+        Binding("shift+pageup", "scroll_pane('detail', -1)", "Scroll heard up", show=False, priority=True),
+        Binding("shift+pagedown", "scroll_pane('detail', 1)", "Scroll heard down", show=False, priority=True),
         Binding("greater_than_sign", "speed", "Speed", tooltip="Play at 2x or 1x (pitch unchanged), here and everywhere"),
     ]
 
@@ -153,10 +159,13 @@ class TakesScreen(Dialog):
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Label(Text(self.title_text), classes="dialog-title")
-            yield Static("", id="takes-expected")
+            # Never cut off: the whole passage and transcript scroll when they do not fit.
+            with VerticalScroll(id="takes-passage"):
+                yield Static("", id="takes-expected")
             yield DataTable(id="takes-table", cursor_type="row")
-            yield Static("", id="takes-heard")
-            yield Static("", id="takes-differs")
+            with VerticalScroll(id="takes-detail"):
+                yield Static("", id="takes-heard")
+                yield Static("", id="takes-differs")
             yield Static("", id="takes-error", classes="dialog-error")
             yield Static(self._help(), id="takes-help", classes="dialog-help")
 
@@ -204,6 +213,8 @@ class TakesScreen(Dialog):
         if row and row["transcript"] and not row["passed"]:
             if row.get("stopped") == "silence":
                 differs.append("The take went silent and stopped before the end.\n", style="yellow")
+            if row.get("misread"):
+                differs.append(f"Differs: {row['misread']} (not the pronunciation you chose)\n", style="yellow")
             for line in word_differences(row["expected_text"], row["transcript"]):
                 differs.append("Differs: " + line + "\n", style="yellow")
         self.query_one("#takes-differs", Static).update(differs)
@@ -236,9 +247,14 @@ class TakesScreen(Dialog):
         except (ValueError, OSError):
             pass
 
+    def action_scroll_pane(self, pane, direction):
+        view = self.query_one(f"#takes-{pane}", VerticalScroll)
+        (view.scroll_page_down if direction > 0 else view.scroll_page_up)(animate=False)
+
     def _help(self):
         from .renderer import playback_speed
-        return Text("Enter/p plays · Space stops · u uses this take · g marks it good (wrongly rejected) · "
+        return Text("PgUp/PgDn scroll the passage, Shift+PgUp/PgDn what was heard · "
+                    "Enter/p plays · Space stops · u uses this take · g marks it good (wrongly rejected) · "
                     "b marks it bad (the used take is then rendered again) · t marks it truncated "
                     "(right but cut short: the rest is generated after it) · c clears the mark · "
                     f"{playback_speed.help_text(self.player)} · Escape closes")
