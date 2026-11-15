@@ -991,10 +991,12 @@ class RunModel:
         return rows
 
     def node_work_rows(self, nodes):
-        """Per node: ``(node, rows, decoding, prefilling, waiting, requests, sent)`` from its own report.
+        """Per node: ``(node, rows, decoding, prefilling, waiting, requests, sent, speed)`` from its own report.
 
         ``sent`` is this render's requests in flight to the node; the node's
         own numbers count every client. ``None`` where a node does not say.
+        ``speed`` is how fast this render's audio came from it lately
+        (``node_activity.NodeActivity.speeds``), or ``None`` before any.
         """
         result = []
         for node in nodes or []:
@@ -1002,8 +1004,19 @@ class RunModel:
                 continue
             work = node.get("work") or {}
             result.append((node["name"], work.get("rows"), work.get("decoding"), work.get("prefilling"),
-                           work.get("waiting"), work.get("requests"), len(node["jobs"])))
+                           work.get("waiting"), work.get("requests"), len(node["jobs"]), node.get("speed")))
         return result
+
+    @staticmethod
+    def overall_speed(nodes):
+        """Every speech node's speed together: ``{"realtime", "fps", "audio_seconds", "span"}`` or ``None``."""
+        speeds = [node.get("speed") for node in nodes or [] if node["role"] == "speech" and node.get("speed")]
+        if not speeds:
+            return None
+        realtime = sum(speed["realtime"] for speed in speeds)
+        return {"realtime": round(realtime, 2), "fps": round(sum(speed["fps"] for speed in speeds), 1),
+                "audio_seconds": round(sum(speed["audio_seconds"] for speed in speeds), 1),
+                "span": max(speed["span"] for speed in speeds)}
 
     def node_summary(self, nodes):
         """``{node: {role: (busy, slots)}}`` for the at-a-glance line."""

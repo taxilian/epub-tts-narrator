@@ -20,6 +20,17 @@ from .render_resource_context import current_owner
 
 _SAMPLING_DEFAULTS = {**SAMPLING_DEFAULTS, "min_audio_seconds": 0.1}
 
+
+def _audio_seconds(metadata):
+    """Seconds of audio a generation made, from its metadata (``None`` when it does not say)."""
+    seconds = metadata.get("duration_seconds")
+    if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+        return seconds
+    count, rate = metadata.get("sample_count"), metadata.get("sample_rate")
+    if isinstance(count, int) and isinstance(rate, int) and rate > 0:
+        return count / rate
+    return None
+
 class _Slots:
     """Endpoint slots with FIFO waiters and first-free claims."""
 
@@ -695,6 +706,7 @@ class RenderPool:
                         report_worker_activity(notify, "failed", name, monotonic() - started)
                         raise
                     report_worker_activity(notify, "completed", name, monotonic() - started)
+                    ACTIVITY.made(name, _audio_seconds(result))
                     return result
             if worker.local and not worker.batched:
                 # All model loading, arrays and default streams belong to one
@@ -769,6 +781,7 @@ class RenderPool:
                     report_worker_activity(notify, "failed", name, monotonic() - started)
                     raise
                 report_worker_activity(notify, "completed", name, monotonic() - started)
+                ACTIVITY.made(name, _audio_seconds(result))
                 return result
             if worker.local and not worker.batched:
                 def local_run():

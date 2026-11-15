@@ -287,7 +287,7 @@ class RunApp(CapturePrintMixin, App):
                                                           "Since sent")
         self.query_one("#node-work", DataTable).add_columns("Node", "Batch rows", "Decoding", "Prefilling",
                                                             "Waiting on the node", "Requests on the node",
-                                                            "Sent by this render")
+                                                            "Sent by this render", "Speed (last 5 min)")
         self.query_one("#stages", DataTable).add_columns("Pipeline stage", "Active", "Queued")
         self.query_one("#rejected", DataTable).add_columns("When", "Book", "Chapter", "Block", "Take",
                                                            "Your verdict", "Why")
@@ -436,10 +436,18 @@ class RunApp(CapturePrintMixin, App):
             rows.append((f"{name}:{role}:{slot}", cells))
         def number(value):
             return "—" if value is None else str(value)
-        sync_table(self.query_one("#node-work", DataTable), [
+
+        def speed(value):
+            # Audio frames a second (Drama 3 makes ~21.5 per second of audio) and how much faster than real time.
+            return "—" if not value else f"{value['fps']:.0f} fps · {value['realtime']:.2f}× real time"
+        work_rows = [
             (name, (name, number(rows), number(decoding), number(prefilling), number(waiting), number(requests),
-                    str(sent)))
-            for name, rows, decoding, prefilling, waiting, requests, sent in model.node_work_rows(nodes)])
+                    str(sent), speed(made)))
+            for name, rows, decoding, prefilling, waiting, requests, sent, made in model.node_work_rows(nodes)]
+        if len(work_rows) > 1:
+            work_rows.append(("all-nodes", (Text("all nodes", style="bold"), "", "", "", "", "", "",
+                                            Text(speed(model.overall_speed(nodes)), style="bold"))))
+        sync_table(self.query_one("#node-work", DataTable), work_rows)
         self.query_one("#nodes-title", Static).update(Text(
             "This render's requests on each node: speech (TTS) and verify (transcription) slots and the block "
             "each is working on, timed from when it was sent (so it includes waiting on the node)"

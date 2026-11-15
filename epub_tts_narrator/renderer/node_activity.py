@@ -8,6 +8,12 @@ or is transcribed, the pool records the job on that node: its book, chapter
 and block, which ``ChapterProgress.task`` binds in a context variable for
 everything that runs for the block, including work handed to lane threads.
 
+Each finished generation also records how many seconds of audio a node made
+(``made``), so the run shell can show each node's speed over the last
+``SPEED_WINDOW`` seconds: audio frames per second (Drama 3's codec makes
+``AUDIO_FRAMES_PER_SECOND`` frames for each second of audio) and how many
+times faster than real time.
+
 Only names, counts, IDs and timings are kept: no text, URLs or keys.
 Observing never creates or changes anything, and with no pool (or without
 the run shell) nothing reads it.
@@ -15,6 +21,7 @@ the run shell) nothing reads it.
 
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 import itertools
@@ -23,6 +30,9 @@ import time
 
 
 _JOB = ContextVar("render_node_job", default=None)
+# Drama 3's codec: 44.1 kHz audio from 2048-sample frames.
+AUDIO_FRAMES_PER_SECOND = 44100 / 2048
+SPEED_WINDOW = 300.0  # seconds of history in the rolling speed
 
 
 @contextmanager
@@ -46,13 +56,15 @@ class NodeActivity:
         self._nodes = {}        # (name, role) -> {"name", "role", "slots", "local", "owner"}
         self._jobs = {}         # token -> {"name", "role", "book", "chapter", "block", "started"}
         self._tokens = itertools.count(1)
+        self._made = deque()    # (time, name, audio seconds) of finished generations, newest last
         self.chapter_capacity = None
 
     def register(self, owner, name, role, slots, *, local, probe=None):
         """``probe()`` (optional) returns the node's own report of its work, polled by ``probe_nodes``."""
         with self._lock:
             self._nodes[(name, role)] = {"name": name, "role": role, "slots": int(slots), "local": bool(local),
-                                         "owner": owner, "probe": probe, "work": None, "probed": None}
+                                         "owner": owner, "probe": probe, "work": None, "probed": None,
+                                         "registered": self._clock()}
 
     def unregister(self, owner):
         """Forget the nodes one pool registered (its close)."""
@@ -103,6 +115,37 @@ class NodeActivity:
             with self._lock:
                 self._jobs.pop(token, None)
 
+    def made(self, name, audio_seconds):
+        """Record ``audio_seconds`` of audio a generation on ``name`` just finished (ignored if not a number)."""
+        if not isinstance(audio_seconds, (int, float)) or isinstance(audio_seconds, bool) or audio_seconds <= 0:
+            return
+        now = self._clock()
+        with self._lock:
+            self._made.append((now, name, float(audio_seconds)))
+            while self._made and now - self._made[0][0] > SPEED_WINDOW:
+                self._made.popleft()
+
+    def _speed(self, made, since, now):
+        """``{"audio_seconds", "span", "realtime", "fps"}`` for audio made since ``since``, or ``None``."""
+        span = min(SPEED_WINDOW, now - since)
+        if span <= 0:
+            return None
+        seconds = sum(amount for when, amount in made if now - when <= span)
+        realtime = seconds / span
+        return {"audio_seconds": round(seconds, 1), "span": round(span, 1), "realtime": round(realtime, 2),
+                "fps": round(realtime * AUDIO_FRAMES_PER_SECOND, 1)}
+
+    def speeds(self):
+        """``{"nodes": {name: speed}, "overall": speed}`` over the last ``SPEED_WINDOW`` (each ``None`` until known)."""
+        now = self._clock()
+        with self._lock:
+            made = list(self._made)
+            started = {node["name"]: node["registered"] for node in self._nodes.values() if node["role"] == "speech"}
+        nodes = {name: self._speed([(when, amount) for when, who, amount in made if who == name], since, now)
+                 for name, since in started.items()}
+        overall = self._speed([(when, amount) for when, _, amount in made], min(started.values()), now) if started else None
+        return {"nodes": nodes, "overall": overall}
+
     def snapshot(self):
         """``[{"name", "role", "slots", "local", "jobs": [{"book", "chapter", "block", "elapsed"}]}]``."""
         now = self._clock()
@@ -114,9 +157,12 @@ class NodeActivity:
                 if node is not None:
                     node["jobs"].append({"book": item.get("book"), "chapter": item.get("chapter"),
                                          "block": item.get("block"), "elapsed": now - item["started"]})
+        speeds = self.speeds()["nodes"]
         for node in nodes:
-            for private in ("owner", "probe", "probed"):
+            for private in ("owner", "probe", "probed", "registered"):
                 node.pop(private, None)
+            if node["role"] == "speech":
+                node["speed"] = speeds.get(node["name"])
         order = {"speech": 0, "verify": 1}
         return sorted(nodes, key=lambda node: (not node["local"], node["name"], order.get(node["role"], 2)))
 

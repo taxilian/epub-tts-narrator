@@ -409,8 +409,33 @@ class GlanceTests(unittest.TestCase):
         self.assertEqual(calls, ["second-mac", "second-mac"])
         with activity.busy("second-mac", "speech", {"book": "b", "chapter": 1, "block": 1}):
             rows = self.model.node_work_rows(activity.snapshot())
-        self.assertEqual(rows, [("second-mac", 8, 6, 1, 2, 9, 1), ("third-mac", None, None, None, None, None, 0)])
+        self.assertEqual([row[:7] for row in rows],
+                         [("second-mac", 8, 6, 1, 2, 9, 1), ("third-mac", None, None, None, None, None, 0)])
+        self.assertEqual([row[7]["realtime"] for row in rows], [0, 0])  # nothing made yet
         self.assertNotIn("probe", activity.snapshot()[0])
+
+    def test_each_node_s_speed_is_the_audio_it_made_lately_and_overall_is_their_sum(self):
+        from epub_tts_narrator.renderer.node_activity import AUDIO_FRAMES_PER_SECOND, SPEED_WINDOW, NodeActivity
+        activity = NodeActivity(clock=self.clock)
+        owner = object()
+        activity.register(owner, "local", "speech", 8, local=True)
+        activity.register(owner, "second-mac", "speech", 8, local=False)
+        activity.register(owner, "local", "verify", 1, local=True)
+        self.assertEqual(activity.speeds()["overall"], None)  # no time has passed yet
+        self.clock.now += 100
+        activity.made("local", 150)       # 1.5x real time over 100 s
+        activity.made("second-mac", 50)
+        activity.made("second-mac", "n/a")  # metadata without a length is ignored
+        nodes = activity.snapshot()
+        speeds = {name: made for name, *_, made in self.model.node_work_rows(nodes)}
+        self.assertEqual(speeds["local"]["realtime"], 1.5)
+        self.assertAlmostEqual(speeds["local"]["fps"], 1.5 * AUDIO_FRAMES_PER_SECOND, places=0)
+        self.assertEqual(speeds["second-mac"]["realtime"], 0.5)
+        self.assertEqual(self.model.overall_speed(nodes)["realtime"], 2.0)
+        self.assertNotIn("speed", next(node for node in nodes if node["role"] == "verify"))
+        # Only the last SPEED_WINDOW counts: an idle stretch brings it down to nothing.
+        self.clock.now += SPEED_WINDOW + 1
+        self.assertEqual(activity.speeds()["nodes"]["local"]["audio_seconds"], 0)
 
     def test_rejected_takes_are_listed_once_and_changed_takes_rebuild_their_chapter(self):
         rebuilt = []
