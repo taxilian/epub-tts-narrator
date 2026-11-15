@@ -2119,13 +2119,24 @@ def _retag_chapter(work, composed, chapter, context, bundle, config, *, notify=p
         total_chapters=context["total_chapters"], title=chapter["title"])
 
 
-def _saved_chapter_engines_match(work, record, current_engine):
-    """Check actual worker provenance before choosing chapter reuse over rendering."""
+def _saved_chapter_engines_match(work, record, current_engine, chapter, config):
+    """Check actual worker provenance before choosing chapter reuse over rendering.
+
+    Each take is compared with the engine identity its own line is generated
+    with: character speech under ``[dialogue_sampling]`` carries its own
+    sampling (``role_sampling``), so comparing it with the chapter's
+    narration identity rebuilt every chapter with dialogue on every run.
+    """
+    from .role_sampling import chunk_overrides, with_overrides
     from .speech_identity import engines_compatible
-    for accepted in record["acceptance"]:
+    expected = [chunk for chunk in chapter["chunks"] if not chunk["silent_control"]]
+    if len(expected) != len(record["acceptance"]):
+        return False
+    for chunk, accepted in zip(expected, record["acceptance"]):
+        engine = with_overrides(current_engine, chunk_overrides(chunk, config))
         for lane in accepted.get("speaker_lanes", [accepted]):
             saved = read_json(regular_file(Path(work) / "clips" / lane["request_hash"] / "accepted.json"))
-            if not engines_compatible(saved["request"]["engine"], current_engine,
+            if not engines_compatible(saved["request"]["engine"], engine,
                                       engine_metadata=saved.get("engine_metadata")):
                 return False
     return True
@@ -3314,7 +3325,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                                if saved is not None else context)
             if (saved is not None and _same_chapter_audio_context(saved["context"], restore_context)
                     and _saved_chapter_clips_present(work, saved)
-                    and _saved_chapter_engines_match(work, saved, context["engine"])):
+                    and _saved_chapter_engines_match(work, saved, context["engine"], chapter, config)):
                 try:
                     composed, chapter_acceptance = _restore_chapter(
                         work, chapter, saved, restore_context, voices, config, speech_cache=speech_cache, notify=notify)

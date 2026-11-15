@@ -181,6 +181,19 @@ class TakeTests(unittest.TestCase):
         self.assertEqual(len(self.engine.seen), 3)
         self.assertIsNone(self.engine.seen[-1])
 
+    def test_a_saved_chapter_with_dialogue_is_reused_when_its_takes_match_their_own_sampling(self):
+        from epub_tts_narrator.renderer.workflow import _saved_chapter_engines_match
+        hot = config(temperature=0.95)
+        dialogue = speech_request(self.voice, "Run, now.")["chunk"]
+        narration = speech_request(self.voice, "The road was long.")["chunk"]
+        narration["segment"]["kind"] = "narration"
+        records = [self.render(dialogue, deepcopy(hot)), self.render(narration, deepcopy(hot))]
+        chapter = {"chunks": [dict(row, silent_control=False) for row in (dialogue, narration)]}
+        saved = {"acceptance": [{"request_hash": record["request_hash"]} for record in records]}
+        self.assertTrue(_saved_chapter_engines_match(self.work, saved, self.engine.identity, chapter, hot))
+        # With the setting turned off the dialogue take no longer matches.
+        self.assertFalse(_saved_chapter_engines_match(self.work, saved, self.engine.identity, chapter, config()))
+
 
 if __name__ == "__main__":
     unittest.main()
