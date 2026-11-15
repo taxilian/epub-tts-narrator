@@ -57,6 +57,18 @@ class FailedTakeRepairTests(unittest.TestCase):
         self.assertEqual(takes[0]["expected_text"], "Kvothe smiled at the fire tonight.")
         self.assertEqual(self.repair().player_command, ["fixture-player"])
 
+    def test_word_differences_name_missing_wrong_and_extra_words_but_not_spelling(self):
+        from epub_tts_narrator.renderer.take_review import word_differences
+        passage = "The cavalry patrolling the banks rode warily with their hands close to their weapons."
+        self.assertEqual(word_differences(passage, "The cavalry patrolling the banks rode warily."),
+                         ["missing at the end: \u201cwith their hands close to their weapons.\u201d"])
+        self.assertEqual(word_differences("Lady Polgara went in.", "Lady Pulgera went in."),
+                         ["\u201cPolgara\u201d heard as \u201cPulgera\u201d"])
+        self.assertEqual(word_differences("She went in.", "She went quickly in."),
+                         ["extra after \u201cShe went\u201d: \u201cquickly\u201d"])
+        self.assertEqual(word_differences("twisted, sprucelike trees and sun-browned grass.",
+                                          "Twisted, spruce-like trees and sun browned grass"), [])
+
     def test_a_finished_take_names_the_take_it_was_finished_from(self):
         self.failed_take(1, "Kvothe smiled.")
         record = self.failed_take(2, "Kvothe smiled at the fire.")
@@ -590,6 +602,9 @@ class RepairScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.screen.actions, ["retry", "takes", "log", "close"])
             await pilot.press("down", "enter")  # "Listen to the takes"
             await self.wait_for(pilot, lambda: isinstance(app.screen, TakesScreen))
+            # What the take got wrong is said in words, not left to comparing the two texts.
+            self.assertIn("Differs: \u201cKvothe\u201d heard as \u201cquote\u201d",
+                          str(app.screen.query_one("#takes-differs").render()))
             await pilot.press("enter")
             await self.wait_for(pilot, lambda: player.started == ["/clips/take-1.wav"])
             await pilot.press("down", "a")

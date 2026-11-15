@@ -121,9 +121,10 @@ class TakesScreen(Dialog):
     """
 
     DEFAULT_CSS = BASE_CSS + """
-    TakesScreen #takes-expected { height: auto; max-height: 6; }
+    TakesScreen #takes-expected { height: auto; max-height: 14; }
     TakesScreen #takes-table { height: auto; max-height: 14; margin-top: 1; }
-    TakesScreen #takes-heard { height: auto; max-height: 6; margin-top: 1; }
+    TakesScreen #takes-heard { height: auto; max-height: 14; margin-top: 1; }
+    TakesScreen #takes-differs { height: auto; max-height: 8; margin-top: 1; }
     """
     BINDINGS = [
         Binding("escape", "close", "Close", priority=True),
@@ -155,6 +156,7 @@ class TakesScreen(Dialog):
             yield Static("", id="takes-expected")
             yield DataTable(id="takes-table", cursor_type="row")
             yield Static("", id="takes-heard")
+            yield Static("", id="takes-differs")
             yield Static("", id="takes-error", classes="dialog-error")
             yield Static(self._help(), id="takes-help", classes="dialog-help")
 
@@ -194,9 +196,17 @@ class TakesScreen(Dialog):
         return next((row for row in self.rows if str(row["attempt"]) == key), None)
 
     def _show_heard(self):
+        from .renderer.take_review import word_differences
         row = self.current()
         self.query_one("#takes-heard", Static).update(
             Text("Heard: " + row["transcript"]) if row and row["transcript"] else "")
+        differs = Text()
+        if row and row["transcript"] and not row["passed"]:
+            if row.get("stopped") == "silence":
+                differs.append("The take went silent and stopped before the end.\n", style="yellow")
+            for line in word_differences(row["expected_text"], row["transcript"]):
+                differs.append("Differs: " + line + "\n", style="yellow")
+        self.query_one("#takes-differs", Static).update(differs)
 
     def _error(self, text):
         self.query_one("#takes-error", Static).update(Text(text))

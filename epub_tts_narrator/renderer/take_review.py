@@ -32,6 +32,40 @@ NOTE = "Accepted by a person listening in the run shell"
 
 
 
+def word_differences(expected, heard, *, limit=6):
+    """Where ``heard`` differs from ``expected``, word by word, in plain words (at most ``limit``).
+
+    Case, punctuation and hyphens are ignored (``sun-browned`` and
+    ``sunbrowned`` are one word), so only real differences remain:
+    ``missing at the end: "with their hands close to their weapons."``.
+    """
+    import difflib
+    import re
+    said = [token for token in re.findall(r"\S+", expected or "")]
+    got = [token for token in re.findall(r"\S+", heard or "")]
+    key = lambda token: re.sub(r"[^\w]", "", token.replace("\u2019", "'")).casefold()
+    said_keys, got_keys = [key(token) for token in said], [key(token) for token in got]
+    lines = []
+    for tag, a, b, c, d in difflib.SequenceMatcher(None, said_keys, got_keys, autojunk=False).get_opcodes():
+        if tag == "equal" or "".join(said_keys[a:b]) == "".join(got_keys[c:d]):
+            continue  # also "sun browned" for "sun-browned": the same letters
+        wanted, instead = " ".join(said[a:b]), " ".join(got[c:d])
+        if tag == "delete":
+            where = "at the end" if b == len(said) and d == len(got) else "after " + _quoted(" ".join(said[max(0, a - 3):a]))
+            lines.append(f"missing {where}: {_quoted(wanted)}")
+        elif tag == "insert":
+            lines.append(f"extra after {_quoted(' '.join(said[max(0, a - 3):a]))}: {_quoted(instead)}")
+        else:
+            lines.append(f"{_quoted(wanted)} heard as {_quoted(instead)}")
+    if len(lines) > limit:
+        lines = lines[:limit] + [f"and {len(lines) - limit} more"]
+    return lines
+
+
+def _quoted(text):
+    return "\u201c" + (text if len(text) <= 120 else text[:117] + "\u2026") + "\u201d"
+
+
 def _finished_from(record):
     """The take a completion finished (``take_completion``), else ``None``."""
     completion = (record.get("engine_metadata") or {}).get("completion")
@@ -78,6 +112,7 @@ class TakeReview:
                 "transcript": row["transcript"], "expected_text": report.get("expected_text") or "",
                 "audio_path": str(row["audio_path"]), "learnable": self._learnable(report) is not None,
                 "verdict": marks.get(row["attempt"]), "finished_from": _finished_from(record),
+                "stopped": report.get("generation_stopped"),
             })
         if used is not None and not any(row["accepted"] for row in rows):
             # The used take is not one of the listed attempts' audio (a repaired or
