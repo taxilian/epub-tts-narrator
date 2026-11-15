@@ -96,5 +96,63 @@ class SteadyToneTests(unittest.TestCase):
         self.assertEqual(retire_tonal(work), [])  # measured once
 
 
+
+@unittest.skipUnless(importlib.util.find_spec("numpy"), "requires numpy (renderer environment)")
+class FilteredFallbackTests(unittest.TestCase):
+    """When every take of a passage carries the tone, the faintest is filtered and used if its words verify."""
+
+    def setUp(self):
+        from test_renderer_workflow import FFMPEG
+        if not FFMPEG:
+            self.skipTest("FFmpeg required")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name) / "takes"
+        self.directory.mkdir()
+        self.request = {"kind": "speech", "chunk": {"spoken_text": "Hello there."}}
+        self.config = {"quality": {}, "render": {"ffmpeg": FFMPEG}}
+
+    def take(self, number, level):
+        from epub_tts_narrator.renderer.common import digest
+        from epub_tts_narrator.renderer.steady_tone import measure
+        name = f"attempt-{number:03d}-fixture-take.wav"
+        write_speechlike(self.directory / name, tone_hz=7100, tone_level=level)
+        write_json(self.directory / f"attempt-{number:03d}.json", {
+            "request_hash": digest(self.request), "request": self.request, "attempt": number, "seed": number,
+            "audio_file": name, "audio_sha256": "f" * 64, "engine_metadata": {"seed": number},
+            "report": {"passed": False, "reasons": ["steady_tone"],
+                       "steady_tone": measure(self.directory / name)}})
+
+    def test_the_faintest_tonal_take_is_filtered_verified_and_used(self):
+        from epub_tts_narrator.renderer.steady_tone import MARKER, filtered_fallback
+        import test_renderer_reference_consensus as consensus
+        self.take(1, 0.04)
+        self.take(2, 0.015)  # fainter
+        said = []
+        path, record = filtered_fallback(self.directory, self.request, "Hello there.",
+                                         consensus.PrimaryVerifier("Hello there."), self.config, notify=said.append)
+        self.assertEqual(record["attempt"], 2)
+        self.assertTrue(record["report"]["passed"])
+        self.assertIn(7100, [round(hz, -2) for hz in record["engine_metadata"][MARKER]["notches_hz"]])
+        self.assertTrue(path.name.endswith("-tone-filtered.wav"))
+        self.assertEqual(read_json(self.directory / "accepted.json")["audio_file"], path.name)
+        self.assertTrue((self.directory / "attempt-002-fixture-take.wav").exists())  # the original is kept
+        self.assertTrue(any("filtered out" in line for line in said))
+
+    def test_a_filtered_take_whose_words_fail_is_not_used(self):
+        from epub_tts_narrator.renderer.steady_tone import filtered_fallback
+        import test_renderer_reference_consensus as consensus
+        self.take(1, 0.03)
+        result = filtered_fallback(self.directory, self.request, "Hello there.",
+                                   consensus.PrimaryVerifier("Goodbye now."), self.config, notify=lambda _: None)
+        self.assertIsNone(result)
+        self.assertFalse((self.directory / "accepted.json").exists())
+
+    def test_a_filtered_take_is_never_chapter_history(self):
+        from epub_tts_narrator.renderer.continuity import _NOT_HISTORY
+        from epub_tts_narrator.renderer.steady_tone import MARKER
+        self.assertIn(MARKER, _NOT_HISTORY)
+
+
 if __name__ == "__main__":
     unittest.main()

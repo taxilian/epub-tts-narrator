@@ -148,6 +148,16 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
                     return result
         notify('  Selecting the best physically usable full-clip take under the best-effort exhaustion policy.')
         failure_context = failure_report if failure_report is not None else _saved_failure_report(directory, request)
-        return select_retained(directory, request, client, failure_report=failure_context)
+        try:
+            return select_retained(directory, request, client, failure_report=failure_context)
+        except ValueError as exc:
+            if 'steady high-pitched tone' not in str(exc):
+                raise
+            # Every take carried the tone: the faintest, filtered, if its words verify.
+            from .steady_tone import filtered_fallback
+            result = filtered_fallback(directory, request, text, verifier, config, notify=notify)
+            if result is None:
+                raise
+            return result
     except ClipRecoveryUnavailable as exc:
         raise VerificationUnavailable(str(exc)) from exc
