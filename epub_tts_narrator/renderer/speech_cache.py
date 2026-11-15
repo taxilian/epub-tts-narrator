@@ -127,9 +127,15 @@ class SpeechCache:
         if index.is_symlink():
             raise ValueError("Speech cache index must not use symlinks")
         indexed = set()
+        # One unreadable or invalid take is left out of the index rather than
+        # failing the whole load: a failed load is retried by every waiting
+        # block, each rereading every take, so the render stalls.
         for path in sorted(index.glob("*.json")):
-            entry = self._read_index(path)
-            saved = self._accepted(entry.get("request_hash"))
+            try:
+                entry = self._read_index(path)
+                saved = self._accepted(entry.get("request_hash"))
+            except ValueError:
+                continue
             indexed.add(entry["request_hash"])
             if saved is None or file_hash(saved[0]) != entry.get("accepted_sha256"):
                 continue
@@ -141,7 +147,10 @@ class SpeechCache:
         for path in sorted((self.work / "clips").glob("*/accepted.json")):
             if path.parent.name in indexed:
                 continue
-            saved = self._accepted(path.parent.name)
+            try:
+                saved = self._accepted(path.parent.name)
+            except ValueError:
+                continue
             if saved is None:
                 continue
             _, _, record = saved

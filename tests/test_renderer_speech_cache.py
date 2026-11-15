@@ -193,6 +193,16 @@ class SpeechCacheTests(unittest.TestCase):
         self.assertEqual(list((self.root / "clips").rglob("*.wav")), [audio])
         self.assertTrue(self.index_path().is_file())
 
+    def test_one_invalid_take_is_left_out_without_failing_the_whole_load(self):
+        # A failed load would be retried by every waiting block, each rereading every take.
+        audio, accepted = self.accepted()
+        broken = deepcopy(self.request)
+        broken["chunk"]["spoken_text"] = "Another line entirely."
+        _, record = self.accepted(request=broken)
+        record["engine_metadata"]["clip_repair"] = {"unexpected": True}  # fails validate_record
+        write_json(self.root / "clips" / record["request_hash"] / "accepted.json", record)
+        self.assertEqual(self.cache.find(self.identity), (audio, accepted))
+
     def test_unresolved_legacy_voice_is_not_guessed_from_a_current_equivalent_voice(self):
         audio, _ = self.accepted()
         changed_voice = {**self.voice, "asset_hash": digest("unresolvable old candidate")}
