@@ -34,6 +34,8 @@ _VOWELS = frozenset("aeiou")
 _DIGRAPHS = ("th", "sh", "ch", "ph", "wh", "gh", "ck")
 _POSSESSIVE = re.compile(r"['’]s$")
 SWEEP_FILENAME = "name-shape-sweep.json"
+# 2: best-effort choices are swept too (every acceptance is read again once).
+SWEEP_POLICY = 2
 _STRETCH = 40  # words: a longer differing stretch is not a misheard name
 _MTIME_SLACK = 120  # seconds: an acceptance written while a sweep ran is read by the next one
 
@@ -225,8 +227,9 @@ def retire_misread(work):
 
     Takes accepted before this check existed are found from their saved
     transcripts (no recognition runs), so the passages render again under the
-    check. A take a person chose or marked good, and a best-effort choice, are
-    kept: a person or the audited chooser already decided them.
+    check. So are best-effort choices: a take that misreads a name a person
+    chose the pronunciation of is never published. A take a person chose or
+    marked good is kept: a person already decided it.
     """
     from .common import read_json, write_json
     from .performance_runtime import verification_options
@@ -241,7 +244,8 @@ def retire_misread(work):
     # written since the last sweep (by any renderer) are read again.
     marker = work / SWEEP_FILENAME
     saved = read_json(marker) if marker.is_file() and not marker.is_symlink() else {}
-    since = saved.get("checked_through", 0) if saved.get("version") == NAME_SHAPE_VERSION else 0
+    since = (saved.get("checked_through", 0) if saved.get("version") == NAME_SHAPE_VERSION
+             and saved.get("policy") == SWEEP_POLICY else 0)
     started = time.time()
     retired = []
     for path in sorted([*clips.glob("*/accepted.json"), *clips.glob("*/parts/*/accepted.json")]):
@@ -253,7 +257,7 @@ def retire_misread(work):
         if not isinstance(record, dict) or not isinstance(record.get("report"), dict):
             continue
         report, metadata = record["report"], record.get("engine_metadata") or {}
-        if (report.get("passed") is not True or "manual_selection" in metadata or "exhaustion_selection" in metadata
+        if (report.get("passed") is not True or "manual_selection" in metadata
                 or record.get("audio_sha256") in good or not isinstance(record.get("request"), dict)
                 or record["request"].get("kind") not in {"speech", "paragraph_speech", "speech_recovery_part"}):
             continue
@@ -267,5 +271,5 @@ def retire_misread(work):
             retire_acceptance(path.parent, record, "name-shape",
                               {"reason": REASON, "version": NAME_SHAPE_VERSION, "words": found})
             retired.append(path.parent)
-    write_json(marker, {"version": NAME_SHAPE_VERSION, "checked_through": started})
+    write_json(marker, {"version": NAME_SHAPE_VERSION, "policy": SWEEP_POLICY, "checked_through": started})
     return retired

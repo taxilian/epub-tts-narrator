@@ -169,6 +169,16 @@ class SweepTests(unittest.TestCase):
             self.assertTrue((folder / "accepted.json").exists())
         self.assertEqual(read_json(self.work / SWEEP_FILENAME)["version"], NAME_SHAPE_VERSION)
 
+    def test_a_best_effort_choice_that_misread_a_chosen_name_is_retired_with_its_choice(self):
+        chosen = self.accepted("a", "Sendaria swallowed hard.", metadata={"exhaustion_selection": {}})
+        write_json(chosen / "exhaustion-selection.json", {"audit": {}})
+        # A sweep under the earlier policy skipped best-effort choices; this one reads them all again.
+        write_json(self.work / SWEEP_FILENAME, {"version": NAME_SHAPE_VERSION, "checked_through": 4e9})
+        self.assertEqual(retire_misread(self.work), [chosen])
+        self.assertFalse((chosen / "accepted.json").exists())
+        self.assertFalse((chosen / "exhaustion-selection.json").exists())
+        self.assertEqual(len(list(chosen.glob("exhaustion-selection.name-shape-*.json"))), 1)
+
     def test_a_new_check_version_reads_every_take_again(self):
         old = self.accepted("a", "Sendera swallowed hard.")
         write_json(self.work / SWEEP_FILENAME, {"version": NAME_SHAPE_VERSION - 1, "checked_through": 4e9})

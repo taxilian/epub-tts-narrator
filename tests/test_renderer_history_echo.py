@@ -192,6 +192,31 @@ class ExhaustionCandidateTests(unittest.TestCase):
         self.assertEqual(record["attempt"], 2)
         self.assertEqual(len(list(self.directory.glob("exhaustion-selection.history-echo-*.json"))), 1)
 
+    def test_a_take_that_misread_a_chosen_name_is_never_offered(self):
+        from epub_tts_narrator.renderer.exhaustion_selection import select_retained
+        from test_renderer_recovery_boundaries import FormatClient, valid_choice
+        self.candidate(1, " Sal nodder.")
+        self.candidate(2, " Sal nodded again.")
+        record = read_json(self.directory / "attempt-001.json")
+        record["report"].update(reasons=["pronunciation_mismatch"], name_shape={
+            "version": 2, "words": [{"text": "Sal", "heard": "sol"}]})
+        write_json(self.directory / "attempt-001.json", record)
+        client = FormatClient([valid_choice])
+        _, chosen = select_retained(self.directory, self.request, client)
+        self.assertEqual([row["attempt"] for row in client.calls[0]["candidates"]], [2])
+        self.assertEqual(chosen["attempt"], 2)
+
+    def test_only_misread_takes_left_is_a_clear_failure(self):
+        from epub_tts_narrator.renderer.exhaustion_selection import select_retained
+        from test_renderer_recovery_boundaries import FormatClient, valid_choice
+        self.candidate(1, " Sol nodded.")
+        record = read_json(self.directory / "attempt-001.json")
+        record["report"].update(reasons=["pronunciation_mismatch"], name_shape={
+            "version": 2, "words": [{"text": "Sal", "heard": "sol"}]})
+        write_json(self.directory / "attempt-001.json", record)
+        with self.assertRaisesRegex(ValueError, r"misread a name whose pronunciation you chose \(Sal heard as sol\)"):
+            select_retained(self.directory, self.request, FormatClient([valid_choice]))
+
     def test_only_echoes_left_is_a_clear_failure(self):
         from epub_tts_narrator.renderer.exhaustion_selection import select_retained
         from test_renderer_recovery_boundaries import FormatClient, valid_choice

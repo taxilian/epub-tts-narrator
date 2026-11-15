@@ -175,11 +175,21 @@ def select_retained(directory, request, client, *, failure_report=None):
     stopped = {item['summary']['candidate_id'] for item in retained
                if (item['record'].get('report') or {}).get('generation_stopped') == 'silence'
                or 'completion' in (item['record'].get('engine_metadata') or {})}
+    # A take that misread a name whose pronunciation a person chose is never
+    # published, however good the rest of it is (``name_shape``).
+    from .name_shape import REASON as MISREAD, describe
+    misread = {item['summary']['candidate_id']: describe(item['record'].get('report') or {}) for item in retained
+               if MISREAD in ((item['record'].get('report') or {}).get('reasons') or [])}
     candidates = [item for item in retained
                   if item['summary']['candidate_id'] not in echoes and item['summary']['candidate_id'] not in judged_bad
-                  and item['summary']['candidate_id'] not in stopped]
+                  and item['summary']['candidate_id'] not in stopped and item['summary']['candidate_id'] not in misread]
     if not candidates:
         context = _failure_context(failure_report) + f'. Inspect {directory}'
+        if misread:
+            heard = "; ".join(sorted({words for words in misread.values() if words}))
+            raise ValueError('Every usable retained take misread a name whose pronunciation you chose'
+                             + (f' ({heard})' if heard else '') + ', so none is published; edit the passage, '
+                             'its direction or the pronunciation and retry' + context)
         if stopped and not echoes and not judged_bad:
             raise ValueError('Every retained take went silent before finishing its text (or was finished '
                              'from such a start and still failed), so none is published' + context)
@@ -203,11 +213,11 @@ def select_retained(directory, request, client, *, failure_report=None):
         saved = read_json(regular_file(path))
         offered = {item.get('candidate_id') for item in
                    saved.get('audit', {}).get('payload', {}).get('candidates', [])}
-        if offered & (set(echoes) | judged_bad):
-            # A pending choice that offered echoes or takes a person marked
-            # bad is retired, not trusted.
+        if offered & (set(echoes) | judged_bad | set(misread)):
+            # A pending choice that offered echoes, takes a person marked bad
+            # or takes that misread a chosen name is retired, not trusted.
             archive(directory, ['exhaustion-selection.json'],
-                    {'retired_candidates': sorted(offered & (set(echoes) | judged_bad))})
+                    {'retired_candidates': sorted(offered & (set(echoes) | judged_bad | set(misread)))})
     if path.exists() or path.is_symlink():
         saved = read_json(regular_file(path))
         state = {key: value for key, value in saved.items() if key != 'record_sha256'}
