@@ -1710,6 +1710,16 @@ def _publish(stage, destination, **kwargs):
         raise RenderBlocked(str(exc)) from exc
 
 
+def _reuse_inputs(chunk):
+    """What decides whether a chunk's saved audio is still this chunk's: words, voice, direction, controls."""
+    import json
+    from .performance_compiler import performance_kwargs
+    from .speech_identity import _direction
+    voice = chunk["segment"].get("voice_id")
+    return (chunk.get("spoken_text"), voice, _direction(chunk, voice),
+            json.dumps(performance_kwargs(chunk, voice), sort_keys=True))
+
+
 def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_paragraph=False):
     """Group new paragraphs while preserving legacy accepted chunk boundaries."""
     plan = make_plan(bundle, config)
@@ -1749,6 +1759,21 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
         return plan
     from .paragraphs import group_paragraphs
     preserved, preserved_groups = set(), []
+    # A saved boundary is kept only while its audio can still be reused: once
+    # a member's words, voice, direction or controls changed (a pronunciation
+    # chosen since, say), it renders again anyway, so it is grouped afresh
+    # under the current limits instead of at an older, longer size.
+    current = {chunk["chunk_id"]: chunk for chapter in plan["chapters"] for chunk in chapter["chunks"]
+               if isinstance(chunk.get("chunk_id"), str)}
+
+    def unchanged(saved):
+        chunk = current.get(saved.get("chunk_id"))
+        if chunk is None:
+            return False
+        try:
+            return _reuse_inputs(saved) == _reuse_inputs(chunk)
+        except (ValueError, KeyError, TypeError):
+            return False
     if work:
         from .paragraph_recovery import load_paragraph_fallbacks
         try:
@@ -1761,7 +1786,7 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
             # deliberately removed clip should need regeneration on resume.
             if request.get("kind") == "speech":
                 chunk = request.get("chunk", {})
-                if isinstance(chunk, dict) and isinstance(chunk.get("chunk_id"), str):
+                if isinstance(chunk, dict) and isinstance(chunk.get("chunk_id"), str) and unchanged(chunk):
                     preserved.add(chunk["chunk_id"])
             elif request.get("kind") == "paragraph_speech":
                 chunk = request.get("chunk", {})
@@ -1772,7 +1797,7 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
                     # An older accepted performance can exist under a previous
                     # voice/model. It must not re-form a group that failed with
                     # the currently selected voices.
-                    if not fallback_members.intersection(members):
+                    if not fallback_members.intersection(members) and all(unchanged(turn) for turn in turns):
                         preserved_groups.append(members)
     return group_paragraphs(plan, max_chars=config["render"].get("max_paragraph_chars", 1000),
                            preserved_chunk_ids=preserved, preserved_groups=preserved_groups)

@@ -309,6 +309,27 @@ class ParagraphWorkflowTests(unittest.TestCase):
                          [entry["chunk_id"] for entry in checkpoint["acceptance"]])
         self.assertEqual(self.package()["status"], "complete")
 
+    def test_a_saved_grouping_is_kept_only_while_its_audio_can_be_reused(self):
+        self.chapters()
+        group = next(iter(self.grouped_clips().values()))["request"]["chunk"]
+        members = [turn["chunk_id"] for turn in group["paragraph_turns"]]
+
+        def groups(bundle):
+            plan = make_render_plan(bundle, self.config)
+            return [[turn["chunk_id"] for turn in chunk.get("paragraph_turns", [])]
+                    for chapter in plan["chapters"] for chunk in chapter["chunks"]]
+        # A lower limit keeps a grouping whose saved audio is still this passage's.
+        self.config["render"]["max_paragraph_chars"] = len(group["spoken_text"]) - 1
+        self.assertIn(members, groups(self.bundle))
+        # Once a member's direction changed (its audio renders again anyway),
+        # the paragraph is grouped afresh under the current limit.
+        changed = deepcopy(self.bundle)
+        first = group["paragraph_turns"][0]["segment"]["id"]
+        for segment in (row for chapter in changed["chapters"] for row in chapter["rows"]):
+            if segment["id"] == first:
+                segment["delivery"] = {"direction": "whispered urgently", "evidence": []}
+        self.assertNotIn(members, groups(changed))
+
     def test_accepted_individual_clips_survive_enabling_paragraph_mode(self):
         self.config["render"]["paragraph_synthesis"] = False
         first = self.chapters()
