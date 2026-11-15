@@ -50,6 +50,13 @@ class SteadyToneTests(unittest.TestCase):
         self.assertAlmostEqual(found["frequency_hz"], 7100, delta=150)
         self.assertGreaterEqual(found["presence"], 0.5)
 
+    def test_a_short_take_of_one_held_sound_is_not_judged(self):
+        from epub_tts_narrator.renderer.steady_tone import check, measure
+        held = self.root / "held-sound-take.wav"
+        write_speechlike(held, tone_hz=7100, seconds=1.0)
+        self.assertIsNone(measure(held))
+        self.assertIsNone(check(held))
+
     def test_verification_rejects_it_before_recognition(self):
         from epub_tts_narrator.renderer.quality import validate_audio
         import test_renderer_reference_consensus as consensus

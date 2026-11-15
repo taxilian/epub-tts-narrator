@@ -32,6 +32,9 @@ MIN_PRESENCE = 0.5
 AUDIBLE_DB = 50.0
 SWEEP_FILENAME = "steady-tone-sweep.json"
 _FRAME = 4096
+# A short take of one held sound (an "Oh…") keeps steady resonances that are
+# not a tone; only takes with this much voiced audio are judged.
+MIN_VOICED_SECONDS = 2.0
 _VOICED_RMS = 0.01
 _MTIME_SLACK = 120  # seconds: an acceptance written while a sweep ran is read by the next one
 
@@ -50,7 +53,7 @@ def measure(path):
     window = np.hanning(_FRAME)
     frames = [samples[start:start + _FRAME] for start in range(0, len(samples) - _FRAME, _FRAME // 2)]
     voiced = [frame for frame in frames if np.sqrt(np.mean(frame ** 2)) > _VOICED_RMS]
-    if len(voiced) < 4:
+    if len(voiced) * (_FRAME // 2) / rate < MIN_VOICED_SECONDS:
         return None
     spectra = np.abs(np.fft.rfft(np.stack(voiced) * window, axis=1)) ** 2
     freqs = np.fft.rfftfreq(_FRAME, 1 / rate)
