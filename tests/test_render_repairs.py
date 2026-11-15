@@ -811,6 +811,35 @@ class RepairScreenTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("q")
             await self.wait_for(pilot, lambda: not app.is_running)
 
+    async def test_the_rejected_list_scrolls_to_follow_the_highlighted_take(self):
+        from epub_tts_narrator.renderer.progress import live_board, report_book_state
+        review = FakeRepair()
+
+        def command():
+            with live_board(print) as notify:
+                report_book_state(notify, "/books/fixture-book", "rendering")
+                for attempt in range(1, 61):
+                    notify.__self__.rejected_take({"request_hash": review.request_hash, "attempt": attempt,
+                                                   "reasons": ["text_mismatch"], "detail": ""}, review)
+                report_book_state(notify, "/books/fixture-book", "done")
+            return 0
+
+        app = self.make_app(command)
+        app._player = FakePlayer()
+        async with app.run_test(size=(120, 30)) as pilot:
+            await self.wait_for(pilot, lambda: self.model.state == "finished")
+            await pilot.pause()
+            table = app.query_one("#rejected")
+            self.assertEqual(table.row_count, 60)
+            table.focus()
+            for _ in range(40):
+                await pilot.press("down")
+            await pilot.pause()
+            self.assertEqual(table.cursor_row, 40)
+            self.assertGreater(table.scroll_y, 0)  # the list moved to keep the highlighted take on screen
+            self.assertLessEqual(table.region.height, 30)
+            app.exit()
+
     async def test_the_summary_drills_into_a_book_and_quitting_always_asks(self):
         from epub_tts_narrator.tui_widgets import ConfirmScreen
         repair, requested = FakeRepair(), []

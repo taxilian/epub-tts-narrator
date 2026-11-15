@@ -137,7 +137,8 @@ class RunApp(CapturePrintMixin, App):
     .tile.warning { border: round $warning; }
     .tile.error { border: round $error; }
     #books { height: 1fr; }
-    #rows, #workers, #errors { height: 1fr; }
+    /* A list's own height must be bounded, or it grows past the screen and never scrolls to its cursor. */
+    #rows, #workers, #errors, #rejected { height: 1fr; }
     #chapter-breakdown { height: auto; padding: 0 1; }
     #coordinators { height: auto; max-height: 18; }
     #node-work { height: auto; max-height: 8; }
