@@ -288,6 +288,29 @@ class BacklogBoundTests(unittest.TestCase):
         self.assertEqual(started, ["second", "third", "fourth"])
         self.assertEqual(budget.snapshot()["pending_count"], 0)
 
+    def test_an_earlier_books_waiter_is_granted_first(self):
+        import contextvars
+        from epub_tts_narrator.renderer.render_lanes import RANK
+        budget = BacklogBudget(max_pending=1, max_materialized_bytes=100)
+        first = budget.acquire()
+        started, threads = [], []
+
+        def take(label, rank):
+            RANK.set(rank)
+            ticket = budget.acquire()
+            started.append(label)
+            ticket.release()
+
+        for index, (label, rank) in enumerate((("later-a", 1), ("later-b", 1), ("earlier", 0)), 1):
+            thread = threading.Thread(target=contextvars.copy_context().run, args=(take, label, rank))
+            thread.start()
+            threads.append(thread)
+            self.assertTrue(wait_until(lambda: len(budget._waiters) == index))
+        first.release()
+        for thread in threads:
+            thread.join(WORKER_WAIT)
+        self.assertEqual(started, ["earlier", "later-a", "later-b"])
+
     def test_many_failed_but_retained_takes_cannot_exhaust_the_budget(self):
         budget = BacklogBudget(max_pending=2, max_materialized_bytes=256)
         retained_on_disk = []

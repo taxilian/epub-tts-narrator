@@ -200,9 +200,13 @@ class BacklogBudget:
     def _grant(self, *, new_generation, initial_bytes, cancel, phase_ok):
         if not isinstance(initial_bytes, int) or initial_bytes < 0:
             raise ValueError("initial_bytes must be a nonnegative integer")
-        marker = (object(), new_generation)
+        from .render_lanes import RANK
+        rank = RANK.get()
+        marker = (object(), new_generation, rank)
         with self._cond:
-            self._waiters.append(marker)
+            # An earlier book (lower rank) waits ahead; equal ranks keep their order.
+            position = sum(1 for waiter in self._waiters if waiter[2] <= rank)
+            self._waiters.insert(position, marker)
             try:
                 while True:
                     if self._closed:

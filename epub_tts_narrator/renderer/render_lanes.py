@@ -70,6 +70,13 @@ class LaneFull(RuntimeError):
 RANK = ContextVar("render_dispatch_rank", default=0)
 
 
+class _Waiter:
+    __slots__ = ("rank",)
+
+    def __init__(self, rank):
+        self.rank = rank
+
+
 class _Job:
     __slots__ = ("context", "function", "args", "kwargs", "future", "operation",
                  "reserve", "release", "rank")
@@ -161,9 +168,11 @@ class ResourceLane:
             raise TypeError("run requires a callable")
         if reserve is not None and not callable(reserve):
             raise TypeError("reserve must be callable")
-        marker = object()
+        marker = _Waiter(RANK.get())
         with self._cond:
-            self._capacity_waiters.append(marker)
+            # An earlier book (lower rank) waits ahead; equal ranks keep their order.
+            position = sum(1 for waiter in self._capacity_waiters if waiter.rank <= marker.rank)
+            self._capacity_waiters.insert(position, marker)
             try:
                 while True:
                     stop_if_requested()

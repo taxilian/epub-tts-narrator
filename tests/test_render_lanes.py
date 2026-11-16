@@ -142,6 +142,35 @@ class ResourceLaneContractTests(LaneTestCase):
             self.assertFalse(thread.is_alive())
         self.assertEqual(started, ["first", "second"])
 
+    def test_run_capacity_waiters_of_an_earlier_book_enter_first(self):
+        from epub_tts_narrator.renderer.render_lanes import RANK
+        lane = self.make_lane(name="capacity-rank", workers=1, stage="synthesis", max_pending=1)
+        blocker = Blocker()
+        running = lane.submit(blocker)
+        self.assertTrue(blocker.entered.wait(WORKER_WAIT))
+        holder = Blocker()
+        queued = threading.Thread(target=lambda: lane.run(holder))
+        queued.start()
+        self.assertTrue(wait_until(lambda: lane._pending == 1))
+        started = []
+
+        def run_ranked(label, rank):
+            RANK.set(rank)
+            lane.run(Recorder(label, started))
+        threads = []
+        for count, (label, rank) in enumerate((("later", 1), ("earlier", 0)), 1):
+            thread = threading.Thread(target=contextvars.copy_context().run, args=(run_ranked, label, rank))
+            thread.start()
+            threads.append(thread)
+            self.assertTrue(wait_until(lambda: len(lane._capacity_waiters) == count))
+        blocker.release.set()
+        running.result(WORKER_WAIT)
+        self.assertTrue(holder.entered.wait(WORKER_WAIT))
+        holder.release.set()
+        for thread in (queued, *threads):
+            thread.join(WORKER_WAIT)
+        self.assertEqual(started, ["earlier", "later"])
+
     def test_global_fifo_ignores_owner_boundaries(self):
         lane = self.make_lane(name="fair", workers=1, stage="synthesis",
                               max_pending=16)
