@@ -312,7 +312,7 @@ def retire_misread(work):
     marker = work / SWEEP_FILENAME
     saved = read_json(marker) if marker.is_file() and not marker.is_symlink() else {}
     from . import name_phonemes
-    phonemes = name_phonemes.VERSION if name_phonemes.available() else None
+    phonemes = name_phonemes.STRICTNESS if name_phonemes.available() else None
     since = (saved.get("checked_through", 0) if saved.get("version") == NAME_SHAPE_VERSION
              and saved.get("policy") == SWEEP_POLICY and saved.get("phonemes") == phonemes else 0)
     started = time.time()

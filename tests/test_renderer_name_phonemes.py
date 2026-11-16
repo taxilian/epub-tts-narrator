@@ -50,6 +50,7 @@ class ReadingCostTests(unittest.TestCase):
         self.assertTrue(said_right(READING, "m ə5 ɹ ɛ n ts. ɹ ə"))  # tone digit, stray period
         self.assertTrue(said_right("V AE0 L AO1 R AH0 N", "v ə l oːɹ ɹ ə n"))  # an r-coloured vowel before its R
         self.assertTrue(said_right("T AE1 N", "th æ n"))  # aspiration
+        self.assertTrue(said_right("M AE0 L AO1 R IY0 AH0 N Z", "m ə l oːɹ r i ə n z"))  # one R written twice
 
 
 class VerdictTests(unittest.TestCase):

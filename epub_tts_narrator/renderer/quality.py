@@ -122,7 +122,7 @@ def validation_key(expected_text: str, verifier, policy: dict | None = None, *,
             identity["name_shape_version"] = NAME_SHAPE_VERSION
             from . import name_phonemes
             if name_phonemes.available():
-                identity["name_phoneme_version"] = name_phonemes.VERSION
+                identity["name_phoneme_version"] = name_phonemes.STRICTNESS
     judge_identity = getattr(verifier, "reference_judge_identity", None)
     if judge_identity is not None:
         from .speech_coverage import SPEECH_COVERAGE_VERSION

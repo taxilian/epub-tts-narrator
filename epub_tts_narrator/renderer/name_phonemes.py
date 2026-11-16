@@ -46,7 +46,14 @@ import json
 from pathlib import Path
 import threading
 
-VERSION = 2
+# Verdicts' identity: saved verdicts and the verdict store are read only
+# under this version, so any change to how a name is heard bumps it.
+VERSION = 3
+# Bumped only when the check may fail a take it passed before: it names the
+# check in validation keys and in the sweep of takes in use, so a change that
+# only accepts more never re-verifies or re-sweeps a book. (3: an R written
+# twice is one sound.)
+STRICTNESS = 2
 MODEL_DIRECTORY = None  # set by configure()
 MISREAD_COST = 1.0
 PAD_SECONDS = 0.12
@@ -96,6 +103,7 @@ _MERGED_BEFORE_R = {"front": {"ɛ", "æ", "a", "e", "eɪ", "ɛː", "eː", "aː"}
 # A vowel before a syllable-final L, coloured by it.
 _BEFORE_DARK_L = {"u", "uː", "ʊ", "o", "oː", "oʊ", "ʉ", "ɔ", "ɔː", "ʌ", "ə", "ɐ", "ɑ", "ɑː", "a"}
 _ASPIRATED = {"t", "k", "p", "tɕ", "ts", "ʈ"}
+_R_SYMBOLS = {"r", "ʁ", "ɻ"}
 
 
 def _targets(reading):
@@ -125,6 +133,8 @@ def _normalize(phones):
             continue
         if len(phone) > 1 and phone.endswith("h") and phone[:-1] in _ASPIRATED:
             phone = phone[:-1]
+        if phone in _R_SYMBOLS:
+            phone = "ɹ"  # one R sound however it is written
         if len(phone) > 1 and phone.endswith("ɹ") and _is_vowel(phone[:-1]):
             out += [phone[:-1], "ɹ"]
         elif phone in ("əl", "ɫ̩"):
