@@ -54,6 +54,19 @@ class HistoryPlanTests(unittest.TestCase):
         self.assertEqual(mode(stuck), "reading")
         self.assertEqual(mode(echoes + [attempt(["text_mismatch"], applied="reading", echo=True)]), "none")
 
+    def test_takes_that_ran_on_past_their_text_cut_history_like_silent_ones(self):
+        ran_on = {"passed": False, "reasons": ["generation_or_verification_error"], "error_type": "FishHTTPError",
+                  "error": "Fish HTTP 500: EngineError: Drama 3 did not finish the text: 'length'"}
+        runaway = [{"report": dict(ran_on), "engine_metadata": {}}, {"report": {"passed": False, "reasons": ["generation_incomplete"]}}]
+        self.assertIsNone(mode(runaway[:1]))
+        self.assertEqual(mode(runaway), "reading")
+        self.assertEqual(mode(runaway, readings=False), "none")
+        # The next runaway, with no saved metadata, was made under "reading": that turn is the trouble too.
+        self.assertEqual(mode(runaway + [{"report": dict(ran_on), "engine_metadata": {}}]), "none")
+        # A take the silence watch stopped said its start; it is finished, not a runaway.
+        stopped = {"report": {"passed": False, "reasons": ["text_mismatch"], "generation_stopped": "silence"}}
+        self.assertIsNone(mode([stopped, stopped]))
+
     def test_an_echo_climbs_the_ladder_but_never_after_a_tone(self):
         self.assertEqual(mode([attempt(["text_mismatch"], echo=True)]), "role_tag")
         self.assertEqual(mode([attempt(["text_mismatch"], echo=True), attempt(["steady_tone"])]), "reading")
