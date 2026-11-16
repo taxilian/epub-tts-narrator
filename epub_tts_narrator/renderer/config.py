@@ -100,6 +100,9 @@ DEFAULTS = {
         "phonetic_fallback": "analysis",
         "recurring_resolution": "analysis", "recurrence_threshold": 3,
         "heard_variants": "learn",
+        # Local phoneme recognizer that checks person-chosen pronunciations by
+        # sound (renderer/name_phonemes.py); unset, the check does not run.
+        "name_phoneme_model": None,
         "max_resolution_attempts": 12, "max_resolution_rounds": 2,
         "device": "cpu", "compute_type": "int8", "cpu_threads": 4,
     },
@@ -459,6 +462,8 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
         raise ValueError("verification.recurring_resolution must be analysis or off")
     if not isinstance(verification["heard_variants"], str) or verification["heard_variants"] not in {"learn", "off"}:
         raise ValueError("verification.heard_variants must be learn or off")
+    if verification["name_phoneme_model"] is not None and not isinstance(verification["name_phoneme_model"], str):
+        raise ValueError("verification.name_phoneme_model must be a model directory path")
     for key, low, high in (("recurrence_threshold", 2, 10),
                           ("max_resolution_attempts", 3, 30),
                           ("max_resolution_rounds", 1, 5)):
@@ -596,7 +601,7 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
         raise ValueError("engine.checkpoint is required for Drama 3")
     for section, key in (
         ("engine", "checkpoint"), ("verification", "model"), ("verification", "reference_model"),
-        ("voice_design", "checkpoint"), ("voices", "directory"),
+        ("verification", "name_phoneme_model"), ("voice_design", "checkpoint"), ("voices", "directory"),
         ("render", "work_dir"), ("render", "output_dir"), ("render", "epub"), ("render", "performance_plan"),
         ("chapter_server", "data_dir"),
     ):

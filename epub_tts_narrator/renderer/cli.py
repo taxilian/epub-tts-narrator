@@ -497,6 +497,8 @@ def main(argv=None, *, in_shell=False):
             config = load_config(config_path, require_verifier=False)
         else:
             config = load_config(config_path)
+        from . import name_phonemes
+        name_phonemes.configure((config.get("verification") or {}).get("name_phoneme_model"))
         if args.command in {"render", "compare-performance", "pronunciations", "pronounce", "pronounce-name",
                             "local-server"}:
             # auto_serve spawns `serve --config` from this file; the config

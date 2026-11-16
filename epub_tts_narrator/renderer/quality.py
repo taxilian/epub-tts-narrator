@@ -120,6 +120,9 @@ def validation_key(expected_text: str, verifier, policy: dict | None = None, *,
             # Only passages with a chosen reading are checked for its shape.
             from .name_shape import NAME_SHAPE_VERSION
             identity["name_shape_version"] = NAME_SHAPE_VERSION
+            from . import name_phonemes
+            if name_phonemes.available():
+                identity["name_phoneme_version"] = name_phonemes.VERSION
     judge_identity = getattr(verifier, "reference_judge_identity", None)
     if judge_identity is not None:
         from .speech_coverage import SPEECH_COVERAGE_VERSION
@@ -1134,7 +1137,12 @@ def validate_audio(path, expected_text: str, verifier, policy: dict | None = Non
         # A chosen pronunciation heard with its syllables rearranged is a
         # wrong rendition even when every word-level check accepted it.
         from .name_shape import apply
-        return apply(report, expected_text, performance, purpose=purpose)
+        report = apply(report, expected_text, performance, purpose=purpose)
+        if purpose == "speech" and performance is not None:
+            # And by its phonemes: said as chosen, not merely spelled alike.
+            from . import name_phonemes
+            report = name_phonemes.apply(report, path, performance)
+        return report
     finally:
         if ticket is not None:
             ticket.release()

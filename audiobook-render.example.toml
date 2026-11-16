@@ -97,6 +97,11 @@ max_resolution_rounds = 2
 # plausible way, a sound review, or a confirmed pronounce-name test sentence.
 # Never excuses missing/extra words, numbers, negation or acoustic failures.
 heard_variants = "learn"
+# Hear each person-chosen pronunciation (`pronounce`) by its phonemes and reject
+# a take that says it differently ("seh-NEE-druh" for seh-NED-ruh). Optional
+# local model (Apache-2.0, about 1.3 GB):
+#   huggingface-cli download facebook/wav2vec2-lv-60-espeak-cv-ft --local-dir ./models/wav2vec2-lv-60-espeak-cv-ft
+# name_phoneme_model = "./models/wav2vec2-lv-60-espeak-cv-ft"
 # Optional second recognizer for small wording discrepancies in voice samples.
 # Download the model first; book passages always use the strict speech policy.
 # reference_model = "./models/parakeet-tdt-0.6b-v3"

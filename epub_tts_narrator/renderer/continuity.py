@@ -328,10 +328,18 @@ def _chosen_readings(request):
 
 
 def _readings_heard_right(accepted):
-    """Chosen pronunciations an accepted take was heard saying in their own shape."""
+    """Chosen pronunciations an accepted take was heard saying right.
+
+    Its saved phoneme verdicts decide when it has them (``name_phonemes``);
+    otherwise the recognizer's spelling must keep the reading's shape.
+    """
     request, report = accepted.get("request"), accepted.get("report")
     if not isinstance(request, dict) or not isinstance(report, dict) or not _chosen_readings(request):
         return frozenset()
+    from .name_phonemes import saved
+    verdicts = saved(report)
+    if verdicts is not None:
+        return frozenset(verdict["key"] for verdict in verdicts if verdict.get("ok") and verdict.get("key"))
     from .name_shape import heard_right
     from .performance_runtime import verification_options
     try:

@@ -38,7 +38,9 @@ SWEEP_FILENAME = "name-shape-sweep.json"
 # 3: a best-effort choice is also retired when a chosen name is missing from
 #    it (``misread(require_heard=True)``). (A partial replay of history is a
 #    history echo, retired where its history is known: ``history_echo``.)
-SWEEP_POLICY = 3
+# 4: every take in use with a chosen reading is also heard by its phonemes
+#    (``name_phonemes``), once, when the phoneme model is present.
+SWEEP_POLICY = 4
 _STRETCH = 40  # words: a longer differing stretch is not a misheard name
 _MTIME_SLACK = 120  # seconds: an acceptance written while a sweep ran is read by the next one
 
@@ -222,7 +224,11 @@ def apply(report, expected_text, performance, *, purpose="speech"):
 def describe(report):
     """``Marendra heard as Marnedra`` for a rejected report, or ``""``."""
     words = (report.get("name_shape") or {}).get("words") or []
-    return "; ".join(f"{item['text']} heard as {item['heard']}" for item in words)
+    found = "; ".join(f"{item['text']} heard as {item['heard']}" for item in words)
+    if not found:
+        from .name_phonemes import describe as by_phonemes
+        found = by_phonemes((report.get("name_phonemes") or {}).get("words"))
+    return found
 
 
 def misread(record, *, require_heard=False):
@@ -297,8 +303,10 @@ def retire_misread(work):
     # written since the last sweep (by any renderer) are read again.
     marker = work / SWEEP_FILENAME
     saved = read_json(marker) if marker.is_file() and not marker.is_symlink() else {}
+    from . import name_phonemes
+    phonemes = name_phonemes.VERSION if name_phonemes.available() else None
     since = (saved.get("checked_through", 0) if saved.get("version") == NAME_SHAPE_VERSION
-             and saved.get("policy") == SWEEP_POLICY else 0)
+             and saved.get("policy") == SWEEP_POLICY and saved.get("phonemes") == phonemes else 0)
     started = time.time()
     retired = []
     for path in sorted([*clips.glob("*/accepted.json"), *clips.glob("*/parts/*/accepted.json")]):
@@ -329,8 +337,14 @@ def retire_misread(work):
             if missing:
                 evidence = {"reason": REASON, "version": NAME_SHAPE_VERSION, "missing": missing}
                 found = True
+        if not found and phonemes is not None:
+            verdicts = name_phonemes.judge(record, path.parent)
+            if verdicts and not all(verdict["ok"] for verdict in verdicts):
+                evidence = {"reason": REASON, "version": NAME_SHAPE_VERSION, "phonemes": verdicts}
+                found = True
         if found:
             retire_acceptance(path.parent, record, "name-shape", evidence)
             retired.append(path.parent)
-    write_json(marker, {"version": NAME_SHAPE_VERSION, "policy": SWEEP_POLICY, "checked_through": started})
+    write_json(marker, {"version": NAME_SHAPE_VERSION, "policy": SWEEP_POLICY, "phonemes": phonemes,
+                        "checked_through": started})
     return retired

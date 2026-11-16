@@ -144,6 +144,12 @@ class ReadingExamples:
                         or (current.get("engine_metadata") or {}).get("continuity_codes") != item["marker"]):
                     continue  # retired or replaced since the index was read
                 load_codes(codes, item["marker"])
+                # An example must say its names as chosen, by its phonemes
+                # (older takes were judged only by the recognizer's spelling).
+                from .name_phonemes import judge
+                verdicts = judge(current, item["accepted"].parent)
+                if verdicts and not all(verdict["ok"] for verdict in verdicts):
+                    continue
             except (ValueError, OSError):
                 continue
             marker = item["marker"]

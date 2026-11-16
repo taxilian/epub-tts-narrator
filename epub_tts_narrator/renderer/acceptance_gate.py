@@ -47,6 +47,11 @@ def refusal(record, directory):
     words = misread(record, require_heard=rescued(record))
     if words:
         return f"it misread a chosen pronunciation ({words})"
+    # Said as chosen, by its phonemes (name_phonemes; skipped without the model).
+    from .name_phonemes import describe, judge
+    verdicts = judge(record, directory)
+    if verdicts and not all(verdict["ok"] for verdict in verdicts):
+        return f"it misread a chosen pronunciation ({describe(verdicts)})"
     report = record.get("report") or {}
     if report.get("history_echo"):
         return "it replays a heard history turn instead of its passage"

@@ -199,6 +199,14 @@ def select_retained(directory, request, client, *, failure_report=None):
     from .name_shape import misread as misread_words
     misread = {item['summary']['candidate_id']: words for item in retained
                if (words := misread_words(item['record'], require_heard=True))}
+    # And takes whose chosen names were not said as chosen, by their phonemes.
+    from .name_phonemes import describe as phoneme_misreads, judge
+    for item in retained:
+        if item['summary']['candidate_id'] in misread:
+            continue
+        verdicts = judge(item['record'], item['audio'].parent)
+        if verdicts and not all(verdict['ok'] for verdict in verdicts):
+            misread[item['summary']['candidate_id']] = phoneme_misreads(verdicts)
     # Nor is a take carrying a steady high-pitched tone (steady_tone).
     from .steady_tone import REASON as TONE
     tonal = {item['summary']['candidate_id'] for item in retained
