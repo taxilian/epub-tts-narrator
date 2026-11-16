@@ -693,6 +693,13 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 raise SpeechVerificationFailed(
                     f"Speech recovery selected split. Inspect {directory}",
                     request=request, report=dict(record["report"], resolution_action="split"))
+        from .name_shape import REASON as MISREAD
+        if record["report"].get("reasons") == [MISREAD]:
+            # A misread chosen name is never published: the best-effort chooser
+            # refuses it and a repair's shorter parts misread it as often. Only
+            # another take can say it right, so takes continue within the
+            # passage's allowance instead of ending in a repair after three.
+            return None
         if broad_recovery and direction_session is None:
             observed = {**resolution_session.records, record['attempt']: record}
             failed = sum(row.get('audio_file') is not None and row.get('report', {}).get('passed') is False

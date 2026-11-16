@@ -341,6 +341,38 @@ class BroadRepairTests(unittest.TestCase):
         self.assertEqual(self.client.selection_calls, [])
         self.assertFalse(list((self.work / 'clips').glob('*/accepted.json')))
 
+    def test_a_misread_name_keeps_making_takes_and_every_retry_tries_again(self):
+        from test_renderer_name_shape import performance
+        from test_renderer_speech_identity import speech_request
+        from epub_tts_narrator.renderer.workflow import RenderBlocked
+        self.client.plan = {'parts': [], 'reason': 'No further useful rendering plan.'}
+        text = "Marendra nodded."
+        self.chunk = speech_request(self.voice, text)["chunk"]
+        self.chunk.update(expressive_direction="",
+                          expressive_performance=performance(text, "Marendra", "M AH0 R EH1 N D R AH0"))
+        from epub_tts_narrator.renderer.engines import prepare_synthesis
+        synthesize = self.engine.synthesize
+
+        def with_controls(text, voice, path, *, seed, direction="", performance=None, traits=""):
+            # The fixture engine ignores controls; record them as a real engine does.
+            metadata = synthesize(text, voice, path, seed=seed, direction=direction)
+            return {**metadata, **prepare_synthesis(text, direction, performance=performance, traits=traits)[2]}
+        self.engine.synthesize = with_controls
+        self.engine.heard_override = lambda text, direction, number: "Marnedra nodded."
+        allowance = self.config["verification"]["max_resolution_attempts"]
+        made = []
+        for _ in range(2):
+            before = len(self.engine.calls)
+            with self.assertRaisesRegex(RenderBlocked, "misread a name"):
+                self.render_chunk()
+            made.append(len(self.engine.calls) - before)
+        # Not three takes and a repair: the whole allowance, and again on retry.
+        self.assertEqual(made, [allowance, allowance])
+        self.assertEqual(self.client.selection_calls, [])
+        self.engine.heard_override = lambda text, direction, number: text
+        result, acceptance = self.render_chunk()
+        self.assertTrue(acceptance["report"]["passed"])
+
     def test_rejected_terminal_repair_allows_fresh_ordinary_generation_on_rerun(self):
         from legacy_recovery_fixtures import LegacySpeechResolver
         from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed

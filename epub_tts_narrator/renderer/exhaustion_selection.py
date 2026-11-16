@@ -173,6 +173,10 @@ def _failure_context(failure_report):
     return '; original failure: ' + safe_error_text(str(error))
 
 
+class NoUsableTake(ValueError):
+    """No retained take may be published (all misread, echoed, tonal, judged bad or unusable)."""
+
+
 def select_retained(directory, request, client, *, failure_report=None):
     from .history_echo import archive, candidate_echo
     directory = Path(directory)
@@ -218,23 +222,23 @@ def select_retained(directory, request, client, *, failure_report=None):
     if not candidates:
         context = _failure_context(failure_report) + f'. Inspect {directory}'
         if tonal and not misread:
-            raise ValueError('Every usable retained take carries a steady high-pitched tone, so none is published'
+            raise NoUsableTake('Every usable retained take carries a steady high-pitched tone, so none is published'
                              + context)
         if misread:
             heard = "; ".join(sorted({words for words in misread.values() if words}))
-            raise ValueError('Every usable retained take misread a name whose pronunciation you chose'
+            raise NoUsableTake('Every usable retained take misread a name whose pronunciation you chose'
                              + (f' ({heard})' if heard else '') + ', so none is published; edit the passage, '
                              'its direction or the pronunciation and retry' + context)
         if stopped and not echoes and not judged_bad:
-            raise ValueError('Every retained take went silent before finishing its text (or was finished '
+            raise NoUsableTake('Every retained take went silent before finishing its text (or was finished '
                              'from such a start and still failed), so none is published' + context)
         if judged_bad:
-            raise ValueError('Every usable retained take was marked bad by a person listening, so none is '
+            raise NoUsableTake('Every usable retained take was marked bad by a person listening, so none is '
                              'published' + context)
         if echoes:
-            raise ValueError('Every retained take repeats an earlier line of chapter history (history echo); '
+            raise NoUsableTake('Every retained take repeats an earlier line of chapter history (history echo); '
                              'none is a rendition of this passage, so none is published' + context)
-        raise ValueError('No physically usable bound full-span candidate remains' + context)
+        raise NoUsableTake('No physically usable bound full-span candidate remains' + context)
     payload = {'mode': 'exhaustion_selection', 'request_sha256': digest(request),
                'requested_text': logical_text(request), 'request': deepcopy(request),
                'candidates': [item['summary'] for item in candidates]}

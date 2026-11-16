@@ -8,7 +8,7 @@ from .history_echo import candidate_echo
 from .clip_repair_execute import execute_plan
 from .clip_repair_state import ClipRepairState, ClipRecoveryUnavailable
 from .exhaustion_candidates import retained_candidates, same_span
-from .exhaustion_selection import select_retained
+from .exhaustion_selection import NoUsableTake, select_retained
 from .retry_budget import SpeechRetryBudget
 
 
@@ -153,6 +153,26 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
                     return result
         notify('  Selecting the best physically usable full-clip take under the best-effort exhaustion policy.')
         failure_context = failure_report if failure_report is not None else _saved_failure_report(directory, request)
+        try:
+            return select_or_filter(directory, request, client, failure_context, text, verifier, config,
+                                    notify=notify)
+        except NoUsableTake:
+            budget = options.get('retry_budget')
+            if budget is None or budget.started(directory, digest(request)):
+                raise
+        # Nothing saved may be published and this run has made no take of the
+        # passage yet (a resumed repair or choice came first): a retry must
+        # try again, not repeat the same refusal.
+        notify('  No saved take may be published; making new takes before giving up.')
+        try:
+            return ordinary(text, generate, directory, request, verifier, config, **options)
+        except SpeechVerificationFailed as exc:
+            chosen = _chosen(directory, request)
+            if chosen is not None:
+                return chosen
+            if exc.request != request or exc.report.get('resolution_action') == 'split':
+                raise
+            failure_context = exc.report
         return select_or_filter(directory, request, client, failure_context, text, verifier, config,
                                 notify=notify)
     except ClipRecoveryUnavailable as exc:
