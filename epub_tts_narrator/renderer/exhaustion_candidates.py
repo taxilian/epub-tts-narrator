@@ -72,7 +72,8 @@ def _compact_inputs(value):
     The digest keeps the record bound; the model never needed the audits.
     """
     if isinstance(value, dict):
-        return {key: ({'audit_sha256': digest(item)} if key == 'audit' and isinstance(item, dict)
+        return {key: ({'audit_sha256': digest(item)}
+                      if key == 'audit' and isinstance(item, dict) and set(item) != {'audit_sha256'}
                       else _compact_inputs(item)) for key, item in value.items()}
     if isinstance(value, list):
         return [_compact_inputs(item) for item in value]

@@ -52,6 +52,24 @@ class DetectionTests(unittest.TestCase):
             " I know it works, but I can't help but feel nervous, who was nibbling at her thumbnail.",
             [("latest", tagged("I know it works, but I can’t help but feel nervous."))]))
 
+    def test_a_heard_turn_replayed_inside_an_otherwise_right_take_is_an_echo(self):
+        # Most of the take is its own passage; six or more words in a row come
+        # from the line before, which the passage does not contain.
+        expected = "Without pausing to consider the danger, Marendra went quickly to the door and glanced inside."
+        heard = [("latest", tagged("People were running, actually fleeing, just down the hall."))]
+        evidence = detect(expected, " Without pausing to consider the danger, Marendra people were running actually "
+                          "fleeing just down the hall, door and glanced inside.", heard)
+        self.assertEqual(evidence["heard_request_hash"], "latest")
+        self.assertGreaterEqual(evidence["heard_run"], 6)
+        self.assertLess(evidence["heard_share"], 0.5)
+        # Invented words the recognizer added match no heard turn: not an echo.
+        self.assertIsNone(detect(expected, " Without pausing to consider the danger, Marendra the bright silver "
+                                 "boats sailed far away over water, went quickly to the door and glanced inside.", heard))
+        # A phrase the passage itself repeats from the line before is its own text.
+        repeat = "People were running, actually fleeing, just down the hall, she thought again."
+        self.assertIsNone(detect(repeat, " People were running actually fleeing just down the hall she thought again.",
+                                 heard))
+
     def test_a_line_that_really_repeats_earlier_words_is_not_an_echo(self):
         self.assertIsNone(detect("No. No.", " No. No.", [("latest", tagged("No."))]))
         self.assertIsNone(detect("Alex moved the decanter away from her as he looked at Upgrade.",

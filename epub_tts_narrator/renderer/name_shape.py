@@ -36,8 +36,8 @@ _POSSESSIVE = re.compile(r"['’]s$")
 SWEEP_FILENAME = "name-shape-sweep.json"
 # 2: best-effort choices are swept too (every acceptance is read again once).
 # 3: a best-effort choice is also retired when a chosen name is missing from
-#    it or it inserted other speech (``misread(require_heard=True)``,
-#    ``exhaustion_selection.inserted_words``).
+#    it (``misread(require_heard=True)``). (A partial replay of history is a
+#    history echo, retired where its history is known: ``history_echo``.)
 SWEEP_POLICY = 3
 _STRETCH = 40  # words: a longer differing stretch is not a misheard name
 _MTIME_SLACK = 120  # seconds: an acceptance written while a sweep ran is read by the next one
@@ -324,13 +324,10 @@ def retire_misread(work):
         evidence = {"reason": REASON, "version": NAME_SHAPE_VERSION, "words": found}
         if not found and "exhaustion_selection" in metadata:
             # A best-effort choice already failed ordinary verification: it
-            # must still say every chosen name, and nothing else at length.
-            from .exhaustion_selection import INSERTED_STRETCH, inserted_words
+            # must still say every chosen name.
             missing = misread(record, require_heard=True)
-            extra = inserted_words(record)
-            if missing or extra >= INSERTED_STRETCH:
-                evidence = {"reason": REASON if missing else "inserted_speech", "version": NAME_SHAPE_VERSION,
-                            "missing": missing, "inserted_words": extra}
+            if missing:
+                evidence = {"reason": REASON, "version": NAME_SHAPE_VERSION, "missing": missing}
                 found = True
         if found:
             retire_acceptance(path.parent, record, "name-shape", evidence)

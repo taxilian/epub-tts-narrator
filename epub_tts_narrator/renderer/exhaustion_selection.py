@@ -60,8 +60,14 @@ def _correction_payload(base, responses):
 def _advisory_compatible(payload):
     # The stylized_spelling advisory derives only from requested_text, which is
     # already pinned, so pending states saved before it existed stay resumable.
+    # So do states saved before candidates' nested audits were sent as digests
+    # (exhaustion_candidates._compact_inputs): candidate IDs never changed.
+    from .exhaustion_candidates import _compact_inputs
     result = deepcopy(payload)
     result.pop('stylized_spelling', None)
+    for row in result.get('candidates') or []:
+        if isinstance(row, dict) and 'actual_inputs' in row:
+            row['actual_inputs'] = _compact_inputs(row['actual_inputs'])
     return result
 
 
@@ -105,34 +111,6 @@ def validate_selection(request, marker):
                                   candidate_summary(original, selected, physical, compact=False))):
         raise ValueError('Selected audio evidence changed')
     return selected
-
-
-INSERTED_STRETCH = 8  # words: a longer run the passage lacks is other speech, not a misheard word
-
-
-def inserted_words(record):
-    """``_inserted_words`` for a saved take record: its transcript against its passage."""
-    from difflib import SequenceMatcher
-    import re as _re
-    report, request = record.get('report') or {}, record.get('request')
-    if not isinstance(request, dict):
-        return 0
-    try:
-        expected = logical_text(request)
-    except (KeyError, TypeError, ValueError):
-        return 0
-    heard = report.get('transcript') or ''
-    expected_words, heard_words = _re.findall(r'\w+', expected.lower()), _re.findall(r'\w+', heard.lower())
-    return max(((d - c) - (b - a) for kind, a, b, c, d in
-                SequenceMatcher(None, expected_words, heard_words).get_opcodes() if kind in {'insert', 'replace'}),
-               default=0)
-
-
-def _inserted_words(summary):
-    """The longest run of heard words with no counterpart in the passage (``difference_clusters``)."""
-    clusters = ((summary.get('warnings') or {}).get('difference_clusters') or [])
-    return max((len(cluster.get('heard') or []) - len(cluster.get('expected') or [])
-                for cluster in clusters if cluster.get('kind') in {'insert', 'replace'}), default=0)
 
 
 def validate_record(record):
@@ -203,10 +181,6 @@ def select_retained(directory, request, client, *, failure_report=None):
     # of this passage at all, so it is never a best-effort candidate.
     echoes = {item['summary']['candidate_id']: echo for item in retained
               if (echo := candidate_echo(item['record'], logical_text(request))) is not None}
-    # Nor is a take that inserted a stretch of speech the passage does not
-    # contain (a neighbouring passage replayed into it): it says something else.
-    inserted = {item['summary']['candidate_id'] for item in retained
-                if _inserted_words(item['summary']) >= INSERTED_STRETCH}
     # A take a person listened to and marked bad is never chosen either.
     from .take_feedback import judged_bad_audio
     bad_audio = judged_bad_audio(directory)
@@ -232,7 +206,7 @@ def select_retained(directory, request, client, *, failure_report=None):
     candidates = [item for item in retained
                   if item['summary']['candidate_id'] not in echoes and item['summary']['candidate_id'] not in judged_bad
                   and item['summary']['candidate_id'] not in stopped and item['summary']['candidate_id'] not in misread
-                  and item['summary']['candidate_id'] not in tonal and item['summary']['candidate_id'] not in inserted]
+                  and item['summary']['candidate_id'] not in tonal]
     if not candidates:
         context = _failure_context(failure_report) + f'. Inspect {directory}'
         if tonal and not misread:
@@ -252,9 +226,6 @@ def select_retained(directory, request, client, *, failure_report=None):
         if echoes:
             raise ValueError('Every retained take repeats an earlier line of chapter history (history echo); '
                              'none is a rendition of this passage, so none is published' + context)
-        if inserted:
-            raise ValueError(f'Every retained take inserted {INSERTED_STRETCH} or more words the passage does not '
-                             'contain, so none is published' + context)
         raise ValueError('No physically usable bound full-span candidate remains' + context)
     payload = {'mode': 'exhaustion_selection', 'request_sha256': digest(request),
                'requested_text': logical_text(request), 'request': deepcopy(request),
@@ -269,11 +240,11 @@ def select_retained(directory, request, client, *, failure_report=None):
         saved = read_json(regular_file(path))
         offered = {item.get('candidate_id') for item in
                    saved.get('audit', {}).get('payload', {}).get('candidates', [])}
-        if offered & (set(echoes) | judged_bad | set(misread) | tonal | inserted):
+        if offered & (set(echoes) | judged_bad | set(misread) | tonal):
             # A pending choice that offered echoes, takes a person marked bad
             # or takes that misread a chosen name is retired, not trusted.
             archive(directory, ['exhaustion-selection.json'],
-                    {'retired_candidates': sorted(offered & (set(echoes) | judged_bad | set(misread) | tonal | inserted))})
+                    {'retired_candidates': sorted(offered & (set(echoes) | judged_bad | set(misread) | tonal))})
     if path.exists() or path.is_symlink():
         saved = read_json(regular_file(path))
         state = {key: value for key, value in saved.items() if key != 'record_sha256'}

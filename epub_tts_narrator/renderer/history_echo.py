@@ -47,6 +47,11 @@ _LEADING_BRACKET = re.compile(r"^\[([^\]]*)\]\s*")
 # than from the requested text. Calibrated on recorded Drama 3 failures.
 MIN_HEARD_SHARE = 0.5
 MIN_MARGIN = 0.25
+# Or a run of this many words in a row from one heard turn that the passage
+# itself does not contain: part of a take replaying a turn it heard. A
+# recognizer's invented words never match a heard turn, and a phrase the
+# passage repeats from its history is its own text.
+MIN_RUN = 6
 
 
 def plain_text(text):
@@ -59,23 +64,47 @@ def _shared(said, words):
     return sum(block.size for block in matcher.get_matching_blocks())
 
 
+def _foreign_run(said, words, expected):
+    """The longest run of ``said`` copied from ``words`` that ``expected`` does not contain."""
+    matcher = SequenceMatcher(None, said, words, autojunk=False)
+    longest = 0
+    for block in matcher.get_matching_blocks():
+        if block.size <= longest:
+            continue
+        run = said[block.a:block.a + block.size]
+        inside = SequenceMatcher(None, expected, run, autojunk=False).find_longest_match(
+            0, len(expected), 0, len(run))
+        # Only the part of the run the passage lacks counts.
+        longest = max(longest, block.size - inside.size if inside.size else block.size)
+    return longest
+
+
 def detect(expected, transcript, heard):
-    """Echo evidence, or None. ``heard`` lists ``(request_hash, wire_text)`` turns."""
+    """Echo evidence, or None. ``heard`` lists ``(request_hash, wire_text)`` turns.
+
+    A take replays a heard turn when most of what it said came from that turn
+    (``MIN_HEARD_SHARE``, clearly more than from its own text), or when it
+    carries ``MIN_RUN`` or more words in a row from that turn that its own
+    passage does not contain (a partial replay inside an otherwise right take).
+    """
     from .quality import normalize_words
     said = normalize_words(transcript or "")
     if len(said) < 2:
         return None
-    expected_share = _shared(said, normalize_words(expected or "")) / len(said)
+    expected_words = normalize_words(expected or "")
+    expected_share = _shared(said, expected_words) / len(said)
     best = None
     for request_hash, text in heard:
         words = normalize_words(plain_text(text))
         if len(words) < 2:
             continue
         share = _shared(said, words) / len(said)
-        if (share >= MIN_HEARD_SHARE and share >= expected_share + MIN_MARGIN
-                and (best is None or share > best["heard_share"])):
+        run = _foreign_run(said, words, expected_words)
+        if ((share >= MIN_HEARD_SHARE and share >= expected_share + MIN_MARGIN) or run >= MIN_RUN) and (
+                best is None or (share, run) > (best["heard_share"], best.get("heard_run", 0))):
             best = {"version": VERSION, "heard_request_hash": request_hash,
-                    "heard_share": round(share, 3), "expected_share": round(expected_share, 3)}
+                    "heard_share": round(share, 3), "expected_share": round(expected_share, 3),
+                    "heard_run": run}
     return best
 
 

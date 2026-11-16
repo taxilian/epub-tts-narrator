@@ -53,6 +53,16 @@ class ExhaustionCandidatesTests(unittest.TestCase):
         legacy = candidate_summary(self.request, record, {'duration_seconds': 1.0}, compact=False)
         self.assertEqual(legacy['actual_inputs'], record['engine_metadata'])
 
+    def test_a_choice_pending_from_before_compaction_still_resumes(self):
+        from epub_tts_narrator.renderer.exhaustion_candidates import _compact_inputs
+        from epub_tts_narrator.renderer.exhaustion_selection import _advisory_compatible
+        inputs = {"synthesis_text": "x", "clip_repair": {"audit": {"payload": "y" * 500}, "parts": [1]}}
+        saved = {"mode": "exhaustion_selection", "candidates": [{"candidate_id": "c", "actual_inputs": inputs}]}
+        current = {"mode": "exhaustion_selection",
+                   "candidates": [{"candidate_id": "c", "actual_inputs": _compact_inputs(inputs)}]}
+        self.assertEqual(_advisory_compatible(saved), _advisory_compatible(current))
+        self.assertEqual(_compact_inputs(_compact_inputs(inputs)), _compact_inputs(inputs))  # idempotent
+
     def test_sibling_folders_are_found_and_a_changed_folder_is_reread(self):
         clips = self.directory / 'clips'
         own, sibling = clips / ('a' * 64), clips / ('b' * 64)
