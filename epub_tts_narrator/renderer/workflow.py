@@ -848,8 +848,8 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             notify(f"  You marked take {completion_source['attempt']} truncated; keeping its first "
                    f"{point['heard_words']} words and generating only the last {point['missing_words']}.")
         elif unplaced is not None:
-            notify(f"  You marked take {unplaced} truncated, but where it stopped could not be found in the "
-                   "passage; rendering ordinary takes.")
+            attempt_marked, why = unplaced
+            notify(f"  You marked take {attempt_marked} truncated, but {why}; rendering ordinary takes.")
     # A history echo moves to the next ladder rung with at most one extra
     # attempt per rung, so every rung gets a real test within this request.
     from .history_echo import LADDER as ECHO_LADDER

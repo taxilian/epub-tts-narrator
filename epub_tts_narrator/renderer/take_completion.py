@@ -71,7 +71,7 @@ def got_further(metadata, point):
     return type(record.get("tail_start")) is int and point["start"] > record["tail_start"]
 
 
-def completion_point(report, text, *, vouched=False):
+def completion_point(report, text, *, vouched=False, at_pause=True):
     """Where the missing words start in ``text`` and where to cut the take, or ``None``.
 
     Only a take rejected for its words alone, with word timings, whose heard
@@ -111,7 +111,7 @@ def completion_point(report, text, *, vouched=False):
     same = sum(a == b for a, b in zip(heard_words, (word for _, word in expected[:first_missing])))
     if not vouched and same < 0.6 * min(count, first_missing):
         return None
-    if not _PAUSE_END.search(tokens[first_missing - 1][2]):
+    if at_pause and not _PAUSE_END.search(tokens[first_missing - 1][2]):
         return None
     return {"start": expected[first_missing][0], "cut_seconds": float(heard[-1]["end"]),
             "heard_words": first_missing, "missing_words": len(expected) - first_missing}
@@ -135,8 +135,9 @@ def completed_sources(directory):
 def marked_truncated_source(directory, request_hash, text, generate_tail):
     """The newest take a person marked truncated that has not been finished yet, as a completion source.
 
-    Returns ``(source, None)``, ``(None, attempt)`` when that take's stopping
-    point cannot be found in ``text``, or ``(None, None)``.
+    Returns ``(source, None)``; ``(None, (attempt, why))`` when that take
+    cannot be finished (``why``: it stops mid-sentence, which a finished take
+    may not, or where it stopped cannot be found in ``text``); or ``(None, None)``.
     """
     from .common import read_json
     from .stored_audio import audio_hash, audio_present
@@ -156,7 +157,11 @@ def marked_truncated_source(directory, request_hash, text, generate_tail):
             continue
         point = completion_point(record.get("report"), text, vouched=True)
         if point is None or not generate_tail.supports(point["start"]):
-            return None, attempt
+            mid = completion_point(record.get("report"), text, vouched=True, at_pause=False)
+            why = ("it stops mid-sentence, and a take is finished only from a sentence or clause end"
+                   if point is None and mid is not None else
+                   "where it stopped could not be found in the passage")
+            return None, (attempt, why)
         return {"attempt": attempt, "wav": wav, "metadata": record.get("engine_metadata") or {},
                 "point": point, "marked": True}, None
     return None, None

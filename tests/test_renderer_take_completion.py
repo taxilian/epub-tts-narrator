@@ -370,6 +370,33 @@ class CompletionWorkflowTests(unittest.TestCase):
         self.assertEqual(completion["source_attempt"], 1)
         self.assertTrue(any("You marked take 1 truncated" in line for line in self.messages))
 
+    def test_a_marked_take_that_stops_mid_sentence_is_not_finished_and_says_why(self):
+        from epub_tts_narrator.renderer.fish_http import FishHTTPError
+        from epub_tts_narrator.renderer.take_feedback import record_verdict
+        from epub_tts_narrator.renderer.workflow import RenderBlocked, SpeechVerificationFailed
+
+        class StopsMidSentence(StoppingEngine):
+            def synthesize(self, text, voice, path, *, seed, direction=""):
+                self.calls.append(text)
+                if text != TEXT:
+                    raise FishHTTPError("Fish HTTP 400 (fixture): refused", retryable=False, status=400)
+                write_words(path, text.split()[:5], trailing=1.5)
+                return {"fixture": True, "seed": seed}
+        with self.assertRaises((SpeechVerificationFailed, RenderBlocked)):
+            self.render(StopsMidSentence())
+        directory = next(path.parent for path in (self.work / "clips").glob("*/attempt-001.json"))
+        record = read_json(directory / "attempt-001.json")
+        record_verdict(self.work, directory.name, {"attempt": 1, "record": record}, "truncated")
+        from epub_tts_narrator.renderer.take_completion import marked_truncated_source
+
+        def tail(start, path, seed):
+            raise AssertionError("a mid-sentence take is never finished")
+        tail.supports = lambda start: True
+        source, unfinished = marked_truncated_source(directory, directory.name, TEXT, tail)
+        self.assertIsNone(source)
+        self.assertEqual(unfinished[0], 1)
+        self.assertIn("stops mid-sentence", unfinished[1])
+
     def test_a_finished_take_that_stops_again_is_finished_from_where_it_got_to(self):
         text = "Moreover, he had seen it. There was discomfort on her face. Whenever they were apart."
         stops = iter([5, 6])  # the whole line stops after its first sentence, the first tail after its second
