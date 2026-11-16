@@ -244,8 +244,12 @@ class SpeechCache:
         if entry is not None:
             saved = self._verified_entry(entry)
             with self.lock:
+                current = self._current_entry(key)
                 if saved is not None:
-                    self._publish(key, entry)
+                    # Republish only what is still current: another lookup or
+                    # remember() may have published a newer entry meanwhile.
+                    if current is None or current == entry:
+                        self._publish(key, entry)
                     return saved[1:]
                 if self.entries.get(key) is entry:
                     self.entries.pop(key, None)

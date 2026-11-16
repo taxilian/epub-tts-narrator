@@ -282,6 +282,23 @@ class SpeechCacheTests(unittest.TestCase):
             slow.join(10)
         self.assertEqual(results, {"slow": (audio, accepted), "other": None})
 
+    def test_a_lookup_never_writes_back_an_entry_replaced_while_it_verified(self):
+        from epub_tts_narrator.renderer.common import read_json, write_json
+        audio, accepted = self.accepted()
+        self.cache.remember(self.identity, accepted)
+        path = self.index_path()
+        newer = {key: value for key, value in read_json(path).items() if key != "record_sha256"}
+        newer["accepted_sha256"] = "f" * 64
+        newer["record_sha256"] = digest(newer)
+        verify = self.cache._verified_entry
+
+        def replaced_meanwhile(entry, **options):
+            write_json(path, newer)  # another worker published a newer entry
+            return verify(entry, **options)
+        self.cache._verified_entry = replaced_meanwhile
+        self.cache.find(self.identity)
+        self.assertEqual(read_json(path)["accepted_sha256"], "f" * 64)
+
     def test_switching_back_finds_an_older_model_when_alias_points_to_another_take(self):
         original = deepcopy(self.request)
         original["engine"]["cache_model_alias"] = "shared-model-family"
