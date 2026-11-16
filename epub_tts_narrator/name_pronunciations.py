@@ -78,7 +78,7 @@ MAX_SAY_AS = 80
 
 
 def name_key(name):
-    """One definition per spelling regardless of case or apostrophe: ``Ce'Nedra`` and ``CE’NEDRA`` share it."""
+    """One definition per spelling regardless of case or apostrophe: ``Va'Leda`` and ``VA’LEDA`` share it."""
     return validate_word(name.translate(_APOSTROPHE_FOLD)).casefold()
 
 
@@ -269,7 +269,7 @@ def occurrences(text, name):
     Case- and apostrophe-insensitive (``APOSTROPHE_LIKE``); matches the whole name, its possessive or plural, or the
     name part of an apostrophe/hyphen continuation (``Salvatore'll``,
     ``Salvatore-like``). Longer words that merely start with it never match.
-    A hyphenated name (``Cho-Hag``) matches as a whole: the same number of
+    A hyphenated name (``Tor-Vell``) matches as a whole: the same number of
     consecutive hyphen-joined parts, whichever hyphen character the book uses,
     never one of its parts alone.
     """
@@ -278,7 +278,7 @@ def occurrences(text, name):
     width = key.count("-") + 1
     result = []
     # Tokenize a copy with every apostrophe-like character folded (same length),
-    # so "Ce‘Nedra" is one word; reported words keep the book's own characters.
+    # so "Va‘Leda" is one word; reported words keep the book's own characters.
     folded = text.translate(_APOSTROPHE_FOLD)
     for token in WORD_PATTERN.finditer(folded):
         parts = list(_parts(token.group(), token.start()))

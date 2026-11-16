@@ -1,7 +1,7 @@
 """How the narration says a line is spoken, for that line's own speaker.
 
-Books say how lines sound in the tag or beat beside them: `"Robbers?" Wolf
-laughed.`, `Silk sighed. "Durnik," he said`, `"Run!" she shouted.`, `he said
+Books say how lines sound in the tag or beat beside them: `"Robbers?" Orrin
+laughed.`, `Tessa sighed. "Marn," she said`, `"Run!" she shouted.`, `he said
 softly`. A model asked to mark these across a long request misses many, so
 code finds them, using only structure the analysis already has: each spoken
 row's speaker, the narration around it, and the speaker's names and pronoun.
@@ -139,7 +139,7 @@ def _about(clause, speaker):
 
 
 def _own(clause):
-    """The clause up to another subject: "Faldor laughed and Durnik sighed" -> "Faldor laughed"."""
+    """The clause up to another subject: "Bek laughed and Marn sighed" -> "Bek laughed"."""
     match = re.search(r"(?:;|,? (?:and|while|as) (?=[A-Z][a-z]|(?:he|she|they) ))", clause[1:])
     return clause[:match.start() + 1] if match else clause
 

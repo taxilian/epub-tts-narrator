@@ -58,12 +58,12 @@ gives the exact surrounding text with the target word marked as ⟦word⟧.
 Labels (judge the marked word only, as it is used in its sentence):
 - "proper_noun": a name or title of a specific person, place, people, language,
   thing or being, including possessives and plurals of a name, a member of a
-  people named after a place ("a Rivan", "the Rivans"), and a word inside a
-  title or fixed name ("the Rivan King", "Your Grace"). Shouted or all-caps
+  people named after a place ("a Kestran", "the Kestrans"), and a word inside a
+  title or fixed name ("the Kestran King", "Your Grace"). Shouted or all-caps
   uses of a name count; a lowercase name is still a name.
 - "common_noun": an ordinary noun ("an ally", "a rose", "her hope").
 - "adjective": describes a following noun outside a fixed name or title
-  ("Rivan kings", "Yarran beer", "a rose garden").
+  ("Kestran kings", "Yarran beer", "a rose garden").
 - "verb", "adverb", "interjection": as in ordinary grammar ("to grant",
   "will ally", "fast", "hey").
 - "unsure": only when the text genuinely cannot tell; a person will decide.

@@ -208,10 +208,10 @@ class ChapterContinuity:
             return len(wanted & (held | set(entry.get("readings", ()) if entry else ())))
         if wanted - held - set(latest.get("readings", ()) if latest else ()):
             # A replacement must say more of the line's readings in all, never
-            # trade one for another: swapping a turn that said Ce'Nedra right
-            # for one saying only Polgara (and "Sendaria" just before) made
-            # the line misread Ce'Nedra every time. The most recent such turn
-            # wins a tie.
+            # trade one for another: swapping a turn that said one chosen
+            # name right for one saying only another (next to a look-alike
+            # word) made the line misread the first every time. The most
+            # recent such turn wins a tie.
             current = coverage(latest)
             scored = [(coverage(entry), index) for index, entry in enumerate(eligible) if entry is not pinned]
             best = max(scored, default=(0, None))

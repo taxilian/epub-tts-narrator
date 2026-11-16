@@ -606,7 +606,7 @@ def run_pronounce_name(bundle, config, args, *, analysis_config, input_fn=None, 
                        verifier_factory=None):
     name = getattr(args, "name", None)
     if name is not None:
-        # Any apostrophe the person types (Ce'Nedra, Ce’Nedra, Ce‘Nedra) is the same spelling.
+        # Any apostrophe the person types (Va'Leda, Va’Leda, Va‘Leda) is the same spelling.
         from ..name_pronunciations import name_key
         name_key(name)
     if getattr(args, "remove", False):

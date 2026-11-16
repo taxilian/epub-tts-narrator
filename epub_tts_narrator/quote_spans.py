@@ -59,7 +59,7 @@ def double_quote_marks(text):
     A paragraph whose first mark closes a quotation after words of its own
     starts inside speech, so the speech runs from the paragraph's start: the
     source split one paragraph of speech in two (`dignified." He paused.`), or
-    its opening mark was lost or misread (`'Is he all right?" Durnik asked`).
+    its opening mark was lost or misread (`'Is he all right?" Marn asked`).
     ``clean`` is False when the marks do not pair: an opening mark while a
     quotation is open, a stray closing mark, or a quotation left open.
     """

@@ -124,7 +124,7 @@ def suggest_accent(description, terms=frozenset()):
     name a real place or people: a capitalized word not starting a sentence, a
     known real-world accent word, or an -ian/-ese word ("italian").
     A negated phrase ("no accent"), a bare manner ("heavy accent"), and one
-    naming a book's own term (``terms``, e.g. "Nyissan accent", which a speech
+    naming a book's own term (``terms``, e.g. "Valdorian accent", which a speech
     model cannot know) give no cue.
     """
     import re

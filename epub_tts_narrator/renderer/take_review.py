@@ -37,7 +37,7 @@ def word_differences(expected, heard, *, limit=6):
 
     Case, punctuation and hyphens are ignored (``sun-browned`` and
     ``sunbrowned`` are one word), and so are words the recognizer only
-    spelled another way (``Pulgera`` for ``Polgara``: the same Double
+    spelled another way (``Valida`` for ``Valeda``: the same Double
     Metaphone sounds), so only real differences remain:
     ``missing at the end: "with their hands close to their weapons."``.
     A chosen name heard rearranged is reported separately (``name_shape``).
@@ -88,7 +88,7 @@ def _tone(report):
 
 
 def _misread(report):
-    """``Ce'Nedra heard as sendera`` when a chosen pronunciation was heard rearranged, else ``""``."""
+    """``Va'Leda heard as valdea`` when a chosen pronunciation was heard rearranged, else ``""``."""
     from .name_shape import describe
     return describe(report)
 

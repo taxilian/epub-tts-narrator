@@ -152,7 +152,7 @@ _STATE_CHARACTERS = 60
 def _role_label(role, characters, book, voices=()):
     """A person's name for a role. ``voices`` (the cast's voice records) lets a
     character's changed-voice state (aging, a condition) read as that state,
-    e.g. "Belgarath (condition: weakened from exhaustion)", not as the character."""
+    e.g. "Arlen (condition: weakened from exhaustion)", not as the character."""
     character = characters.get(role.get("character_id"))
     author = author_narrator_name(role, book)
     if author is not None:

@@ -11,8 +11,9 @@ there: its sibilants come and go and are broad.
 ``HIGH_HZ`` and finds the narrow band standing furthest above its neighbours;
 ``presence`` is the share of voiced frames in which that band alone stands
 out. A take fails (``REASON``) when both reach ``MIN_LEVEL_DB`` and
-``MIN_PRESENCE``. Calibrated on belgariad-5: no other voice's take reached
-9 dB in 200 sampled, while the reported narrator takes measured 11 and 20 dB.
+``MIN_PRESENCE``. The thresholds come from one narrator's reported tonal
+takes (11 and 20 dB) against 200 sampled takes of other voices, none of which
+reached 9 dB; they are not yet calibrated across voices and books.
 A rejected take is never chapter history, so the tone stops spreading.
 """
 
@@ -120,8 +121,8 @@ def history_mode(directory, request_hash):
     The tone grows through chapter history (takes made without it measured
     clean), so after one the next takes hear only the turns saying the line's
     chosen readings right (``"reading"``; a line without such turns hears no
-    history). Without that turn Drama 3 says a similar familiar word instead
-    (Ce'Nedra → Sendaria, every time on belgariad-5), so it is kept even when
+    history). Without that turn Drama 3 may say a similar familiar word in
+    the name's place, so it is kept even when
     a take made with it carries the tone too: such takes are candidates for
     ``filtered_fallback``. Once a take made with only that turn replayed it
     (a history echo, ``report.history_echo``), the next takes hear no history

@@ -407,7 +407,7 @@ class AccentApp(CapturePrintMixin, App):
                 self.render_all()
         self.push_screen(TextEditScreen(
             "What should change?", "",
-            help_text="e.g. \"Tolnedrans should sound Italian\", \"Silk is from Drasnia, keep him with Rhodar\", "
+            help_text="e.g. \"the imperial court should sound Italian\", \"Marn is from the north, keep him with his uncle\", "
                       "\"no upper-class English\". The model revises the whole plan. Ctrl+S sends · Escape cancels"),
             submitted)
 

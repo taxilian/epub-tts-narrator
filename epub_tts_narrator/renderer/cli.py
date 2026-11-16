@@ -171,8 +171,8 @@ def parser():
             command.description = ("Reassign every voice's accent for this book: the text model groups the cast by "
                                    "where they come from and gives each group a distinct real-world accent. Cues a "
                                    "person chose and accents inherited from earlier books are kept.")
-            command.add_argument("--instructions", help="Guidance for the accents, e.g. \"the Alorns sound "
-                                 "Scandinavian, Tolnedrans Italian\"; saved with the accents and reused for new voices")
+            command.add_argument("--instructions", help="Guidance for the accents, e.g. \"the northern clans sound "
+                                 "Scandinavian, the imperial court Italian\"; saved with the accents and reused for new voices")
             command.add_argument("--apply", action="store_true", help="Save without asking")
             command.add_argument("--resume", metavar="RUN_ID", help="Finish an interrupted run without new requests")
             from epub_tts_narrator.tui_support import add_plain_option

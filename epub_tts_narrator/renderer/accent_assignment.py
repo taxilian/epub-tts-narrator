@@ -6,7 +6,7 @@ accents: a whole cast can come out "General American". This asks the text
 model once for the whole cast: which characters come from the same place
 (from the story, their names, how they speak and who they are with), and a
 distinct real-world English accent for each group. A person's guidance
-("the Alorns sound Scandinavian") goes with the request.
+("the northern clans sound Scandinavian") goes with the request.
 
 The result is saved beside the book in ``voice-accent-assignments.json``
 (per voice, nearest book first, so a continued book keeps its inherited

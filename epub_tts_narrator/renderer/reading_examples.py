@@ -1,8 +1,8 @@
 """Takes from other chapters that say a chosen pronunciation right, for chapter history.
 
 Drama 3 says a name the way its history says it (``continuity``): with a
-correct example in history the narrator read Ce'Nedra right every time, with
-none it misread it about 4 times in 10. Within a chapter the latest history
+correct example in history a narrator says a chosen name right far more
+often than with none. Within a chapter the latest history
 slot already prefers an earlier take saying the line's chosen readings. A
 chapter's first line using a reading has no such take, and its retries keep
 the same history, so it misread again and again. This index supplies one:

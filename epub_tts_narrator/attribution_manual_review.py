@@ -196,7 +196,7 @@ class FindingReview:
         voices = document["cast"]["voices"]
         self.labels = _role_labels(self.roles, self.characters, document["source"]["book"], voices)
         from .speaker_decisions import _role_label
-        # A changed-voice state names its state, so "Belgarath" never becomes "Belgarath".
+        # A changed-voice state names its state, so "Arlen (aged)" never becomes plain "Arlen".
         self.names = {role["id"]: _role_label(role, self.characters, document["source"]["book"], voices)
                       for role in self.roles}
         self.decisions = {}

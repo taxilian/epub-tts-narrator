@@ -1,7 +1,7 @@
 """Bring each take of a chapter to about the chapter's speech level, keeping intended contrast.
 
 Drama 3 takes of one chapter differ by about 8 dB in speech level for no
-reason in the text (measured on belgariad-5), and chapter loudness
+reason in the text (measured on one book), and chapter loudness
 normalization moves the whole chapter, not one take against another. At
 assembly each take's speech level (``speech_level``: the mean of its voiced
 50 ms frames) is compared with where it should sit: the chapter's typical

@@ -458,8 +458,8 @@ class PronunciationReviewSession:
         if self._store is None:
             self._store = voice_store(self.bundle, self.settings)
         from ..name_pronunciations import APOSTROPHE_LIKE
-        # A name typed with one apostrophe (Ce'Nedra) is the book's spelling with
-        # another (Ce’Nedra); the fold keeps one character for one, so spans stay exact.
+        # A name typed with one apostrophe (Va'Leda) is the book's spelling with
+        # another (Va’Leda); the fold keeps one character for one, so spans stay exact.
         fold = str.maketrans({apostrophe: "'" for apostrophe in APOSTROPHE_LIKE})
         wanted = word.translate(fold).casefold()
         candidates, selected_voices = [], {}

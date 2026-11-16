@@ -1443,7 +1443,7 @@ def book_terms(source, ledger):
         for match in re.finditer(r"(?<=[a-z,;] )([A-Z][a-z]{2,}(?:[-'][A-Za-z]+)?)", block["text"]):
             counts[match.group(1).casefold()] += 1
         lower.update(re.findall(r"\b[a-z][a-z'-]{2,}\b", block["text"]))
-    # A book's own term is capitalized more often than not ("Sendaria"); everyday
+    # A book's own term is capitalized more often than not (a place name); everyday
     # words capitalized in titles ("His Majesty") appear lowercase far more often.
     terms = {word for word, count in counts.items() if count >= 2 and lower[word] < count}
     for row in ledger["characters"]:
