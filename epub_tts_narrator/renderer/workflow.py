@@ -45,6 +45,14 @@ class RenderBlocked(ValueError):
         self.request = request
 
 
+# Failures a passage may recover from by splitting into shorter parts (a long
+# line) or its separate passages (a paragraph): what failed may not recur in
+# a shorter request. One set for both.
+SPLIT_RECOVERABLE = frozenset({"text_mismatch", "audio_too_short", "audio_too_long", "silent_audio",
+                               "audio_too_quiet", "excessive_silence", "internal_silence_stall",
+                               "excessive_clipping", "steady_tone", "pronunciation_mismatch"})
+
+
 class ChapterNeedsRendering(RenderBlocked):
     """An intact checkpoint needs fresh synthesis or derived chapter assembly."""
 
@@ -1274,11 +1282,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
     if fresh_speech:
         used = retry_budget.started(directory, request_hash)
         total_used = retry_budget.episode_started(episode) if adaptive else used
-        # A steady tone or a misread chosen name may not recur in shorter
-        # parts (a name said first in a short part, history heard anew).
-        recoverable = {"text_mismatch", "audio_too_short", "audio_too_long", "silent_audio",
-                       "audio_too_quiet", "excessive_silence", "internal_silence_stall",
-                       "excessive_clipping", "steady_tone", "pronunciation_mismatch"}
+        recoverable = SPLIT_RECOVERABLE
         reasons = (last_report or {}).get("reasons", [])
         if (adaptive and fallback_parts and reasons
                 and all(reason in recoverable for reason in reasons)):
@@ -2999,9 +3003,7 @@ def _render_chapter_with_recovery(bundle, chapter, voices, engine, engine_identi
 
     if retry_budget is None:
         retry_budget = SpeechRetryBudget()
-    recoverable = {"text_mismatch", "audio_too_short", "audio_too_long", "silent_audio",
-                   "audio_too_quiet", "excessive_silence", "internal_silence_stall",
-                   "excessive_clipping", "steady_tone", "pronunciation_mismatch"}
+    recoverable = SPLIT_RECOVERABLE
     while True:
         stop_if_requested()
         try:
