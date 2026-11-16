@@ -273,6 +273,12 @@ class RendererBundleTests(unittest.TestCase):
         # Closing quotes stay with the sentence they close.
         self.assertEqual(pieces("\u201cGo now.\u201d She stayed by the door for a long while.", 30)[0],
                          "\u201cGo now.\u201d ")
+        # A period after an initial or a vowel-less short capitalized word abbreviates;
+        # a short word ("No.") still ends its sentence.
+        self.assertEqual(pieces("Then Mr. Haddock went on and on about the road, ahead of them.", 40)[0],
+                         "Then Mr. Haddock went on and on about ")
+        self.assertEqual(pieces("Dr. J. Haddock went on and on about the road ahead.", 30)[0],
+                         "Dr. J. Haddock went on and on ")
 
     def test_meaningful_symbol_only_segments_are_not_silently_discarded(self):
         for text in ("%", "+", "&", "=", "$"):

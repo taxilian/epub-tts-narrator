@@ -162,9 +162,16 @@ _CLAUSE_CUT = re.compile(rf"[;:]{_CLOSERS}\s+")
 _PHRASE_CUT = re.compile(rf",{_CLOSERS}\s+|[\u2014\u2013]\s*|\s--\s*")
 
 
+# A period after an initial or a capital with at most two lowercase consonants
+# ("J.", "Mr.", "Mrs.", "Dr.", "St.") abbreviates: an English word has a vowel.
+# Short words ("No.", "Oh.") still end their sentences.
+_ABBREVIATION = re.compile(r"(?:^|\s)[A-Z][b-df-hj-np-tv-z]{0,2}\.$")
+
+
 def _cut(piece, maximum):
     """Where to end ``piece`` (a full-length slice), or 0 when it has no break at all."""
-    sentences = [match.end() for match in _SENTENCE_CUT.finditer(piece)]
+    sentences = [match.end() for match in _SENTENCE_CUT.finditer(piece)
+                 if not _ABBREVIATION.search(piece[:match.start() + 1])]
     if sentences:
         return sentences[-1]
     for pattern in (_CLAUSE_CUT, _PHRASE_CUT):
