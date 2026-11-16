@@ -304,7 +304,7 @@ class ChapterContinuity:
         # Selection uses the script voices; the take identity (and so every
         # request's cache identity) still names only the exact accepted take.
         entry = {"path": str(codes_path), "marker": deepcopy(marker), "pinnable": scope["pinnable"],
-                 "readings": _readings_heard_right(accepted),
+                 "readings": _readings_heard_right(accepted, Path(path).parent),
                  "voices": list(scope["voices"]), "position": scope.get("position"), "identity": {
             "codes_sha256": marker["sha256"], "text_sha256": digest(marker["text"]),
             "speakers": list(marker["speakers"]), "request_hash": accepted["request_hash"],
@@ -327,17 +327,22 @@ def _chosen_readings(request):
         return frozenset()
 
 
-def _readings_heard_right(accepted):
+def _readings_heard_right(accepted, directory=None):
     """Chosen pronunciations an accepted take was heard saying right.
 
-    Its saved phoneme verdicts decide when it has them (``name_phonemes``);
-    otherwise the recognizer's spelling must keep the reading's shape.
+    Its phoneme verdicts decide when it has them or, given its take
+    ``directory``, when the phoneme model can hear it (``name_phonemes``): a
+    take accepted before the check, whose spelling passed ("Sinidra" for
+    seh-NED-ruh), must not teach its misreading as history. Otherwise the
+    recognizer's spelling must keep the reading's shape.
     """
     request, report = accepted.get("request"), accepted.get("report")
     if not isinstance(request, dict) or not isinstance(report, dict) or not _chosen_readings(request):
         return frozenset()
-    from .name_phonemes import saved
+    from .name_phonemes import judge, saved
     verdicts = saved(report)
+    if verdicts is None and directory is not None:
+        verdicts = judge(accepted, directory) or None
     if verdicts is not None:
         return frozenset(verdict["key"] for verdict in verdicts if verdict.get("ok") and verdict.get("key"))
     from .name_shape import heard_right

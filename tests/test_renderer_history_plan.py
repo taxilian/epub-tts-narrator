@@ -44,6 +44,16 @@ class HistoryPlanTests(unittest.TestCase):
         self.assertEqual(mode(silent), "reading")
         self.assertEqual(mode(silent, readings=False), "none")
 
+    def test_a_line_with_a_chosen_name_hears_the_turn_saying_it_where_the_ladder_would_leave_none(self):
+        echoes = [attempt(["text_mismatch"], echo=True), attempt(["text_mismatch"], applied="role_tag", echo=True),
+                  attempt(["text_mismatch"], applied="streaming", echo=True)]
+        self.assertEqual(mode(echoes), "reading")
+        self.assertEqual(mode(echoes, readings=False), "none")
+        # Takes misreading the name with no history do not keep it there.
+        stuck = echoes + [attempt(["pronunciation_mismatch"], applied="none")] * 3
+        self.assertEqual(mode(stuck), "reading")
+        self.assertEqual(mode(echoes + [attempt(["text_mismatch"], applied="reading", echo=True)]), "none")
+
     def test_an_echo_climbs_the_ladder_but_never_after_a_tone(self):
         self.assertEqual(mode([attempt(["text_mismatch"], echo=True)]), "role_tag")
         self.assertEqual(mode([attempt(["text_mismatch"], echo=True), attempt(["steady_tone"])]), "reading")

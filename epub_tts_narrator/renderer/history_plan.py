@@ -17,7 +17,13 @@ clip-repair parts (``clip_recovery``) use it:
    (``"none"``). A line without chosen pronunciations hears none at once.
 2. Otherwise a take that replayed a history turn (``history_echo``) moves the
    passage one rung along the echo ladder (role tag, streaming layout, none).
-   Ladder rungs keep the whole history, so they never follow a tone.
+   Ladder rungs keep the whole history, so they never follow a tone. A line
+   with chosen pronunciations hears the turn saying them right
+   (``"reading"``) where the ladder would leave it no history: with no
+   history Drama 3 misread a chosen name in most takes (a short line led by
+   the name, every take), with a turn saying it right in very few. Only once
+   a take made with that turn replayed it or said nothing does the line hear
+   none.
 
 Whatever the mode, a take completion keeps its kept start
 (``continuity.compose``, ``history_echo.apply_recovery``).
@@ -43,18 +49,23 @@ def plan(records, expected, *, has_readings, ladder=True, heard=None):
     from .steady_tone import REASON as TONE
     tonal = any(TONE in _reasons(record) for record in records)
     silent = sum(bool(SILENT_REASONS & _reasons(record)) for record in records)
+    # Once a take made with only the turn saying the readings right replayed
+    # it or said nothing, that turn is part of the trouble.
+    reading_failed = any(
+        _applied(record) == "reading"
+        and (SILENT_REASONS & _reasons(record) or (record.get("report") or {}).get("history_echo")
+             or attempt_evidence(record.get("report"), record.get("engine_metadata"), expected, heard))
+        for record in records)
+    reading = has_readings and not reading_failed
     if tonal or silent >= SILENT_LIMIT:
         cause = "a take carrying a steady tone" if tonal else "takes that said nothing"
-        reading_failed = any(
-            _applied(record) == "reading"
-            and (SILENT_REASONS & _reasons(record) or (record.get("report") or {}).get("history_echo")
-                 or attempt_evidence(record.get("report"), record.get("engine_metadata"), expected, heard))
-            for record in records)
-        if has_readings and not reading_failed:
+        if reading:
             return "reading", f"after {cause}, only the turn saying its chosen pronunciations right"
         return "none", f"after {cause}, {RUNG_DESCRIPTIONS['none']}"
     if ladder and heard:
         rung = next_mode(records, expected, heard)
+        if rung == "none" and reading:
+            return "reading", "after its history was replayed, only the turn saying its chosen pronunciations right"
         if rung is not None:
             return rung, RUNG_DESCRIPTIONS[rung]
     return None, None
