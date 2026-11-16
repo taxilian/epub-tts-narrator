@@ -380,15 +380,21 @@ def compose(text, voices):
             mapping[index] = order.index(asset)
         return mapping
     takes = scope["takes"]
-    if recovery_mode() == "reading":
-        # Only the turns saying the line's chosen readings right (after a
-        # steady tone, which grows through history).
+    mode = recovery_mode()
+    if mode == "reading":
+        # Only the turns saying the line's chosen readings right (history_plan).
         takes = [take for take in takes if set(take.get("readings", ())) & set(scope.get("readings", ()))]
+    elif mode == "none":
+        takes = []
     turn = _CONTINUATION.get()
     if turn is not None:
         # A completion's kept start takes the latest turn's place: Fish's
-        # history is the first turn and the latest, never more than two.
-        takes = takes[:1] if len(takes) == 2 else []
+        # history is the first turn and the latest, never more than two. A
+        # reading-only history keeps its turn saying the readings.
+        if mode == "reading":
+            takes = takes[-1:]
+        else:
+            takes = takes[:1] if len(takes) == 2 else []
     for take in takes:
         marker = take["marker"]
         mapping = mapped(marker["speakers"])

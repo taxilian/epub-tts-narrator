@@ -1034,22 +1034,10 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                     if purpose == "speech":
                         notify(f"  Generating {kind}, attempt {current_attempt}/{attempts}")
                     from .continuity import history_recovery
-                    from .history_echo import ladder_mode
-                    echo_mode = ladder_mode(directory, request_hash, text) if purpose == "speech" else None
-                    if purpose == "speech" and echo_mode != "none":
-                        # A steady tone grows through chapter history (takes made
-                        # without it measured clean): after one, hear only the turn
-                        # saying the line's chosen readings (no history once that
-                        # turn was echoed). This outranks the echo ladder's rungs
-                        # that keep the whole history.
-                        from .steady_tone import history_mode
-                        echo_mode = history_mode(directory, request_hash) or echo_mode
-                    if purpose == "speech" and echo_mode != "none":
-                        # A passage whose takes keep saying nothing is stuck on
-                        # what it hears: its next takes hear no history at all.
-                        from .history_echo import SILENT_LIMIT, silent_attempts
-                        if silent_attempts(directory, request_hash) >= SILENT_LIMIT:
-                            echo_mode = "none"
+                    # How much chapter history this take hears after earlier
+                    # takes failed because of it (history_plan: one precedence).
+                    from .history_plan import for_request
+                    echo_mode = for_request(directory, request_hash, text, request)[0] if purpose == "speech" else None
                     completing, completion_source = completion_source, None
                     with generation_activity(notify), history_recovery(echo_mode):
                         if direction_marker is not None:
@@ -1250,13 +1238,14 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                                  lambda: _take_review(directory, config, verifier, record["request_hash"]))
         stop_if_requested()
         if purpose == "speech" and isinstance(report.get("history_echo"), dict):
-            from .history_echo import RUNG_DESCRIPTIONS, applied_mode, ladder_mode
-            following = ladder_mode(directory, request_hash, text)
+            from .history_echo import applied_mode
+            from .history_plan import for_request
+            following, how = for_request(directory, request_hash, text, request)
             if following is not None and following != applied_mode(record):
                 # The prompt caused the echo; another seed of it would too.
                 # The next rung gets a real attempt before any other recovery.
                 notify("  History echo: the take repeated an earlier line of this chapter's history; "
-                       f"the next attempt uses {RUNG_DESCRIPTIONS[following]}.")
+                       f"the next attempt hears {how}.")
                 used = generation_ordinal if generation_ordinal is not None else attempt
                 if used >= attempts and attempts < echo_cap:
                     attempts += 1

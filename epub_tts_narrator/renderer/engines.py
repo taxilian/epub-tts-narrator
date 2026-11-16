@@ -291,13 +291,14 @@ class HistorySynthesis:
         return {**self._compose_and_generate(engine_text, voices, output_path, seed=seed), **metadata}
 
     def _compose_and_generate(self, text, voices, output_path, *, seed):
-        from .continuity import compose, current, generated_codes, recovery_mode
+        from .continuity import _CONTINUATION, compose, current, generated_codes, recovery_mode
         from .history_echo import VERSION, apply_recovery
         references, history = compose(text, voices)
         scope = current()
         requested = recovery_mode() if scope is not None else None
         applied, text, history, layout = apply_recovery(
-            requested, text, history, self.history_layouts, kind=scope.get("kind") if scope else None)
+            requested, text, history, self.history_layouts, kind=scope.get("kind") if scope else None,
+            continuation=scope is not None and _CONTINUATION.get() is not None)
         options = {"layout": layout} if layout != "directing" else {}
         metadata, codes, codebook_size = self._generate_wire(text, references, history, output_path,
                                                              seed=seed, **options)

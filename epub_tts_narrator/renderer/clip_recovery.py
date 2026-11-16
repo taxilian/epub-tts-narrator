@@ -137,17 +137,16 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
             if plan is not None or session.state['phase'] == 'evaluated':
                 notify('  Restoring the completed clip repair.' if session.state['phase'] == 'evaluated'
                        else '  Executing a clip-local repair approved by two independent reviewers.')
-                # Repair parts that heard the history this line echoed would
-                # repeat it again; they keep only the reference voice.
+                # Repair parts hear what the passage's ordinary takes would
+                # (history_plan), except that parts of a line that echoed its
+                # history keep only the reference voice: the parts' texts differ,
+                # so the echo ladder's rungs do not apply to them.
                 expected = logical_text(request)
-                echoed = any(candidate_echo(item['record'], expected) for item in candidates)
-                # Likewise after a take carrying a steady tone (it grows through history).
-                from .steady_tone import REASON as TONE
-                tonal = any(TONE in ((item['record'].get('report') or {}).get('reasons') or []) for item in candidates)
-                # And after takes that kept saying nothing (history_echo.silent_attempts).
-                from .history_echo import SILENT_LIMIT, silent_attempts
-                silent = silent_attempts(directory, digest(request)) >= SILENT_LIMIT
-                with history_recovery('none' if echoed or silent else 'reading' if tonal else None):
+                from .history_plan import for_request
+                mode = for_request(directory, digest(request), expected, request, ladder=False)[0]
+                if mode is None and any(candidate_echo(item['record'], expected) for item in candidates):
+                    mode = 'none'
+                with history_recovery(mode):
                     result = execute_plan(session, generate_plan_part, verifier, config,
                                           budget=budget, episode=episode, reserve=reserve, notify=notify)
                 if result is not None:

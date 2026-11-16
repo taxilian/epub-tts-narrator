@@ -101,7 +101,7 @@ class SteadyToneTests(unittest.TestCase):
 class NoHistoryAfterToneTests(unittest.TestCase):
     """After a take carrying a steady tone, the passage's next takes are made without chapter history."""
 
-    def test_the_take_after_a_tonal_one_hears_no_history(self):
+    def test_after_a_tonal_take_a_line_without_chosen_names_hears_no_history(self):
         from unittest.mock import patch
         from epub_tts_narrator.renderer.continuity import recovery_mode
         from epub_tts_narrator.renderer.workflow import verified_take
@@ -121,7 +121,7 @@ class NoHistoryAfterToneTests(unittest.TestCase):
             _, accepted = verified_take("Hello there.", generate, directory, {"fixture": "tone-history"},
                                         consensus.PrimaryVerifier("Hello there."), config(), purpose="speech",
                                         notify=lambda _: None)
-        self.assertEqual(modes, [None, "reading"])
+        self.assertEqual(modes, [None, "none"])
         self.assertEqual(accepted["attempt"], 2)
 
     def test_after_two_takes_that_said_nothing_the_next_hears_no_history(self):
@@ -154,61 +154,14 @@ class NoHistoryAfterToneTests(unittest.TestCase):
         self.assertEqual(modes, [None, None, "none"])
         self.assertEqual(accepted["attempt"], 3)
 
-    def test_after_a_tone_the_echo_ladder_s_full_history_rungs_give_way(self):
-        from unittest.mock import patch
-        from epub_tts_narrator.renderer.continuity import recovery_mode
-        from epub_tts_narrator.renderer.workflow import verified_take
-        import test_renderer_reference_consensus as consensus
-        from test_renderer_stall_recovery import config
-        directory = Path(tempfile.mkdtemp()) / "takes"
-        directory.mkdir()
-        self.addCleanup(__import__("shutil").rmtree, directory.parent)
-        modes = []
-
-        def generate(path, seed):
-            modes.append(recovery_mode())
-            write_speechlike(path, tone_hz=7100 if len(modes) == 1 else None)
-            return {"seed": seed}
-        with patch("epub_tts_narrator.renderer.workflow.normalize_clip",
-                   side_effect=lambda raw, wav, **kw: Path(wav).write_bytes(Path(raw).read_bytes())), \
-                patch("epub_tts_narrator.renderer.history_echo.ladder_mode", return_value="role_tag"):
-            verified_take("Hello there.", generate, directory, {"fixture": "tone-echo"},
-                          consensus.PrimaryVerifier("Hello there."), config(), purpose="speech",
-                          notify=lambda _: None)
-        self.assertEqual(modes, ["role_tag", "reading"])
-
-    def test_a_tone_again_under_the_reading_turn_keeps_the_reading_turn(self):
-        from epub_tts_narrator.renderer.steady_tone import history_mode
-        directory = Path(tempfile.mkdtemp())
-        self.addCleanup(__import__("shutil").rmtree, directory)
-
-        def attempt(number, reasons, requested=None):
-            metadata = {"history_recovery": {"version": 1, "requested": requested}} if requested else {}
-            write_json(directory / f"attempt-{number:03d}.json", {
-                "request_hash": "h", "attempt": number, "engine_metadata": metadata,
-                "report": {"passed": False, "reasons": reasons}})
-        self.assertIsNone(history_mode(directory, "h"))
-        attempt(1, ["steady_tone"])
-        attempt(2, ["pronunciation_mismatch"], "reading")
-        self.assertEqual(history_mode(directory, "h"), "reading")
-        attempt(3, ["steady_tone"], "reading")
-        self.assertEqual(history_mode(directory, "h"), "reading")
-        self.assertIsNone(history_mode(directory, "other"))
-        # A take hearing only the reading turn replayed it: no history next.
-        write_json(directory / "attempt-004.json", {
-            "request_hash": "h", "attempt": 4,
-            "engine_metadata": {"history_recovery": {"version": 1, "requested": "reading", "applied": "reading"}},
-            "report": {"passed": False, "reasons": ["text_mismatch"], "history_echo": {"heard_share": 0.9}}})
-        self.assertEqual(history_mode(directory, "h"), "none")
-
     def test_the_reading_rung_keeps_only_turns_saying_the_line_s_readings(self):
         from epub_tts_narrator.renderer import continuity
         from epub_tts_narrator.renderer.history_echo import apply_recovery
         voice = {"asset_hash": "n"}
         chapter = type("Chapter", (), {"voices_by_asset": {"n": voice}})()
         takes = [{"marker": {"speakers": ["n"], "text": "<|speaker:0|> first"}, "path": "a", "readings": frozenset()},
-                 {"marker": {"speakers": ["n"], "text": "<|speaker:0|> Ce'Nedra"}, "path": "b",
-                  "readings": frozenset({"ce'nedra"})}]
+                 {"marker": {"speakers": ["n"], "text": "<|speaker:0|> Marendra"}, "path": "b",
+                  "readings": frozenset({"marendra"})}]
         from unittest.mock import patch
 
         def composed(mode, readings):
@@ -219,10 +172,10 @@ class NoHistoryAfterToneTests(unittest.TestCase):
             finally:
                 continuity._CURRENT.reset(token)
         with patch("epub_tts_narrator.renderer.continuity_codes.load_codes", return_value={"codes": [[1]]}):
-            history = composed("reading", frozenset({"ce'nedra"}))
-            everything = composed(None, frozenset({"ce'nedra"}))
+            history = composed("reading", frozenset({"marendra"}))
+            everything = composed(None, frozenset({"marendra"}))
             none = composed("reading", frozenset())
-        self.assertEqual([text for text, _ in history], ["<|speaker:0|> Ce'Nedra"])
+        self.assertEqual([text for text, _ in history], ["<|speaker:0|> Marendra"])
         self.assertEqual(len(everything), 2)
         self.assertEqual(apply_recovery("reading", "t", history, (), kind=None)[0], "reading")
         self.assertEqual(none, [])

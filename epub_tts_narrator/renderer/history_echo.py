@@ -140,26 +140,6 @@ def _attempt_records(directory, request_hash):
     return sorted(records, key=lambda record: record.get("attempt", 0))
 
 
-SILENT_REASONS = frozenset({"audio_too_quiet", "excessive_silence", "silent_audio"})
-SILENT_LIMIT = 2
-
-
-def silent_attempts(directory, request_hash):
-    """How many of a request's takes said (next to) nothing: went silent, or came back near-silent.
-
-    A take the silence watch cut after real speech is not counted: it is
-    finished from where it stopped (``take_completion``).
-    """
-    count = 0
-    for record in _attempt_records(directory, request_hash):
-        report = record.get("report") or {}
-        error = str(report.get("error") or "")
-        if ("did not finish the text: 'silence'" in error
-                or SILENT_REASONS.intersection(report.get("reasons") or [])):
-            count += 1
-    return count
-
-
 def next_mode(records, expected, heard=None):
     """The ladder rung for the next attempt: one past the furthest rung that echoed."""
     heard = heard_turns() if heard is None else heard
@@ -201,12 +181,21 @@ def role_tagged(text, kind):
     return f"{prefix}[{role}] {body.lstrip()}"
 
 
-def apply_recovery(requested, text, history, layouts, *, kind):
-    """``(applied, text, history, layout)`` for the requested rung or the first usable one after it."""
+def apply_recovery(requested, text, history, layouts, *, kind, continuation=False):
+    """``(applied, text, history, layout)`` for the requested rung or the first usable one after it.
+
+    With ``continuation`` the last history turn is a take completion's kept
+    start (``continuity.compose``): it is what the new words continue, so no
+    rung ever drops it.
+    """
+    chapter_turns = len(history) - (1 if continuation and history else 0)
     if requested == "reading":
         # Chapter history was cut to the turns saying the line's chosen
-        # readings right (``continuity.compose``); with none, no history.
-        return ("reading", text, history, "directing") if history else ("none", text, [], "directing")
+        # readings right (``continuity.compose``); with none, no chapter history.
+        return ("reading" if chapter_turns else "none"), text, history, "directing"
+    if requested == "none":
+        # continuity.compose already left out the chapter's turns.
+        return "none", text, history[-1:] if continuation else [], "directing"
     if requested is None or not history:
         return None, text, history, "directing"
     if requested not in LADDER:
@@ -219,7 +208,7 @@ def apply_recovery(requested, text, history, layouts, *, kind):
                 and "[" not in SPEAKER_TAG.sub("", text)):
             return mode, text, history, "streaming"
         if mode == "none":
-            return mode, text, [], "directing"
+            return mode, text, history[-1:] if continuation else [], "directing"
     raise AssertionError("unreachable")
 
 

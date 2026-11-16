@@ -117,8 +117,10 @@ class LadderTests(unittest.TestCase):
         mixed = "<|speaker:0|> Sal. <|speaker:1|> Vee."
         self.assertEqual(apply_recovery("role_tag", mixed, history, both, kind=None)[0::2], ("none", []))
         self.assertEqual(apply_recovery("none", tagged("Sal."), history, both, kind=None)[2], [])
-        # Without history there is nothing to recover from.
-        self.assertIsNone(apply_recovery("none", tagged("Sal."), [], both, kind=None)[0])
+        # continuity.compose leaves the chapter's turns out for "none"; the take heard none.
+        self.assertEqual(apply_recovery("none", tagged("Sal."), [], both, kind=None)[0], "none")
+        # Without history a ladder rung has nothing to recover from.
+        self.assertIsNone(apply_recovery("role_tag", tagged("Sal."), [], both, kind=None)[0])
         self.assertEqual(LADDER, ("role_tag", "streaming", "none"))
 
 
