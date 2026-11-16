@@ -66,6 +66,9 @@ class HistoryPlanTests(unittest.TestCase):
         # A take the silence watch stopped said its start; it is finished, not a runaway.
         stopped = {"report": {"passed": False, "reasons": ["text_mismatch"], "generation_stopped": "silence"}}
         self.assertIsNone(mode([stopped, stopped]))
+        # Nor is a take interrupted mid-generation, made again on resume.
+        interrupted = {"report": {"passed": False, "reasons": ["generation_incomplete"], "retry_on_resume": True}}
+        self.assertIsNone(mode([interrupted, interrupted]))
 
     def test_an_echo_climbs_the_ladder_but_never_after_a_tone(self):
         self.assertEqual(mode([attempt(["text_mismatch"], echo=True)]), "role_tag")

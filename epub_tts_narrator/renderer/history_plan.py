@@ -50,11 +50,13 @@ def runaway(record):
     """Whether a take ran on to Drama 3's length limit without finishing its text.
 
     Not a take the silence watch stopped: that one said its start and stopped
-    (``take_completion`` finishes it).
+    (``take_completion`` finishes it). Nor an interrupted take, saved
+    incomplete to be made again on resume.
     """
     from .generation_failures import drama3_truncation
     report = record.get("report") or {}
-    return report.get("generation_stopped") != "silence" and drama3_truncation(report)
+    interrupted = report.get("retry_on_resume") is True and report.get("reasons") == ["generation_incomplete"]
+    return report.get("generation_stopped") != "silence" and not interrupted and drama3_truncation(report)
 
 
 def plan(records, expected, *, has_readings, ladder=True, heard=None):
