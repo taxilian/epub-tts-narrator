@@ -404,6 +404,9 @@ def _resume_books(argv, books):
     return resume
 
 
+_STACK_DUMPS = None
+
+
 def _stack_dumps_on_signal():
     """``kill -USR1 PID`` appends every thread's name and stack to a temporary file.
 
@@ -419,8 +422,11 @@ def _stack_dumps_on_signal():
     import tempfile
     import threading
     import traceback
+    global _STACK_DUMPS
     if not hasattr(signal, "SIGUSR1"):
         return None
+    if _STACK_DUMPS is not None:  # once per process
+        return _STACK_DUMPS
     path = Path(tempfile.gettempdir()) / f"audiobook-render-{os.getpid()}-thread-stacks.txt"
 
     def dump(_signal, _frame):
@@ -435,6 +441,19 @@ def _stack_dumps_on_signal():
     signal.signal(signal.SIGUSR1, dump)
     stream = open(path, "a", encoding="utf-8")  # kept open: faulthandler writes to its descriptor
     faulthandler.register(signal.SIGUSR2, file=stream, all_threads=True)
+
+    def tidy():
+        # No dump was asked for: leave no empty file behind.
+        faulthandler.unregister(signal.SIGUSR2)
+        stream.close()
+        try:
+            if path.stat().st_size == 0:
+                path.unlink()
+        except OSError:
+            pass
+    import atexit
+    atexit.register(tidy)
+    _STACK_DUMPS = path
     return path
 
 

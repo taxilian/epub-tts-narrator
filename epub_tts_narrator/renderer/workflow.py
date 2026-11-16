@@ -2155,10 +2155,12 @@ def _saved_chapter_engines_match(work, record, current_engine, chapter, config):
     from .role_sampling import chunk_overrides, with_overrides
     from .speech_identity import engines_compatible
     expected = [chunk for chunk in chapter["chunks"] if not chunk["silent_control"]]
-    if len(expected) != len(record["acceptance"]):
-        return False
-    for chunk, accepted in zip(expected, record["acceptance"]):
-        engine = with_overrides(current_engine, chunk_overrides(chunk, config))
+    for index, accepted in enumerate(record["acceptance"]):
+        # A record that does not match the plan is reported by _restore_chapter's
+        # integrity checks, never silently rebuilt here.
+        chunk = expected[index] if index < len(expected) else None
+        engine = (with_overrides(current_engine, chunk_overrides(chunk, config)) if chunk is not None
+                  else current_engine)
         for lane in accepted.get("speaker_lanes", [accepted]):
             saved = read_json(regular_file(Path(work) / "clips" / lane["request_hash"] / "accepted.json"))
             if not engines_compatible(saved["request"]["engine"], engine,
@@ -3306,7 +3308,9 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                         raise
                     chapter_failed(index, plan["chapters"][index], chapter_label, exc)
                     continue
-                except (OSError, ValueError, RuntimeError) as exc:
+                except OSError as exc:
+                    # A saved take that cannot be read is this chapter's problem.
+                    # Programming and integrity errors still stop the run.
                     chapter_failed(index, plan["chapters"][index], chapter_label,
                                    RenderBlocked(f"Assembling {chapter_label} failed: {exc}"))
                     continue
