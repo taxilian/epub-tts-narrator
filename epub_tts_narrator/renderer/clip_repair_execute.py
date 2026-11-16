@@ -60,7 +60,10 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
                 raise ValueError('Completed clip repair candidate changed')
             state['phase'] = 'evaluated'
             session.save()
-            if previous['report'].get('passed') is True:
+            # A finished repair is republished only if it still passes the
+            # gate: it may have been verified under an older check.
+            from .acceptance_gate import refusal
+            if previous['report'].get('passed') is True and refusal(previous, directory) is None:
                 write_json(directory / 'accepted.json', previous)
                 return target, previous
             return None
@@ -185,6 +188,11 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
         if text_confirmation_unavailable(report):
             raise ClipRecoveryUnavailable('Clip repair verification unavailable; completed synthesis retained')
         record = {**pending, 'report': report}
+        if report.get('passed') is True:
+            from .acceptance_gate import refusal, refused_report
+            why = refusal(record, directory)
+            if why is not None:
+                record['report'] = report = refused_report(report, why)
         write_json(candidate_path, record)
         store_quietly(target, expected_sha256=record['audio_sha256'])
         for part in state['parts']:

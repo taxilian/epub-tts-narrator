@@ -37,7 +37,7 @@ def word_differences(expected, heard, *, limit=6):
 
     Case, punctuation and hyphens are ignored (``sun-browned`` and
     ``sunbrowned`` are one word), and so are words the recognizer only
-    spelled another way (``Valida`` for ``Valeda``: the same Double
+    spelled another way (``Morendra`` for ``Marendra``: the same Double
     Metaphone sounds), so only real differences remain:
     ``missing at the end: "with their hands close to their weapons."``.
     A chosen name heard rearranged is reported separately (``name_shape``).
@@ -87,10 +87,16 @@ def _tone(report):
     return describe(report)
 
 
-def _misread(report):
-    """``Va'Leda heard as valdea`` when a chosen pronunciation was heard rearranged, else ``""``."""
-    from .name_shape import describe
-    return describe(report)
+def _misread(record):
+    """``Marendra heard as marnedra`` when a take misread a chosen pronunciation, else ``""``.
+
+    Judged from the take's transcript, as the acceptance gate judges it: a
+    rearranged name sounds alike to the word comparison above, so a person
+    listening must be told here, whatever the saved report says.
+    """
+    from .acceptance_gate import rescued
+    from .name_shape import misread
+    return misread(record, require_heard=rescued(record))
 
 
 def _finished_from(record):
@@ -139,7 +145,7 @@ class TakeReview:
                 "transcript": row["transcript"], "expected_text": report.get("expected_text") or "",
                 "audio_path": str(row["audio_path"]), "learnable": self._learnable(report) is not None,
                 "verdict": marks.get(row["attempt"]), "finished_from": _finished_from(record),
-                "stopped": report.get("generation_stopped"), "misread": _misread(report),
+                "stopped": report.get("generation_stopped"), "misread": _misread(record),
                 "tone": _tone(report),
             })
         if used is not None and not any(row["accepted"] for row in rows):

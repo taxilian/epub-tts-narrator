@@ -348,5 +348,9 @@ def select_retained(directory, request, client, *, failure_report=None):
     chosen = current_acceptance(directory, digest(request))
     if chosen is not None:  # A person chose a take while the selection ran: theirs is used.
         return directory / chosen['audio_file'], chosen
+    from .acceptance_gate import refusal
+    why = refusal(record, directory)
+    if why is not None:  # The candidate filters above make this unreachable; never publish it.
+        raise ValueError(f'The chosen take cannot be published: {why}. Inspect {directory}')
     write_json(directory / 'accepted.json', record)
     return target, record

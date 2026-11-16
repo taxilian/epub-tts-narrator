@@ -730,6 +730,11 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             record = deepcopy(record)
             record["report"] = accepted_report(record["report"], result)
             record["validation_key"] = validation_key
+            from .acceptance_gate import refusal
+            why = refusal(record, directory)
+            if why is not None:
+                notify(f"  The recovery's accepting vote is not used: {why}.")
+                return None
             write_json(accepted_path, record)
             return finish(directory / record["audio_file"], record)
         if action == "rewrite":
@@ -767,6 +772,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
         from .retained_candidates import recheck_retained_candidates
 
         retained = recheck_retained_candidates(resolution_session, verifier, config, notify=notify)
+        if retained is not None:
+            from .acceptance_gate import refusal
+            why = refusal(retained, directory)
+            if why is not None:
+                notify(f"  Retained take {retained.get('attempt')} is not used: {why}.")
+                retained = None
         if retained is not None:
             if "direction_repair" in retained.get("engine_metadata", {}):
                 from .direction_repair import confirm_metadata
@@ -806,6 +817,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 latest["report"] = _skipped_word_check(latest["report"], verifier, request_hash,
                                                        directory / name, directory, purpose, notify,
                                                        latest.get("engine_metadata"))
+            if latest["report"].get("passed"):
+                from .acceptance_gate import refusal, refused_report
+                why = refusal(latest, directory)
+                if why is not None:
+                    notify(f"  Saved take {latest.get('attempt')} is not used: {why}.")
+                    latest["report"] = refused_report(latest["report"], why)
             if latest["report"].get("passed"):
                 latest["validation_key"] = validation_key
                 write_json(accepted_path, latest)
@@ -1157,6 +1174,15 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
             report = _heard_variant_check(report, config, verifier, request_hash, wav, purpose, notify)
             if "history_echo" not in report:
                 report = _skipped_word_check(report, verifier, request_hash, wav, directory, purpose, notify, metadata)
+        if purpose == "speech" and report.get("passed") is True and audio_present(wav):
+            # Whatever made it pass (ordinary checks, a learned spelling, a
+            # skipped word), one gate decides whether it may be used.
+            from .acceptance_gate import refusal, refused_report
+            why = refusal({"report": report, "request": request, "engine_metadata": metadata,
+                           "audio_sha256": audio_hash(wav)}, directory)
+            if why is not None:
+                notify(f"  Take {attempt} is not used: {why}.")
+                report = refused_report(report, why)
         if (purpose == "speech" and report.get("passed") is not True
                 and (metadata or {}).get("finish_reason") == "silence"):
             # A take that went silent before ending and did not pass is a
@@ -2561,7 +2587,11 @@ def _recheck_saved_whole_take(text, directory, request, verifier, config, *, not
             "previous_validation_key": record.get("validation_key"),
         }
         accepted = {**deepcopy(record), "report": report,
-                    "validation_key": make_validation_key(text, verifier, config["quality"], purpose="speech")}
+                    "validation_key": make_validation_key(text, verifier, config["quality"], purpose="speech",
+                                                          **verification_options(request))}
+        from .acceptance_gate import refusal
+        if refusal(accepted, directory) is not None:
+            return None
         write_json(directory / "accepted.json", accepted)
         notify("  Saved whole speech passed current deterministic verification; reusing it.")
         return wav, accepted

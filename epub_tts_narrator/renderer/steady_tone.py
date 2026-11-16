@@ -238,6 +238,8 @@ def filtered_fallback(directory, request, text, verifier, config, *, notify=prin
     from .stored_audio import audio_hash, audio_present, materialize
     directory = Path(directory)
     request_hash = digest(request)
+    from .take_feedback import judged_bad_audio
+    judged_bad = judged_bad_audio(directory)  # a take a person marked bad is never filtered and used
     tonal = []
     for path in sorted(directory.glob("attempt-*.json")):
         try:
@@ -248,7 +250,7 @@ def filtered_fallback(directory, request, text, verifier, config, *, notify=prin
         name = record.get("audio_file") if isinstance(record, dict) else None
         if (record.get("request_hash") != request_hash or not isinstance(report, dict)
                 or report.get("reasons") != [REASON] or not isinstance(name, str)
-                or not audio_present(directory / name)):
+                or not audio_present(directory / name) or record.get("audio_sha256") in judged_bad):
             continue
         tonal.append((float((report.get(REASON) or {}).get("level_db") or 99), record))
     if not tonal:
@@ -285,6 +287,11 @@ def filtered_fallback(directory, request, text, verifier, config, *, notify=prin
                     "report": {**report, MARKER: notice},
                     "engine_metadata": {**(record.get("engine_metadata") or {}), MARKER: notice},
                     "audio_file": output.name, "raw_file": None, "audio_sha256": audio_hash(output)}
+        from .acceptance_gate import refusal
+        why = refusal(accepted, directory)
+        if why is not None:
+            notify(f"  Take {attempt} with its tone filtered out is not used: {why}.")
+            continue
         write_json(directory / "accepted.json", accepted)
         notify(f"  Every take carried a steady high-pitched tone; using take {attempt} with "
                f"{', '.join(f'{hz / 1000:.1f} kHz' for hz in frequencies)} filtered out (its words verified).")

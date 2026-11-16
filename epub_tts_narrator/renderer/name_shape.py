@@ -1,17 +1,17 @@
 """Reject a take whose chosen pronunciation came out with its syllables rearranged.
 
 A confirmed pronunciation reaches the engine as phonemes, but Drama 3 does not
-always follow them: a name read ``V AH2 L EH1 D AH0`` (vah-LED-uh) can come
-out as "VAL-deh-uh". The recognizer hears that difference ("Valeda" against
-"Valdea"), but every word-level check accepts both: Double Metaphone ignores
+always follow them: a name read ``M AH0 R EH1 N D R AH0`` (muh-REN-druh) can
+come out as "MARN-eh-druh". The recognizer hears that difference ("Marendra"
+against "Marnedra"), but every word-level check accepts both: Double Metaphone ignores
 vowels, so both spellings reduce to the same consonants.
 
 This check compares the *shape* of the chosen reading with the shape of what
 was heard for that word: how many consonants come before, between and after
 its vowels. A recognizer spelling a name differently keeps the shape
-(``Valeda``, ``Voleda`` and ``Valida`` all have one consonant, a vowel, one
-consonant, a vowel, one consonant and a vowel), while the misreading moves a
-consonant across a vowel (``Valdea``: one, two, none). The take is rejected
+(``Marendra``, ``Morendra`` and ``Marindra`` all have one consonant, a vowel,
+one consonant, a vowel, three consonants and a vowel), while the misreading
+moves a consonant across a vowel (``Marnedra``: one, two, two). The take is rejected
 only when the heard word has the same number of vowel groups and the same
 number of consonants as the reading but they sit differently. Anything else
 (a heard word with other consonants, a dropped syllable, a dictionary word in
@@ -28,7 +28,7 @@ from pathlib import Path
 import re
 import time
 
-NAME_SHAPE_VERSION = 2  # 2: a possessive heard as a name ending in s (``Valedas``)
+NAME_SHAPE_VERSION = 2  # 2: a possessive heard as a name ending in s (``Marendras``)
 REASON = "pronunciation_mismatch"
 _VOWELS = frozenset("aeiou")
 _DIGRAPHS = ("th", "sh", "ch", "ph", "wh", "gh", "ck")
@@ -164,7 +164,7 @@ def _compared(control, phonemes, heard):
     """``(phonemes, word)`` to compare for one heard word.
 
     A possessive heard with its own ``'s`` compares the name itself. One heard
-    otherwise (``Valedas``: the recognizer wrote the
+    otherwise (``Marendras``: the recognizer wrote the
     possessive as a name ending in its "s" sound) compares the whole reading,
     possessive sound included, with the whole heard word.
     """
@@ -190,7 +190,7 @@ def heard_right(expected_text, transcript, performance):
     """Keys of the chosen readings this take was heard saying in their own shape.
 
     A word written exactly as in the text, or spelled another way with the
-    reading's shape (``Voleda`` for ``Va'Leda``), counts; a rearranged,
+    reading's shape (``Morendra`` for ``Marendra``), counts; a rearranged,
     missing or unplaceable word does not. Chapter history uses these takes as
     examples of the reading (``continuity.ChapterContinuity.takes``).
     """
@@ -220,21 +220,24 @@ def apply(report, expected_text, performance, *, purpose="speech"):
 
 
 def describe(report):
-    """``Va'Leda heard as Valdea`` for a rejected report, or ``""``."""
+    """``Marendra heard as Marnedra`` for a rejected report, or ``""``."""
     words = (report.get("name_shape") or {}).get("words") or []
     return "; ".join(f"{item['text']} heard as {item['heard']}" for item in words)
 
 
 def misread(record, *, require_heard=False):
-    """``Va'Leda heard as Valdea`` when a take misread a chosen reading, else ``""``.
+    """``Marendra heard as Marnedra`` when a take misread a chosen reading, else ``""``.
 
     Judged from its saved transcript as well as its report: a take verified
-    by a path that once skipped this check (clip repair before 2026-11-15)
-    carries no rejection reason, yet must never be published either. With
-    ``require_heard`` (best-effort choices, which already failed ordinary
-    verification) a chosen reading that is missing or cannot be placed in the
-    transcript counts too (``Va'Leda not heard``): a take that replaced the
-    name with other words says it no better than one that rearranged it.
+    by a path that once skipped this check carries no rejection reason, yet
+    must never be published either. With ``require_heard`` (a take accepted
+    without ordinary word verification: a learned spelling, a skipped word, a
+    resolver's vote or a best-effort choice) a chosen reading that cannot be
+    placed in the transcript at all, or a take with no transcript, counts too
+    (``Marendra not heard``): a take that dropped or replaced the name says it
+    no better than one that rearranged it. A different spelling in the name's
+    place is still left to ``check``, as in ordinary verification.
+    A take whose chosen readings cannot be read is reported, never passed.
     """
     report = record.get("report") if isinstance(record, dict) else None
     if not isinstance(report, dict):
@@ -248,13 +251,27 @@ def misread(record, *, require_heard=False):
         from .performance_runtime import verification_options
         performance = verification_options(request).get("performance")
     except (ValueError, KeyError, TypeError):
+        import json
+        return ("its chosen pronunciations could not be checked"
+                if '"cmu_arpabet"' in json.dumps(request, ensure_ascii=False) else "")
+    readings = _readings(performance)
+    if not readings:
         return ""
-    expected, transcript = report.get("expected_text") or "", report.get("verified_transcript") or report.get("transcript")
+    expected = report.get("expected_text")
+    if not expected:  # older records: the passage's own text
+        from .clip_repair_contract import logical_text
+        try:
+            expected = logical_text(request)
+        except (KeyError, TypeError, ValueError):
+            expected = ""
+    transcript = report.get("verified_transcript") or report.get("transcript")
     found = [f"{item['text']} heard as {item['heard']}" for item in check(expected, transcript, performance) or []]
     if require_heard and not found:
-        right = heard_right(expected, transcript, performance)
-        found = [f"{control['text']} not heard" for control, phonemes in _readings(performance)
-                 if reading_key(phonemes) not in right]
+        heard = _heard(expected, transcript, performance)
+        if not heard:  # no transcript to place them in
+            found = [f"{control['text']} not heard" for control, _ in readings]
+        else:
+            found = [f"{control['text']} not heard" for control, _, word in heard if word is None]
     return "; ".join(found)
 
 
