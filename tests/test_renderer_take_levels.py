@@ -86,6 +86,12 @@ class TakeLevelTests(unittest.TestCase):
         settings = chapter_settings({})
         self.assertIs(settings["level_takes"], True)
         self.assertEqual(settings["take_level_tolerance_db"], 3.0)
+        # A later leveling rule reassembles chapters; the first leaves them as they are.
+        self.assertNotIn("take_level_version", settings)
+        from unittest.mock import patch
+        with patch("epub_tts_narrator.renderer.take_levels.VERSION", 2):
+            self.assertEqual(chapter_settings({})["take_level_version"], 2)
+            self.assertNotIn("take_level_version", chapter_settings({"level_takes": False}))
 
 
 if __name__ == "__main__":

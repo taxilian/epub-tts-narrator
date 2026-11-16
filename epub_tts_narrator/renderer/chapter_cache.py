@@ -44,6 +44,12 @@ def chapter_settings(render, *, censorship_policy=None):
             value = settings[key]
             if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
                 raise ValueError(f"Invalid chapter {key}")
+    if settings.get("level_takes"):
+        # Bound only once the leveling rules change, so chapters assembled
+        # under the first version keep their checkpoints.
+        from .take_levels import VERSION as TAKE_LEVEL_VERSION
+        if TAKE_LEVEL_VERSION != 1:
+            settings["take_level_version"] = TAKE_LEVEL_VERSION
     if censorship_policy is not None:
         from .censorship import policy_identity
         policy = policy_identity(censorship_policy)
