@@ -198,7 +198,7 @@ def select_retained(directory, request, client, *, failure_report=None):
     # check was once skipped carries no rejection reason (name_shape.misread).
     from .name_shape import misread as misread_words
     misread = {item['summary']['candidate_id']: words for item in retained
-               if (words := misread_words(item['record'], require_heard=True))}
+               if (words := misread_words(item['record'], require_heard=True, directory=item['audio'].parent))}
     # And takes whose chosen names were not said as chosen, by their phonemes.
     from .name_phonemes import describe as phoneme_misreads, judge
     for item in retained:

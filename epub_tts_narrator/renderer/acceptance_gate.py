@@ -44,7 +44,7 @@ def refusal(record, directory):
     if record.get("audio_sha256") in judged_bad_audio(directory):
         return "a person marked it bad"
     from .name_shape import misread
-    words = misread(record, require_heard=rescued(record))
+    words = misread(record, require_heard=rescued(record), directory=directory)
     if words:
         return f"it misread a chosen pronunciation ({words})"
     # Said as chosen, by its phonemes (name_phonemes; skipped without the model).

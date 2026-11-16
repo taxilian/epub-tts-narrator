@@ -48,6 +48,16 @@ class AcceptanceGateTests(unittest.TestCase):
         best_effort = take(None, metadata={"exhaustion_selection": {}})
         self.assertIn("not heard", refusal(best_effort, self.folder))
 
+    def test_a_name_the_transcript_cannot_place_is_heard_by_its_phonemes(self):
+        from unittest import mock
+        from epub_tts_narrator.renderer import name_phonemes
+        rescued = take(" Nodded.", method="heard_variant")
+        for ok, refused in ((True, False), (False, True)):
+            with self.subTest(said_as_chosen=ok):
+                verdict = [{"text": "Marendra", "key": READING, "heard": "", "cost": 0.0 if ok else 2.0, "ok": ok}]
+                with mock.patch.object(name_phonemes, "judge", return_value=verdict):
+                    self.assertEqual(refusal(rescued, self.folder) is not None, refused)
+
     def test_a_take_a_person_marked_bad_is_refused_and_their_own_choice_never_is(self):
         record_verdict(self.work, "r" * 64, {"attempt": 1, "record": take(" Morendra nodded.")}, "bad")
         self.assertEqual(refusal(take(" Morendra nodded."), self.folder), "a person marked it bad")

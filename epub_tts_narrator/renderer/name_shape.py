@@ -231,7 +231,7 @@ def describe(report):
     return found
 
 
-def misread(record, *, require_heard=False):
+def misread(record, *, require_heard=False, directory=None):
     """``Marendra heard as Marnedra`` when a take misread a chosen reading, else ``""``.
 
     Judged from its saved transcript as well as its report: a take verified
@@ -242,7 +242,9 @@ def misread(record, *, require_heard=False):
     placed in the transcript at all, or a take with no transcript, counts too
     (``Marendra not heard``): a take that dropped or replaced the name says it
     no better than one that rearranged it. A different spelling in the name's
-    place is still left to ``check``, as in ordinary verification.
+    place is still left to ``check``, as in ordinary verification. Given the
+    take's ``directory``, a name the transcript cannot place is heard by its
+    phonemes instead (``name_phonemes``): said as chosen, it was not dropped.
     A take whose chosen readings cannot be read is reported, never passed.
     """
     report = record.get("report") if isinstance(record, dict) else None
@@ -275,9 +277,15 @@ def misread(record, *, require_heard=False):
     if require_heard and not found:
         heard = _heard(expected, transcript, performance)
         if not heard:  # no transcript to place them in
-            found = [f"{control['text']} not heard" for control, _ in readings]
+            missing = list(range(len(readings)))
         else:
-            found = [f"{control['text']} not heard" for control, _, word in heard if word is None]
+            missing = [index for index, (_, _, word) in enumerate(heard) if word is None]
+        if missing and directory is not None:
+            from .name_phonemes import judge
+            verdicts = judge(record, directory)
+            if verdicts and len(verdicts) == len(readings):
+                missing = [index for index in missing if not verdicts[index]["ok"]]
+        found = [f"{readings[index][0]['text']} not heard" for index in missing]
     return "; ".join(found)
 
 
@@ -333,7 +341,7 @@ def retire_misread(work):
         if not found and "exhaustion_selection" in metadata:
             # A best-effort choice already failed ordinary verification: it
             # must still say every chosen name.
-            missing = misread(record, require_heard=True)
+            missing = misread(record, require_heard=True, directory=path.parent)
             if missing:
                 evidence = {"reason": REASON, "version": NAME_SHAPE_VERSION, "missing": missing}
                 found = True
