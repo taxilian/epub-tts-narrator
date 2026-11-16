@@ -179,6 +179,18 @@ class SweepTests(unittest.TestCase):
         self.assertFalse((chosen / "exhaustion-selection.json").exists())
         self.assertEqual(len(list(chosen.glob("exhaustion-selection.name-shape-*.json"))), 1)
 
+    def test_a_best_effort_choice_that_lost_the_name_or_inserted_speech_is_retired(self):
+        lost = self.accepted("a", "Swallowed hard.", metadata={"exhaustion_selection": {}})
+        inserted = self.accepted("b", "Ce’Nedra people were running down the long hall in fear. Swallowed hard.",
+                                 metadata={"exhaustion_selection": {}})
+        ordinary = self.accepted("c", "Swallowed hard.")  # verified ordinarily: an unplaced name stays the word check's
+        kept = self.accepted("d", "Sinedra swallowed hard.", metadata={"exhaustion_selection": {}})
+        self.assertEqual(sorted(retire_misread(self.work)), sorted([lost, inserted]))
+        self.assertEqual(read_json(next(lost.glob("name-shape-*.json")))["evidence"]["missing"], "Ce’Nedra not heard")
+        self.assertEqual(read_json(next(inserted.glob("name-shape-*.json")))["evidence"]["reason"], "inserted_speech")
+        for folder in (ordinary, kept):
+            self.assertTrue((folder / "accepted.json").exists())
+
     def test_a_new_check_version_reads_every_take_again(self):
         old = self.accepted("a", "Sendera swallowed hard.")
         write_json(self.work / SWEEP_FILENAME, {"version": NAME_SHAPE_VERSION - 1, "checked_through": 4e9})

@@ -220,6 +220,23 @@ class ExhaustionCandidateTests(unittest.TestCase):
         self.assertEqual([row["attempt"] for row in client.calls[0]["candidates"]], [2])
         self.assertEqual(chosen["attempt"], 2)
 
+    def test_a_take_missing_a_chosen_name_or_inserting_other_speech_is_never_offered(self):
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer.exhaustion_selection import select_retained
+        from test_renderer_recovery_boundaries import FormatClient, valid_choice
+        self.candidate(1, " Sal nodded.")
+        self.candidate(2, " Sal people were running away down the long hall in fear. Nodded.")
+        self.candidate(3, " Nodded.")  # the name is not there at all
+        self.candidate(4, " Sal nodded again.")
+        client = FormatClient([valid_choice])
+        readings = [({"text": "Sal", "start": 0, "phonemes": "S AE1 L"}, "S AE1 L")]
+        with patch("epub_tts_narrator.renderer.name_shape._readings", return_value=readings), \
+                patch("epub_tts_narrator.renderer.name_shape.heard_right",
+                      side_effect=lambda expected, transcript, performance:
+                      {"S AE1 L"} if "sal" in (transcript or "").lower() else set()):
+            select_retained(self.directory, self.request, client)
+        self.assertEqual([row["attempt"] for row in client.calls[0]["candidates"]], [1, 4])
+
     def test_a_take_carrying_a_steady_tone_is_never_offered(self):
         from epub_tts_narrator.renderer.exhaustion_selection import select_retained
         from test_renderer_recovery_boundaries import FormatClient, valid_choice

@@ -35,7 +35,10 @@ _DIGRAPHS = ("th", "sh", "ch", "ph", "wh", "gh", "ck")
 _POSSESSIVE = re.compile(r"['’]s$")
 SWEEP_FILENAME = "name-shape-sweep.json"
 # 2: best-effort choices are swept too (every acceptance is read again once).
-SWEEP_POLICY = 2
+# 3: a best-effort choice is also retired when a chosen name is missing from
+#    it or it inserted other speech (``misread(require_heard=True)``,
+#    ``exhaustion_selection.inserted_words``).
+SWEEP_POLICY = 3
 _STRETCH = 40  # words: a longer differing stretch is not a misheard name
 _MTIME_SLACK = 120  # seconds: an acceptance written while a sweep ran is read by the next one
 
@@ -222,12 +225,16 @@ def describe(report):
     return "; ".join(f"{item['text']} heard as {item['heard']}" for item in words)
 
 
-def misread(record):
+def misread(record, *, require_heard=False):
     """``Ce'Nedra heard as Sendera`` when a take misread a chosen reading, else ``""``.
 
     Judged from its saved transcript as well as its report: a take verified
     by a path that once skipped this check (clip repair before 2026-11-15)
-    carries no rejection reason, yet must never be published either.
+    carries no rejection reason, yet must never be published either. With
+    ``require_heard`` (best-effort choices, which already failed ordinary
+    verification) a chosen reading that is missing or cannot be placed in the
+    transcript counts too (``Ce'Nedra not heard``): a take that replaced the
+    name with other words says it no better than one that rearranged it.
     """
     report = record.get("report") if isinstance(record, dict) else None
     if not isinstance(report, dict):
@@ -242,9 +249,13 @@ def misread(record):
         performance = verification_options(request).get("performance")
     except (ValueError, KeyError, TypeError):
         return ""
-    found = check(report.get("expected_text") or "", report.get("verified_transcript") or report.get("transcript"),
-                  performance)
-    return "; ".join(f"{item['text']} heard as {item['heard']}" for item in found or [])
+    expected, transcript = report.get("expected_text") or "", report.get("verified_transcript") or report.get("transcript")
+    found = [f"{item['text']} heard as {item['heard']}" for item in check(expected, transcript, performance) or []]
+    if require_heard and not found:
+        right = heard_right(expected, transcript, performance)
+        found = [f"{control['text']} not heard" for control, phonemes in _readings(performance)
+                 if reading_key(phonemes) not in right]
+    return "; ".join(found)
 
 
 def retire_misread(work):
@@ -276,7 +287,8 @@ def retire_misread(work):
     for path in sorted([*clips.glob("*/accepted.json"), *clips.glob("*/parts/*/accepted.json")]):
         if path.is_symlink() or not path.is_file() or path.stat().st_mtime < since - _MTIME_SLACK:
             continue
-        if b'"cmu_arpabet"' not in path.read_bytes():
+        data = path.read_bytes()
+        if b'"cmu_arpabet"' not in data and b'"exhaustion_selection"' not in data:
             continue
         record = read_json(path)
         if not isinstance(record, dict) or not isinstance(record.get("report"), dict):
@@ -292,9 +304,19 @@ def retire_misread(work):
             continue
         found = check(report.get("expected_text") or "", report.get("verified_transcript") or report.get("transcript"),
                       performance)
+        evidence = {"reason": REASON, "version": NAME_SHAPE_VERSION, "words": found}
+        if not found and "exhaustion_selection" in metadata:
+            # A best-effort choice already failed ordinary verification: it
+            # must still say every chosen name, and nothing else at length.
+            from .exhaustion_selection import INSERTED_STRETCH, inserted_words
+            missing = misread(record, require_heard=True)
+            extra = inserted_words(record)
+            if missing or extra >= INSERTED_STRETCH:
+                evidence = {"reason": REASON if missing else "inserted_speech", "version": NAME_SHAPE_VERSION,
+                            "missing": missing, "inserted_words": extra}
+                found = True
         if found:
-            retire_acceptance(path.parent, record, "name-shape",
-                              {"reason": REASON, "version": NAME_SHAPE_VERSION, "words": found})
+            retire_acceptance(path.parent, record, "name-shape", evidence)
             retired.append(path.parent)
     write_json(marker, {"version": NAME_SHAPE_VERSION, "policy": SWEEP_POLICY, "checked_through": started})
     return retired
