@@ -113,5 +113,19 @@ class VerdictStoreTests(unittest.TestCase):
         self.assertTrue(first[0]["ok"])
 
 
+class CommandScopeTests(unittest.TestCase):
+    def test_a_command_never_leaves_the_phoneme_check_on_for_what_runs_next(self):
+        from epub_tts_narrator.renderer import cli
+        name_phonemes.configure(None)
+        self.addCleanup(name_phonemes.configure, None)
+
+        def command(argv, *, in_shell):
+            name_phonemes.configure("/fixture/phoneme-model")
+            return 0
+        with mock.patch.object(cli, "_main", side_effect=command):
+            self.assertEqual(cli.main(["render", "BOOK"]), 0)
+        self.assertIsNone(name_phonemes.MODEL_DIRECTORY)
+
+
 if __name__ == "__main__":
     unittest.main()

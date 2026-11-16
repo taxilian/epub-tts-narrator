@@ -458,6 +458,22 @@ def _stack_dumps_on_signal():
 
 
 def main(argv=None, *, in_shell=False):
+    """Run one renderer command.
+
+    Process-wide settings a command's config makes (the optional phoneme
+    name check, ``name_phonemes.configure``) end with it, so a command run
+    inside another program (the run shell, a test) never leaves them to
+    whatever runs next.
+    """
+    from . import name_phonemes
+    previous = name_phonemes.MODEL_DIRECTORY
+    try:
+        return _main(argv, in_shell=in_shell)
+    finally:
+        name_phonemes.configure(previous)
+
+
+def _main(argv=None, *, in_shell=False):
     args = parser().parse_args(argv)
     if args.command in {"render", "serve"} and not in_shell:
         _stack_dumps_on_signal()

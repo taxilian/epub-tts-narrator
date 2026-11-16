@@ -417,7 +417,7 @@ class RendererCLITests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("Renderer stopped: RuntimeError: unreadable bundle: [REDACTED]", error)
         self.assertNotIn("private-worker-key", error)
-        self.assertIn("at main (", error)
+        self.assertIn("at _main (", error)
         self.assertRegex(error, r"cli\.py:\d+")
         self.assertNotIn("bundle = load_bundle", error)
 
@@ -428,7 +428,7 @@ class RendererCLITests(unittest.TestCase):
             status, _, error = self.run_cli("render", self.bundle, "--config", self.config)
         self.assertEqual(status, 2)
         self.assertIn("Renderer stopped: ProviderError: provider unreachable fixture", error)
-        self.assertIn("at main (", error)
+        self.assertIn("at _main (", error)
         self.assertIn("Validated text-model responses remain cached", error)
 
     def test_render_loudness_and_encoding_defaults_and_validation(self):
