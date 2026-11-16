@@ -687,6 +687,34 @@ class ExampleChoiceTests(unittest.TestCase):
         # The missing reading still decides first; without other wanted readings the nearest wins.
         self.assertEqual(nearest["marker"]["text"], "only")
 
+    def test_an_earlier_book_of_the_series_supplies_an_example_after_this_book(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer import common, continuity_codes, name_phonemes
+        from epub_tts_narrator.renderer.reading_examples import ReadingExamples
+
+        def item(name, chapter, book):
+            marker = {"file": f"{name}.codes.json", "sha256": name * 8, "text": name, "speakers": ["v"]}
+            return {"accepted": Path(f"/fixture/{name}/accepted.json"), "record_audio": name, "request_hash": name,
+                    "marker": marker, "readings": frozenset({"A"}), "voices": ["v"], "sequence": 50,
+                    "chapter": chapter, "book": book}
+        examples = ReadingExamples("/fixture")
+        saved = {}
+
+        def choose(rows):
+            examples._candidates = rows
+            saved.update({str(row["accepted"]): {"audio_sha256": row["record_audio"],
+                                                 "engine_metadata": {"continuity_codes": row["marker"]}}
+                          for row in rows})
+            with patch.object(common, "read_json", side_effect=lambda path: saved[str(path)]), \
+                    patch.object(continuity_codes, "load_codes"), patch.object(name_phonemes, "judge", return_value=None):
+                found = examples.example({"v"}, {"A"}, sequence=10, chapter="ch2", voices_by_asset={"v": {}})
+            return found and found["marker"]["text"]
+        # The same chapter of an earlier book is another chapter; this book comes first, then the nearest book.
+        self.assertEqual(choose([item("older", "ch2", 2), item("nearer", "ch2", 1)]), "nearer")
+        self.assertEqual(choose([item("nearer", "ch2", 1), item("this", "ch5", 0)]), "this")
+        self.assertIsNone(choose([item("same-chapter", "ch2", 0)]))
+
 
 class RetiredExampleTests(OtherChapterExampleTests):
     test_the_first_mention_in_a_chapter_hears_an_earlier_chapter_saying_it = None

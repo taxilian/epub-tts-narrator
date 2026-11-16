@@ -15,6 +15,13 @@ retired since (marked bad, misread) is never heard. Only takes that may be
 chapter history at all are indexed: ordinary verified generations of their
 exact text, not repairs, joins, choices, stalls or takes that went silent.
 The nearest earlier take in book order is chosen, else the nearest later one.
+
+A character keeps their voice through a series, so when the book has no such
+take, the same voice's take from an earlier book of the series is heard
+(nearest book first, ``analysis_directory.continuation_directories``; each
+book's render work at its default ``BOOK/render-work``). It must be the very
+same voice recording (asset hash) and say the name right by its phonemes,
+like every example.
 """
 
 from __future__ import annotations
@@ -84,21 +91,36 @@ class ReadingExamples:
                 "readings": readings, "voices": voices, "sequence": sequence,
                 "chapter": _chapter(record["request"])}
 
+    def _earlier_works(self):
+        """Render works of the series' earlier books, nearest first (``[]`` for a first book)."""
+        book = self.work.parent
+        if not (book / "manifest.json").is_file():
+            return []  # a render work outside its book has no series to look in
+        try:
+            from ..analysis_directory import continuation_directories
+            earlier = continuation_directories(book)
+        except (ValueError, OSError, KeyError, TypeError):
+            return []
+        return [work for work in (Path(directory) / "render-work" for directory in earlier)
+                if (work / "clips").is_dir() and not (work / "clips").is_symlink()]
+
     def _build(self):
         from .common import read_json
         candidates = []
-        clips = self.work / "clips"
-        if not clips.is_dir() or clips.is_symlink():
-            return candidates
-        for path in sorted([*clips.glob("*/accepted.json"), *clips.glob("*/parts/*/accepted.json")]):
-            try:
-                if path.is_symlink() or b'"cmu_arpabet"' not in path.read_bytes():
-                    continue
-                candidate = self._candidate(path, read_json(path))
-            except (ValueError, OSError):
+        for distance, work in enumerate([self.work, *self._earlier_works()]):
+            clips = work / "clips"
+            if not clips.is_dir() or clips.is_symlink():
                 continue
-            if candidate is not None:
-                candidates.append(candidate)
+            for path in sorted([*clips.glob("*/accepted.json"), *clips.glob("*/parts/*/accepted.json")]):
+                try:
+                    if path.is_symlink() or b'"cmu_arpabet"' not in path.read_bytes():
+                        continue
+                    candidate = self._candidate(path, read_json(path))
+                except (ValueError, OSError):
+                    continue
+                if candidate is not None:
+                    # How many books back it was spoken (0: this book).
+                    candidates.append(dict(candidate, book=distance))
         return candidates
 
     def candidates(self):
@@ -137,14 +159,17 @@ class ReadingExamples:
         scored = []
         for item in self.candidates():
             covered = len(readings & item["readings"])
-            if (not covered or item["chapter"] == chapter or not set(item["voices"]) <= set(speakers)
+            earlier_book = item.get("book", 0)
+            if (not covered or (not earlier_book and item["chapter"] == chapter)
+                    or not set(item["voices"]) <= set(speakers)
                     or not all(asset in voices_by_asset for asset in item["marker"].get("speakers", []))):
                 continue
-            # Nearest earlier take in book order first, then the nearest later one.
-            before = item["sequence"] < sequence
-            scored.append((covered, len(wanted & item["readings"]), before,
+            # This book first, then the nearest earlier book; within a book the
+            # nearest earlier take in book order, then the nearest later one.
+            before = earlier_book > 0 or item["sequence"] < sequence
+            scored.append((covered, len(wanted & item["readings"]), -earlier_book, before,
                            item["sequence"] if before else -item["sequence"], item))
-        for *_, item in sorted(scored, key=lambda row: row[:4], reverse=True):
+        for *_, item in sorted(scored, key=lambda row: row[:5], reverse=True):
             try:
                 current = read_json(item["accepted"])
                 codes = item["accepted"].parent / item["marker"]["file"]
