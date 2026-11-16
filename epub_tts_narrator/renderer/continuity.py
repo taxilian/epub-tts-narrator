@@ -220,7 +220,7 @@ class ChapterContinuity:
             missing = wanted - held - set(latest.get("readings", ()) if latest else ())
             if missing and self.examples is not None:
                 example = self.examples.example(speakers, missing, sequence=sequence, chapter=chapter,
-                                                voices_by_asset=self.voices_by_asset)
+                                                voices_by_asset=self.voices_by_asset, wanted=wanted)
                 if example is not None and coverage(example) > current:
                     latest = example
         if latest is None:

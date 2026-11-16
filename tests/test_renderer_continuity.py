@@ -661,6 +661,33 @@ class OtherChapterExampleTests(unittest.TestCase):
         self.assertEqual(for_work(self.root / "work").candidates(), [])
 
 
+class ExampleChoiceTests(unittest.TestCase):
+    def test_a_line_with_two_chosen_names_hears_an_example_saying_both(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer import common, continuity_codes, name_phonemes
+        from epub_tts_narrator.renderer.reading_examples import ReadingExamples
+
+        def item(name, readings, sequence):
+            marker = {"file": f"{name}.codes.json", "sha256": name * 8, "text": name, "speakers": ["v"]}
+            return {"accepted": Path(f"/fixture/{name}/accepted.json"), "record_audio": name, "request_hash": name,
+                    "marker": marker, "readings": frozenset(readings), "voices": ["v"], "sequence": sequence,
+                    "chapter": "ch1"}
+        examples = ReadingExamples("/fixture")
+        examples._candidates = [item("both", {"A", "B"}, 3), item("only", {"A"}, 5)]
+        saved = {str(row["accepted"]): {"audio_sha256": row["record_audio"],
+                                        "engine_metadata": {"continuity_codes": row["marker"]}}
+                 for row in examples._candidates}
+        with patch.object(common, "read_json", side_effect=lambda path: saved[str(path)]), \
+                patch.object(continuity_codes, "load_codes"), patch.object(name_phonemes, "judge", return_value=None):
+            chosen = examples.example({"v"}, {"A"}, sequence=10, chapter="ch2", voices_by_asset={"v": {}},
+                                      wanted={"A", "B"})
+            nearest = examples.example({"v"}, {"A"}, sequence=10, chapter="ch2", voices_by_asset={"v": {}})
+        self.assertEqual(chosen["marker"]["text"], "both")
+        # The missing reading still decides first; without other wanted readings the nearest wins.
+        self.assertEqual(nearest["marker"]["text"], "only")
+
+
 class RetiredExampleTests(OtherChapterExampleTests):
     test_the_first_mention_in_a_chapter_hears_an_earlier_chapter_saying_it = None
     test_a_take_heard_rearranged_or_retired_is_never_an_example = None

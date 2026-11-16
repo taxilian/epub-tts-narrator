@@ -119,12 +119,19 @@ class ReadingExamples:
                        for item in self._candidates):
                 self._candidates.append(candidate)
 
-    def example(self, speakers, readings, *, sequence, chapter, voices_by_asset):
-        """A history entry from another chapter saying the most of ``readings`` right, or None."""
+    def example(self, speakers, readings, *, sequence, chapter, voices_by_asset, wanted=()):
+        """A history entry from another chapter saying the most of ``readings`` right, or None.
+
+        Among those, one also saying more of ``wanted`` (all the line's chosen
+        readings) right comes first: a line using two chosen names needs a
+        turn saying both, since a turn saying only the missing one would
+        trade away the turn saying the other.
+        """
         from .common import read_json
         from .continuity_codes import load_codes
         from .common import digest
         readings = set(readings)
+        wanted = set(wanted) | readings
         if not readings or sequence is None:
             return None
         scored = []
@@ -135,8 +142,9 @@ class ReadingExamples:
                 continue
             # Nearest earlier take in book order first, then the nearest later one.
             before = item["sequence"] < sequence
-            scored.append((covered, before, item["sequence"] if before else -item["sequence"], item))
-        for _, _, _, item in sorted(scored, key=lambda row: row[:3], reverse=True):
+            scored.append((covered, len(wanted & item["readings"]), before,
+                           item["sequence"] if before else -item["sequence"], item))
+        for *_, item in sorted(scored, key=lambda row: row[:4], reverse=True):
             try:
                 current = read_json(item["accepted"])
                 codes = item["accepted"].parent / item["marker"]["file"]
