@@ -85,12 +85,14 @@ class SteadyToneTests(unittest.TestCase):
             return folder
         tonal, clean = accepted("a", tone=7100), accepted("b")
         chosen = accepted("c", tone=7100, metadata={"manual_selection": {}})
+        # A filtered copy is judged without its notched bands; the sweep never re-measures it.
+        filtered = accepted("d", tone=7100, metadata={"tone_filter": {"notches_hz": [7100]}})
         self.assertEqual(retire_tonal(work), [tonal])
         self.assertFalse((tonal / "accepted.json").exists())
         self.assertFalse((tonal / "exhaustion-selection.json").exists())  # its choice cannot republish it
         evidence = read_json(next(tonal.glob("steady-tone-*.json")))
         self.assertEqual(evidence["evidence"]["reason"], "steady_tone")
-        for folder in (clean, chosen):
+        for folder in (clean, chosen, filtered):
             self.assertTrue((folder / "accepted.json").exists())
         self.assertEqual(read_json(work / SWEEP_FILENAME)["version"], VERSION)
         self.assertEqual(retire_tonal(work), [])  # measured once

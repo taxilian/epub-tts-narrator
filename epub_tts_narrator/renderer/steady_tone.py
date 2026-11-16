@@ -153,7 +153,7 @@ def retire_tonal(work, *, notify=None):
         if not isinstance(record, dict) or not isinstance(record.get("report"), dict):
             continue
         metadata = record.get("engine_metadata") or {}
-        if (record["report"].get("passed") is not True or "manual_selection" in metadata
+        if (record["report"].get("passed") is not True or "manual_selection" in metadata or MARKER in metadata
                 or record.get("audio_sha256") in good or not isinstance(record.get("audio_file"), str)
                 or not isinstance(record.get("request"), dict)
                 or record["request"].get("kind") not in {"speech", "paragraph_speech", "speech_recovery_part"}):

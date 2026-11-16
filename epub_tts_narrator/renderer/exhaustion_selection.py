@@ -10,7 +10,7 @@ from .common import digest, read_json, regular_file, write_json
 from .stored_audio import StoredAudioError, audio_hash, audio_present, copy_audio
 from .clip_repair_contract import logical_text, plain, synthesis_request
 from .clip_repair_prompts import SELECT
-from .clip_repair_state import ClipRecoveryUnavailable, model_call
+from .clip_repair_state import ClipRecoveryUnavailable, ClipRepairRefused, model_call
 from .diagnostics import safe_error_text
 from .exhaustion_candidates import candidate_summary, retained_candidates, same_span, stylized_spelling_advisory
 
@@ -277,7 +277,10 @@ def select_retained(directory, request, client, *, failure_report=None):
         if calls == 3:
             raise ClipRecoveryUnavailable('Chooser format corrections exhausted this invocation; pending choice retained')
         calls += 1
-        state['audit']['response'] = model_call(client, SELECT, state['audit']['payload'])
+        try:
+            state['audit']['response'] = model_call(client, SELECT, state['audit']['payload'])
+        except ClipRepairRefused as exc:
+            raise ValueError(f'{exc}; no best-effort take is chosen. Inspect {directory}') from exc
         state['response_received'] = True
         write_json(path, {**state, 'record_sha256': digest(state)})
     response = state['audit']['response']

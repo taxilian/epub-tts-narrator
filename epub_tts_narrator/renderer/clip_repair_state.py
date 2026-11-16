@@ -15,21 +15,20 @@ class ClipRecoveryUnavailable(RuntimeError):
 
 
 class ClipRepairRefused(RuntimeError):
-    """The provider refused this repair request itself (HTTP 400/413/422, context too long).
+    """The provider refused this request for its size (context too long, HTTP 413).
 
     Not an outage: sending the same request again cannot succeed, so only this
-    passage's repair ends and its other recoveries go on.
+    passage's repair ends and its other recoveries go on. Any other refusal
+    (a bad model name or setting) stays an outage that stops the run once,
+    rather than silently ending every repair it reaches.
     """
-
-
-_REFUSED_STATUS = {400, 413, 422}
 
 
 def model_call(client, prompt, payload):
     try:
         return client.complete(prompt, deepcopy(payload))
     except ProviderError as exc:
-        if getattr(exc, "status_code", None) in _REFUSED_STATUS or getattr(exc, "code", None) == "context_length_exceeded":
+        if getattr(exc, "status_code", None) == 413 or getattr(exc, "code", None) == "context_length_exceeded":
             raise ClipRepairRefused(f"The recovery model refused the repair request ({exc})") from exc
         raise ClipRecoveryUnavailable('Clip recovery model unavailable; pending progress retained') from exc
     except (OSError, RuntimeError, ValueError) as exc:
@@ -79,8 +78,8 @@ class ClipRepairState:
         if self.state['phase'] in {'approved', 'executing'}:
             return approved(self.request, audit)
         if remaining <= 0:
-            self.state['phase'] = 'rejected'
-            self.save()
+            # Only this run's shared allowance is spent: the repair stays
+            # pending for a later run instead of being rejected for good.
             return None
         if not self.state['proposal_received']:
             try:

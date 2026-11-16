@@ -116,6 +116,20 @@ class RefusedRepairRequestTests(unittest.TestCase):
         saved = read_json(self.directory / 'clip-repair.json')
         self.assertEqual((saved['phase'], saved['error_code']), ('failed', 'request_refused'))
 
+    def test_another_bad_request_is_an_outage_not_a_silent_failure(self):
+        # A wrong model name or setting must stop the run once, not end every repair.
+        from epub_tts_narrator.provider import ProviderError
+        from epub_tts_narrator.renderer.clip_repair_state import ClipRecoveryUnavailable
+        state = self.state(ProviderError('bad model', status_code=400, code=None))
+        with self.assertRaises(ClipRecoveryUnavailable):
+            state.prepare([{'candidate_id': 'c'}], 4)
+        self.assertEqual(read_json(self.directory / 'clip-repair.json')['phase'], 'pending')
+
+    def test_a_spent_run_allowance_leaves_the_repair_pending_for_a_later_run(self):
+        state = self.state(AssertionError("no request without an allowance"))
+        self.assertIsNone(state.prepare([{'candidate_id': 'c'}], 0))
+        self.assertEqual(read_json(self.directory / 'clip-repair.json')['phase'], 'pending')
+
     def test_an_outage_still_keeps_the_repair_pending(self):
         from epub_tts_narrator.provider import ProviderError
         from epub_tts_narrator.renderer.clip_repair_state import ClipRecoveryUnavailable
