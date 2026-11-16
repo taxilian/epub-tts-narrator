@@ -28,6 +28,12 @@ languages: tone digits, stray periods and aspiration marks are dropped, an
 r-coloured vowel is a vowel and an R, and a syllabic L is a vowel and an L
 (``_normalize``).
 
+Verdicts heard from a saved take's audio (``judge``) are kept in its render
+work's ``name-phoneme-verdicts.jsonl`` (one appended line per take), keyed by the take's audio, request and
+word timings and this module's ``VERSION``, so a sweep of a book's takes
+that is interrupted resumes where it stopped and history choices never hear
+the same take twice.
+
 The model is optional: ``[verification] name_phoneme_model`` names its
 directory (``configure``, from the renderer CLI); unset or missing,
 ``available()`` is false and nothing here runs. It is loaded once per process,
@@ -46,6 +52,10 @@ MISREAD_COST = 1.0
 PAD_SECONDS = 0.12
 _LOCK = threading.Lock()
 _MODEL = None
+STORE_FILENAME = "name-phoneme-verdicts.jsonl"
+_STORE_EVERY = 25  # new verdicts between writes of the store
+_STORES = {}
+_STORE_LOCK = threading.Lock()
 
 _CONSONANTS = {
     "B": {"b", "β"}, "CH": {"tʃ", "ʃ"}, "D": {"d", "ɾ", "dʒ", "ð"}, "DH": {"ð", "d", "θ"},
@@ -330,6 +340,61 @@ def apply(report, path, performance):
             "passed_method": report.get("text_confirmation_method"), "text_confirmation_method": None}
 
 
+def _work_of(directory):
+    """The render work holding a take folder (``WORK/clips/<hash>`` or its parts), or ``None``."""
+    for parent in Path(directory).resolve().parents:
+        if parent.name == "clips":
+            return parent.parent
+    return None
+
+
+def _store(work):
+    with _STORE_LOCK:
+        if work not in _STORES:
+            path = work / STORE_FILENAME
+            entries = {}
+            if path.is_file() and not path.is_symlink():
+                try:
+                    lines = path.read_text(encoding="utf-8").splitlines()
+                except (OSError, UnicodeDecodeError):
+                    lines = []
+                for line in lines:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue  # a line cut short by an interruption is heard again
+                    if (isinstance(row, dict) and row.get("version") == VERSION
+                            and isinstance(row.get("key"), str) and isinstance(row.get("words"), list)):
+                        entries[row["key"]] = row["words"]
+            if not _STORES:
+                import atexit
+                atexit.register(flush)  # an interrupted render keeps what it heard
+            _STORES[work] = {"path": path, "entries": entries, "pending": []}
+        return _STORES[work]
+
+
+def _store_key(record):
+    from .common import digest
+    report = record.get("report") or {}
+    return digest({"audio": record.get("audio_sha256"), "request": record.get("request_hash"),
+                   "words": report.get("words"), "expected": report.get("expected_text")})
+
+
+def flush(work=None):
+    """Append kept verdicts not yet written (every render work, or one) to their store."""
+    import os
+    with _STORE_LOCK:
+        for key, store in list(_STORES.items()):
+            if (work is not None and key != Path(work).resolve()) or not store["pending"]:
+                continue
+            lines = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in store["pending"])
+            with open(store["path"], "a", encoding="utf-8") as stream:
+                stream.write(lines)
+                stream.flush()
+                os.fsync(stream.fileno())
+            store["pending"] = []
+
+
 def judge(record, directory):
     """Verdicts for an accepted or candidate take: saved ones, else heard from its audio; ``None`` when unknown."""
     report = record.get("report") or {}
@@ -350,7 +415,23 @@ def judge(record, directory):
     path = Path(directory) / record["audio_file"]
     if not audio_present(path):
         return None
-    return verdicts(path, report, performance)
+    work = _work_of(directory) if isinstance(record.get("audio_sha256"), str) else None
+    store = _store(work) if work is not None else None
+    key = _store_key(record) if store is not None else None
+    if store is not None:
+        with _STORE_LOCK:
+            kept = store["entries"].get(key)
+        if isinstance(kept, list):
+            return kept
+    found = verdicts(path, report, performance)
+    if store is not None:
+        with _STORE_LOCK:
+            store["entries"][key] = found
+            store["pending"].append({"version": VERSION, "key": key, "words": found})
+            due = len(store["pending"]) >= _STORE_EVERY
+        if due:
+            flush(work)
+    return found
 
 
 def describe(words):

@@ -79,5 +79,39 @@ class VerdictTests(unittest.TestCase):
         self.assertTrue(found[0]["ok"])
 
 
+class VerdictStoreTests(unittest.TestCase):
+    def test_a_take_is_heard_once_and_its_verdicts_survive_a_new_renderer(self):
+        import tempfile
+        from pathlib import Path
+        from epub_tts_narrator.renderer.name_phonemes import STORE_FILENAME, flush, judge
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        folder = Path(temporary.name) / "work" / "clips" / ("c" * 64)
+        folder.mkdir(parents=True)
+        (folder / "take.wav").write_bytes(b"fixture")
+        text = "Marendra nodded."
+        record = {"audio_file": "take.wav", "audio_sha256": "a" * 64, "request_hash": "r" * 64,
+                  "request": {"kind": "speech", "chunk": {"spoken_text": text, "expressive_direction": "",
+                                                          "expressive_performance": performance(text, "Marendra", READING)}},
+                  "report": {"passed": True, "expected_text": text, "words": []}}
+        heard = "m ə ɹ ɛ n d ɹ ə".split()
+        self.addCleanup(name_phonemes._STORES.clear)
+        with mock.patch.object(name_phonemes, "available", return_value=True), \
+                mock.patch("epub_tts_narrator.renderer.stored_audio.audio_present", return_value=True), \
+                mock.patch.object(name_phonemes, "phones", return_value=heard) as listened:
+            first = judge(record, folder)
+            self.assertEqual(judge(record, folder), first)
+            self.assertEqual(listened.call_count, 1)
+            flush()
+            name_phonemes._STORES.clear()  # a new renderer reads the store
+            self.assertEqual(judge(record, folder), first)
+            self.assertEqual(listened.call_count, 1)
+            (folder.parents[1] / STORE_FILENAME).write_text("{cut short", encoding="utf-8")
+            name_phonemes._STORES.clear()  # a damaged store is heard again, never trusted
+            self.assertEqual(judge(record, folder), first)
+            self.assertEqual(listened.call_count, 2)
+        self.assertTrue(first[0]["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

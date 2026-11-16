@@ -353,6 +353,8 @@ def retire_misread(work):
         if found:
             retire_acceptance(path.parent, record, "name-shape", evidence)
             retired.append(path.parent)
+    if phonemes is not None:
+        name_phonemes.flush(work)
     write_json(marker, {"version": NAME_SHAPE_VERSION, "policy": SWEEP_POLICY, "phonemes": phonemes,
                         "checked_through": started})
     return retired
