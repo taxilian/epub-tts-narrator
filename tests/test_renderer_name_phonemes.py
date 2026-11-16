@@ -46,6 +46,18 @@ class ReadingCostTests(unittest.TestCase):
         self.assertTrue(said_right("T AA1 AO0 R", "t aʊ ɹ"))
         self.assertFalse(said_right("T AA1 AO0 R", "t eɪ ɹ"))
 
+    def test_an_er_vowel_may_be_said_without_its_r_or_with_it_written_after(self):
+        for heard in ("d a n ɪ k", "d ɑː n ɪ k", "d oː n ɪ k", "d ɔ r n ɛ k", "d ɜː n ɪ k"):
+            with self.subTest(heard=heard):
+                self.assertTrue(said_right("D ER1 N IH0 K", heard))
+        self.assertFalse(said_right("D ER1 N IH0 K", "d iː n ɪ k"))
+
+    def test_a_nasal_or_a_breath_beside_a_vowel_is_not_a_misreading(self):
+        self.assertTrue(said_right(READING, "m ə ɹ ɛ n n d ɹ ə"))
+        self.assertTrue(said_right("G EH1 R IY0 AH0 N", "ɡ ɛ ɹ h ʌ m"))
+        self.assertFalse(said_right(READING, "m ə ɹ ɛ k n d ɹ ə"))  # any other extra consonant still is
+        self.assertTrue(said_right("TH AH1 L Z", "f aʊ l z"))
+
     def test_tokens_of_other_languages_are_read_as_english_phones(self):
         self.assertTrue(said_right(READING, "m ə5 ɹ ɛ n ts. ɹ ə"))  # tone digit, stray period
         self.assertTrue(said_right("V AE0 L AO1 R AH0 N", "v ə l oːɹ ɹ ə n"))  # an r-coloured vowel before its R
@@ -72,6 +84,17 @@ class VerdictTests(unittest.TestCase):
         with mock.patch.object(name_phonemes, "phones", side_effect=lambda path, start=None, end=None: heard[(start, end)]):
             found = verdicts("take.wav", self.report(words), performance(self.TEXT, "Marendra", READING))
         self.assertEqual([(item["ok"], item["heard"]) for item in found], [(False, "m ə ɹ iː n d ɹ ə")])
+
+    def test_a_name_heard_in_another_languages_sounds_is_uncertain_not_misread(self):
+        words = [{"word": "Marendra?", "start": 0.0, "end": 0.4}]
+        report = dict(self.report(words), expected_text="Marendra?")
+        with mock.patch.object(name_phonemes, "phones", return_value="x ai5 tɕh iou2".split()):
+            [found] = verdicts("take.wav", report, performance("Marendra?", "Marendra", READING))
+        self.assertTrue(found["ok"])
+        self.assertTrue(found["uncertain"])
+        with mock.patch.object(name_phonemes, "phones", return_value="m ə ɹ iː n d ɹ ə".split()):
+            [found] = verdicts("take.wav", report, performance("Marendra?", "Marendra", READING))
+        self.assertFalse(found["ok"])
 
     def test_without_word_timings_the_whole_take_is_searched(self):
         with mock.patch.object(name_phonemes, "phones", return_value="m ə ɹ ɛ n d ɹ ə n ɑː d ᵻ d".split()) as heard:

@@ -22,8 +22,12 @@ before an R ("Mary", "marry", "merry"), as do the back vowels ("lore",
 "lower"); an L ending a syllable may be swallowed and colours the vowel before
 it ("Pulgara" for P AH1 L G ...); an R or L inside a consonant cluster may be
 swallowed; two neighbouring vowels may glide into one ("TAH-or" heard as one
-syllable); a consonant at the name's very edge, where word timings clip the
-audio, costs less. The recognizer's vocabulary also holds tokens of other
+syllable); an ER vowel may be said without its R ("DAH-nik") or written with
+it after the vowel; a nasal beside a vowel or a breath the reading lacks costs
+little; a consonant at the name's very edge, where word timings clip the
+audio, costs less. A name the recognizer heard in another language's sounds
+(tone marks, symbols outside English) is uncertain, never a misreading. These
+rules were set against a listener's verdicts. The recognizer's vocabulary also holds tokens of other
 languages: tone digits, stray periods and aspiration marks are dropped, an
 r-coloured vowel is a vowel and an R, and a syllabic L is a vowel and an L
 (``_normalize``).
@@ -48,11 +52,12 @@ import threading
 
 # Verdicts' identity: saved verdicts and the verdict store are read only
 # under this version, so any change to how a name is heard bumps it.
-VERSION = 3
+VERSION = 4
 # Bumped only when the check may fail a take it passed before: it names the
 # check in validation keys and in the sweep of takes in use, so a change that
 # only accepts more never re-verifies or re-sweeps a book. (3: an R written
-# twice is one sound.)
+# twice is one sound. 4: ER without its R, a nasal or breath beside a vowel,
+# another language's sounds are uncertain.)
 STRICTNESS = 2
 MODEL_DIRECTORY = None  # set by configure()
 MISREAD_COST = 1.0
@@ -84,7 +89,8 @@ _KINDS = {
     "AW": {"aʊ", "a", "ɑ"},
     "AY": {"aɪ", "a", "ɑ"},
     "EH": _FRONT_MID,
-    "ER": {"ɜː", "ɜ", "ɚ", "œ", "ə", "ʌ", "ɔ", "ɛ", "ø", "øː", "ɐ"},
+    # "ER" also as said without its R ("DAH-nik", "DOH-nik" for D ER1 N IH0 K).
+    "ER": {"ɜː", "ɜ", "ɚ", "œ", "ə", "ʌ", "ɔ", "ɛ", "ø", "øː", "ɐ", "a", "aː", "ɑ", "ɑː", "o", "oː"},
     "EY": {"eɪ", "e", "eː", "ɛ"},
     "IH": {"ɪ", "i", "iː", "ᵻ", "e", "ɛ", "ə"},
     "IY": {"i", "iː", "ɪ", "j"},
@@ -101,7 +107,10 @@ _BEFORE_R = {"EH": "front", "AE": "front", "EY": "front", "AO": "back", "OW": "b
 _MERGED_BEFORE_R = {"front": {"ɛ", "æ", "a", "e", "eɪ", "ɛː", "eː", "aː"},
                     "back": {"ɔ", "ɔː", "o", "oː", "oʊ", "əʊ"}}
 # A vowel before a syllable-final L, coloured by it.
-_BEFORE_DARK_L = {"u", "uː", "ʊ", "o", "oː", "oʊ", "ʉ", "ɔ", "ɔː", "ʌ", "ə", "ɐ", "ɑ", "ɑː", "a"}
+_BEFORE_DARK_L = {"u", "uː", "ʊ", "o", "oː", "oʊ", "ʉ", "ɔ", "ɔː", "ʌ", "ə", "ɐ", "ɑ", "ɑː", "a", "aʊ", "əʊ"}
+# Heard consonants the reading lacks that are rarely a misreading: a nasal
+# beside a vowel (a nasalised vowel written as vowel + n) and breath.
+_WEAK_EXTRA = {"n": 0.5, "m": 0.5, "ŋ": 0.5, "h": 0.3}
 _ASPIRATED = {"t", "k", "p", "tɕ", "ts", "ʈ"}
 _R_SYMBOLS = {"r", "ʁ", "ɻ"}
 
@@ -190,7 +199,7 @@ def cost(reading, phones):
         return 0.5 if index in (0, count - 1) else 1.0
 
     def extra(phone):  # a heard sound the reading lacks, inside the name
-        return 0.3 if _is_vowel(phone) else 1.0
+        return 0.3 if _is_vowel(phone) else _WEAK_EXTRA.get(phone, 1.0)
 
     def glides(index, phone):  # two reading vowels heard as one gliding vowel
         if index < 1 or kind(index) != "vowel" or kind(index - 1) != "vowel" or len(phone) < 2:
@@ -209,6 +218,9 @@ def cost(reading, phones):
                        table[i][j - 1] + extra(phones[j - 1]))
             if glides(i - 1, phones[j - 1]):
                 best = min(best, table[i - 2][j - 1])
+            if phones[j - 1] == "ɹ" and base(i - 1) == "ER" and j >= 2:
+                # The R of an r-coloured ER vowel, written after it ("d ɔ ɹ n").
+                best = min(best, table[i][j - 1])
             table[i][j] = best
     return round(min(table[rows]), 2)
 
@@ -320,9 +332,28 @@ def verdicts(path, report, performance):
                 whole = phones(path)
             best = (min(cost(reading, whole), cost(phonemes, whole)), whole)
         spent, heard = best
-        results.append({"text": control["text"], "key": reading_key(phonemes), "heard": " ".join(heard),
-                        "cost": round(spent, 2), "ok": spent < MISREAD_COST})
+        verdict = {"text": control["text"], "key": reading_key(phonemes), "heard": " ".join(heard),
+                   "cost": round(spent, 2), "ok": spent < MISREAD_COST}
+        if not verdict["ok"] and heard is not whole and _foreign(heard):
+            # The recognizer heard the name in another language's sounds
+            # ("x ai5 tɕh iou2" for "Hettar?"): it cannot tell how it was
+            # said, so it is not called a misreading.
+            verdict.update(ok=True, uncertain=True)
+        results.append(verdict)
     return results
+
+
+def _foreign(heard):
+    """Whether phonemes heard for a name include another language's tokens (tone marks, unknown symbols)."""
+    import re
+    consonants = set().union(*_CONSONANTS.values()) | {"ɹ", "h", "ʔ", "ç", "ʈ", "ɖ", "ɭ"} | _R_SYMBOLS
+    for phone in heard:
+        if re.search(r"[0-9]", phone):
+            return True
+        for token in _normalize([phone]):
+            if not _is_vowel(token) and token not in consonants:
+                return True
+    return False
 
 
 def saved(report):
