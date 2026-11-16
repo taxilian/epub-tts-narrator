@@ -3295,7 +3295,20 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                 if not final and not future.done():
                     continue
                 del pending_assembly[index]
-                completed(index, future.result(), chapter_acceptance, chapter_label, chapter_started)
+                try:
+                    composed = future.result()
+                except RenderBlocked as exc:
+                    # Assembling one chapter failed (a corrupt saved take, say):
+                    # that chapter fails like a failed render, not the book.
+                    if isinstance(exc, VerificationUnavailable):
+                        raise
+                    chapter_failed(index, plan["chapters"][index], chapter_label, exc)
+                    continue
+                except (OSError, ValueError, RuntimeError) as exc:
+                    chapter_failed(index, plan["chapters"][index], chapter_label,
+                                   RenderBlocked(f"Assembling {chapter_label} failed: {exc}"))
+                    continue
+                completed(index, composed, chapter_acceptance, chapter_label, chapter_started)
 
         def compose(chapter, clips, context, chapter_acceptance):
             composed = prepare_chapter(

@@ -58,6 +58,22 @@ class IncrementalRendererTests(unittest.TestCase):
         self.verifier = FixtureVerifier(self.engine.fixture_transcripts)
         self.messages = []
 
+    def test_a_chapter_whose_assembly_fails_fails_alone(self):
+        import epub_tts_narrator.renderer.workflow as workflow
+        from epub_tts_narrator.renderer.workflow import ChaptersRenderFailed
+        real_prepare = workflow.prepare_chapter
+
+        def prepare(chapter, *args, **kwargs):
+            if chapter["number"] == 1:
+                raise OSError("a saved take could not be read")
+            return real_prepare(chapter, *args, **kwargs)
+        with patch.object(workflow, "prepare_chapter", side_effect=prepare), \
+                self.assertRaises(ChaptersRenderFailed) as raised:
+            self.run_render()
+        self.assertEqual([failure["number"] for failure in raised.exception.failed_chapters], [1])
+        self.assertIn("could not be read", raised.exception.failed_chapters[0]["error"])
+        self.assertTrue(self.checkpoint(2).exists(), "the other chapter still assembled")
+
     def save_revision(self):
         # Export through the normal contract/checksum path, then install the
         # new fixture analysis at the same location as an analyzer revision.
