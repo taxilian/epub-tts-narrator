@@ -1027,6 +1027,12 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                         # that keep the whole history.
                         from .steady_tone import history_mode
                         echo_mode = history_mode(directory, request_hash) or echo_mode
+                    if purpose == "speech" and echo_mode != "none":
+                        # A passage whose takes keep saying nothing is stuck on
+                        # what it hears: its next takes hear no history at all.
+                        from .history_echo import SILENT_LIMIT, silent_attempts
+                        if silent_attempts(directory, request_hash) >= SILENT_LIMIT:
+                            echo_mode = "none"
                     completing, completion_source = completion_source, None
                     with generation_activity(notify), history_recovery(echo_mode):
                         if direction_marker is not None:

@@ -124,6 +124,36 @@ class NoHistoryAfterToneTests(unittest.TestCase):
         self.assertEqual(modes, [None, "reading"])
         self.assertEqual(accepted["attempt"], 2)
 
+    def test_after_two_takes_that_said_nothing_the_next_hears_no_history(self):
+        import struct
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer.continuity import recovery_mode
+        from epub_tts_narrator.renderer.workflow import verified_take
+        import test_renderer_reference_consensus as consensus
+        from test_renderer_stall_recovery import config
+        directory = Path(tempfile.mkdtemp()) / "takes"
+        directory.mkdir()
+        self.addCleanup(__import__("shutil").rmtree, directory.parent)
+        modes = []
+
+        def generate(path, seed):
+            modes.append(recovery_mode())
+            if len(modes) <= 2:  # near silence
+                with wave.open(str(path), "wb") as audio:
+                    audio.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+                    audio.writeframes(struct.pack("<h", 3) * RATE * 2)
+            else:
+                write_speechlike(path)
+            return {"seed": seed}
+        with patch("epub_tts_narrator.renderer.workflow.normalize_clip",
+                   side_effect=lambda raw, wav, **kw: Path(wav).write_bytes(Path(raw).read_bytes())):
+            _, accepted = verified_take("Hello there.", generate, directory, {"fixture": "silent-history"},
+                                        consensus.PrimaryVerifier("Hello there."), config(max_attempts=3),
+                                        purpose="speech",
+                                        notify=lambda _: None)
+        self.assertEqual(modes, [None, None, "none"])
+        self.assertEqual(accepted["attempt"], 3)
+
     def test_after_a_tone_the_echo_ladder_s_full_history_rungs_give_way(self):
         from unittest.mock import patch
         from epub_tts_narrator.renderer.continuity import recovery_mode

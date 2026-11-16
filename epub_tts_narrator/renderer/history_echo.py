@@ -140,6 +140,26 @@ def _attempt_records(directory, request_hash):
     return sorted(records, key=lambda record: record.get("attempt", 0))
 
 
+SILENT_REASONS = frozenset({"audio_too_quiet", "excessive_silence", "silent_audio"})
+SILENT_LIMIT = 2
+
+
+def silent_attempts(directory, request_hash):
+    """How many of a request's takes said (next to) nothing: went silent, or came back near-silent.
+
+    A take the silence watch cut after real speech is not counted: it is
+    finished from where it stopped (``take_completion``).
+    """
+    count = 0
+    for record in _attempt_records(directory, request_hash):
+        report = record.get("report") or {}
+        error = str(report.get("error") or "")
+        if ("did not finish the text: 'silence'" in error
+                or SILENT_REASONS.intersection(report.get("reasons") or [])):
+            count += 1
+    return count
+
+
 def next_mode(records, expected, heard=None):
     """The ladder rung for the next attempt: one past the furthest rung that echoed."""
     heard = heard_turns() if heard is None else heard
