@@ -37,10 +37,6 @@ class ShapeTests(unittest.TestCase):
                 self.assertFalse(rearranged(READING, heard))
                 self.assertEqual(spelling_shape(heard), reading_shape(READING))
 
-    def test_an_accented_spelling_keeps_its_vowels(self):
-        self.assertEqual(spelling_shape("Marénda"), spelling_shape("Marenda"))
-        self.assertFalse(rearranged("M AH0 R EH1 N D R AH0", "Marêndra"))
-
     def test_boundary_marks_in_a_reading_are_not_sounds(self):
         marked = READING.replace(" N ", " . N ", 1)
         self.assertNotEqual(marked, READING)

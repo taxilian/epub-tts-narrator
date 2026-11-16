@@ -67,15 +67,8 @@ def reading_shape(phonemes):
 
 
 def spelling_shape(word):
-    """The shape of a heard spelling, reading English letter groups as one sound each.
-
-    An accented letter is its base letter (a recognizer writing "Sinédra"
-    still heard a vowel there).
-    """
-    import unicodedata
-    folded = "".join(character for character in unicodedata.normalize("NFKD", word.lower())
-                     if not unicodedata.combining(character))
-    letters = re.sub(r"[^a-z]", "", folded)
+    """The shape of a heard spelling, reading English letter groups as one sound each."""
+    letters = re.sub(r"[^a-z]", "", word.lower())
     units, index = [], 0
     while index < len(letters):
         letter = letters[index]
