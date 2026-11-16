@@ -548,6 +548,16 @@ class ChosenReadingPolicyTests(unittest.TestCase):
                               self.entry(4, "plain")]
         self.assertEqual(self.names(before=5, readings={"A", "B"}), ["first", "both"])
 
+    def test_a_turn_saying_one_reading_is_never_traded_for_one_saying_another(self):
+        # Book 4: the latest turn said Ce'Nedra right; Polgara was missing, and the
+        # turn saying only Polgara (with "Sendaria" just before) replaced it.
+        self.state.entries = [self.entry(1, "first"), self.entry(2, "polgara", ["P"], pinnable=False),
+                              self.entry(3, "cenedra", ["C"], pinnable=False)]
+        self.assertEqual(self.names(before=4, readings={"C", "P"}), ["first", "cenedra"])
+        # One saying both still wins.
+        self.state.entries.insert(1, self.entry(2, "both", ["C", "P"], pinnable=False))
+        self.assertEqual(self.names(before=4, readings={"C", "P"}), ["first", "both"])
+
     def test_an_example_by_another_voice_is_never_heard(self):
         self.state.entries = [self.entry(1, "first"), self.entry(2, "other voice", ["A"], voices=("c",)),
                               self.entry(3, "plain")]

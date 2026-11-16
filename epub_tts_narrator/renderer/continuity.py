@@ -200,17 +200,28 @@ class ChapterContinuity:
         eligible = [entry for entry in entries if set(entry["voices"]) <= speakers]
         pinned = next((entry for entry in eligible if entry["pinnable"]), None)
         latest = eligible[-1] if eligible else None
-        missing = set(readings) - set().union(*(entry.get("readings", ()) for entry in (pinned, latest) if entry))
-        if missing:
-            scored = [(len(missing & entry.get("readings", frozenset())), index)
-                      for index, entry in enumerate(eligible) if entry is not pinned]
+        wanted = set(readings)
+        held = set(pinned.get("readings", ())) if pinned else set()
+
+        def coverage(entry):
+            # How many of the line's chosen readings the two turns say right.
+            return len(wanted & (held | set(entry.get("readings", ()) if entry else ())))
+        if wanted - held - set(latest.get("readings", ()) if latest else ()):
+            # A replacement must say more of the line's readings in all, never
+            # trade one for another: swapping a turn that said Ce'Nedra right
+            # for one saying only Polgara (and "Sendaria" just before) made
+            # the line misread Ce'Nedra every time. The most recent such turn
+            # wins a tie.
+            current = coverage(latest)
+            scored = [(coverage(entry), index) for index, entry in enumerate(eligible) if entry is not pinned]
             best = max(scored, default=(0, None))
-            if best[0]:
-                latest = eligible[best[1]]
-            elif self.examples is not None:
+            if best[0] > current:
+                latest, current = eligible[best[1]], best[0]
+            missing = wanted - held - set(latest.get("readings", ()) if latest else ())
+            if missing and self.examples is not None:
                 example = self.examples.example(speakers, missing, sequence=sequence, chapter=chapter,
                                                 voices_by_asset=self.voices_by_asset)
-                if example is not None:
+                if example is not None and coverage(example) > current:
                     latest = example
         if latest is None:
             return []
