@@ -405,22 +405,42 @@ def _resume_books(argv, books):
 
 
 def _stack_dumps_on_signal():
-    """``kill -USR1 PID`` writes every thread's stack to a temporary file (names and lines only)."""
+    """``kill -USR1 PID`` appends every thread's name and stack to a temporary file.
+
+    Only file names, line numbers, function names and thread names are
+    written, never values. ``kill -USR2 PID`` uses ``faulthandler`` instead,
+    for a hang where Python code cannot run (it shows at most 100 threads,
+    without names).
+    """
     import faulthandler
     import os
     import signal
+    import sys
     import tempfile
+    import threading
+    import traceback
     if not hasattr(signal, "SIGUSR1"):
         return None
     path = Path(tempfile.gettempdir()) / f"audiobook-render-{os.getpid()}-thread-stacks.txt"
+
+    def dump(_signal, _frame):
+        names = {thread.ident: thread.name for thread in threading.enumerate()}
+        with open(path, "a", encoding="utf-8") as stream:
+            frames = sys._current_frames()
+            stream.write(f"--- {len(frames)} threads ---\n")
+            for ident, frame in frames.items():
+                stream.write(f"\nThread {names.get(ident, '?')} ({ident}):\n")
+                for entry in traceback.extract_stack(frame):
+                    stream.write(f'  File "{entry.filename}", line {entry.lineno} in {entry.name}\n')
+    signal.signal(signal.SIGUSR1, dump)
     stream = open(path, "a", encoding="utf-8")  # kept open: faulthandler writes to its descriptor
-    faulthandler.register(signal.SIGUSR1, file=stream, all_threads=True)
+    faulthandler.register(signal.SIGUSR2, file=stream, all_threads=True)
     return path
 
 
 def main(argv=None, *, in_shell=False):
     args = parser().parse_args(argv)
-    if args.command == "render" and not in_shell:
+    if args.command in {"render", "serve"} and not in_shell:
         _stack_dumps_on_signal()
     cast_bulk = args.command == "cast" and getattr(args, "action", None) in CAST_SHELL_ACTIONS
     if not in_shell and (args.command in SHELL_COMMANDS or cast_bulk):
