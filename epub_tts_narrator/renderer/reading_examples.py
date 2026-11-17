@@ -79,6 +79,7 @@ class ReadingExamples:
         self.work = Path(work)
         self._candidates = None
         self._series = None
+        self._part_folders = {}
         self._lock = threading.Lock()
 
     @staticmethod
@@ -165,17 +166,23 @@ class ReadingExamples:
         codes are never renamed); never one a person marked bad, never one of
         the line's own chapter in this book, never another voice.
         """
+        kind, entry = self._heard(identity, speakers, readings, chapter=chapter, voices_by_asset=voices_by_asset)
+        return entry if kind == "example" else None
+
+    def _heard(self, identity, speakers, readings, *, chapter, voices_by_asset):
+        """``("example", entry)``, ``("chapter", None)`` for a take of the line's own chapter, or ``("gone", None)``."""
         from .common import digest, read_json
         from .continuity import _chosen_readings, request_speakers
         from .continuity_codes import load_codes
         from .take_feedback import judged_bad_audio
         if not isinstance(identity, dict) or not isinstance(identity.get("request_hash"), str):
-            return None
+            return "gone", None
         request_hash, audio = identity["request_hash"], identity.get("audio_sha256")
         if len(request_hash) != 64 or not all(c in "0123456789abcdef" for c in request_hash):
-            return None
+            return "gone", None
         for distance, work in enumerate(self._works()):
-            folders = [work / "clips" / request_hash, *(work / "clips").glob(f"*/parts/{request_hash}")]
+            direct = work / "clips" / request_hash
+            folders = [direct] if direct.is_dir() else self._parts(work, missing=request_hash).get(request_hash, [])
             for folder in folders:
                 if not folder.is_dir() or folder.is_symlink():
                     continue
@@ -192,25 +199,52 @@ class ReadingExamples:
                             or marker.get("sha256") != identity.get("codes_sha256")
                             or not isinstance(record.get("request"), dict)):
                         continue
+                    if not distance and _chapter(record["request"]) == chapter:
+                        return "chapter", None
                     try:
                         voices = sorted(request_speakers(record["request"]))
-                        if (not set(voices) <= set(speakers) or (not distance and _chapter(record["request"]) == chapter)
+                        if (not set(voices) <= set(speakers)
                                 or not all(asset in voices_by_asset for asset in marker.get("speakers", []))
                                 or audio in judged_bad_audio(folder)):
-                            return None
+                            return "gone", None
                         named = frozenset(_chosen_readings(record["request"]))
                         if not set(readings) & named:
-                            return None
+                            return "gone", None
                         codes = folder / marker["file"]
                         load_codes(codes, marker)
                     except (ValueError, OSError, KeyError, TypeError):
-                        return None
-                    return {"path": str(codes), "marker": dict(marker), "pinnable": False, "voices": voices,
-                            "position": None, "readings": named, "example": True,
-                            "identity": {"codes_sha256": marker["sha256"], "text_sha256": digest(marker["text"]),
-                                         "speakers": list(marker["speakers"]), "request_hash": request_hash,
-                                         "audio_sha256": audio}}
-        return None
+                        return "gone", None
+                    return "example", {
+                        "path": str(codes), "marker": dict(marker), "pinnable": False, "voices": voices,
+                        "position": None, "readings": named, "example": True,
+                        "identity": {"codes_sha256": marker["sha256"], "text_sha256": digest(marker["text"]),
+                                     "speakers": list(marker["speakers"]), "request_hash": request_hash,
+                                     "audio_sha256": audio}}
+        return "gone", None
+
+    PARTS_REFRESH_SECONDS = 60.0
+
+    def _parts(self, work, *, missing=None):
+        """``{request hash: [folder]}`` of a render work's split-passage parts.
+
+        Read once and reread at most every ``PARTS_REFRESH_SECONDS`` when a
+        ``missing`` hash is asked for (a passage split since): globbing them
+        for every line searched every take folder of the book per line.
+        """
+        import time
+        with self._lock:
+            cached = self._part_folders.get(work)
+        if cached is not None and (missing is None or missing in cached[1]
+                                   or time.monotonic() - cached[0] < self.PARTS_REFRESH_SECONDS):
+            return cached[1]
+        found = {}
+        clips = Path(work) / "clips"
+        if clips.is_dir() and not clips.is_symlink():
+            for folder in clips.glob("*/parts/*"):
+                found.setdefault(folder.name, []).append(folder)
+        with self._lock:
+            self._part_folders[work] = (time.monotonic(), found)
+        return found
 
     def _works(self):
         with self._lock:
@@ -218,7 +252,7 @@ class ReadingExamples:
                 self._series = [self.work, *self._earlier_works()]
             return list(self._series)
 
-    def example(self, speakers, readings, *, sequence, chapter, voices_by_asset, wanted=(), prefer=()):
+    def example(self, speakers, readings, *, sequence, chapter, voices_by_asset, wanted=(), prefer=(), avoid=()):
         """A history entry from another chapter saying the most of ``readings`` right, or None.
 
         Among those, one also saying more of ``wanted`` (all the line's chosen
@@ -227,12 +261,27 @@ class ReadingExamples:
         trade away the turn saying the other. Equal ones are ordered by
         request hash, never by listing order. An example the line's passing
         saved takes heard (``prefer``: continuity take identities, most
-        relevant first) is heard again while it is on disk (``kept``).
+        relevant first) is heard again while it is on disk (``kept``), and a line
+        whose saved take passed hearing no example from elsewhere hears none.
+        ``prefer`` holds one history per saved take, the most relevant (the
+        chapter checkpoint's take) first; only that one decides. Takes in
+        ``avoid`` (request hashes a person told this line not to hear) never are.
         """
-        for identity in prefer:
-            kept = self.kept(identity, speakers, readings, chapter=chapter, voices_by_asset=voices_by_asset)
-            if kept is not None:
-                return kept
+        avoid = set(avoid)
+        if prefer:
+            kinds = []
+            for identity in prefer[0]:
+                if isinstance(identity, dict) and identity.get("request_hash") in avoid:
+                    kinds.append("gone")
+                    continue
+                kind, entry = self._heard(identity, speakers, readings, chapter=chapter,
+                                          voices_by_asset=voices_by_asset)
+                if kind == "example":
+                    return entry
+                kinds.append(kind)
+            if all(kind == "chapter" for kind in kinds):
+                # It said the name right without an example (or any history): keep that.
+                return None
         from .common import read_json
         from .continuity_codes import load_codes
         from .common import digest
@@ -244,7 +293,7 @@ class ReadingExamples:
         for item in self.candidates():
             covered = len(readings & item["readings"])
             earlier_book = item.get("book", 0)
-            if (not covered or (not earlier_book and item["chapter"] == chapter)
+            if (not covered or item["request_hash"] in avoid or (not earlier_book and item["chapter"] == chapter)
                     or not set(item["voices"]) <= set(speakers)
                     or not all(asset in voices_by_asset for asset in item["marker"].get("speakers", []))):
                 continue

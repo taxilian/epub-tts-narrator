@@ -725,6 +725,23 @@ class OtherChapterExampleTests(unittest.TestCase):
         self.render(second, 2)
         self.assertGreater(len(self.model.calls), made)
 
+    def test_a_line_that_said_the_name_without_an_example_never_gains_one(self):
+        # Chapters render in any order: a line rendered before any other
+        # chapter had a take of the name passed without an example. A later
+        # chapter's take must not become its example on the next render, or
+        # strict reuse renders it and every later line of its voice again.
+        from epub_tts_narrator.renderer import reading_examples
+        self.config["render"]["history_reuse"] = "strict"
+        self.model = self.engine._model = NameModel()
+        self.verifier = Verifier(self.model)
+        first = self.chapter(["The road ran on.", "Ce’Nedra objected."], "ch1", 1, "b1")
+        self.render(first, 1)
+        self.render(self.chapter(["Garion rode ahead.", "Ce’Nedra laughed."], "ch2", 10, "b2"), 2)
+        reading_examples._INDEXES.clear()
+        made = len(self.model.calls)
+        self.render(first, 1)
+        self.assertEqual(len(self.model.calls), made)
+
 
 class ExampleChoiceTests(unittest.TestCase):
     def test_a_line_with_two_chosen_names_hears_an_example_saying_both(self):

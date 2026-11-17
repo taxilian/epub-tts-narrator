@@ -357,6 +357,10 @@ Chapter failures do not stop the other chapters, as in the line interface. The r
 - **Retry the chapter** (`r`): puts it back at the front of the queue while the others keep rendering. Its clips are dispatched ahead of every waiting clip (still in their own order), several retried chapters run at once, and an engine that renders one chapter at a time renders it next. The retry reuses every verified clip and starts with a fresh retry allowance, as a rerun would; a saved best-effort choice or clip repair continues where it stopped. After the run has ended, `r` renders the book again instead (failed passages get fresh takes, completed work is reused).
 - **Change the passage's direction**: edits how the line is performed (at most 240 characters) and saves it to the book as your choice, exactly as `review-ui` does (backups, later books rebound; a live render's lease does not refuse it). The running render keeps the script it loaded, so the new direction is used when the book renders again: after the run (`F` ends the wait for retries), `R` renders the passage with it and new takes. A paragraph passage joining several lines is edited line by line in `review-ui`. The spoken words cannot be changed here: they are the book's own text (for a word said wrong, use `pronounce`). Splitting a passage into shorter parts is not a manual repair: speech recovery splits on its own after repeated Drama 3 truncation, or after recoverable rejections when the passage has shorter parts to fall back on.
 - **Show the chapter's messages**: the Log filtered to the book and chapter.
+- **When a name keeps coming out wrong** (`renderer/history_review.py`): Drama 3 says a name the way the passage's history says it, so the cause is usually something the passage hears. Three views of the failed passage, each listing takes with where they are (book, chapter), what part they play, how the name check heard the problem word and whether the take is in the book; `Enter` plays the take around the word (an excerpt written to `render-work/name-excerpts/`), `f` the whole take, `g`/`b` mark it good or bad (a bad take in the book is retired and its chapter renders again):
+  - **What it hears**: the takes its attempts heard: the voice's first line in the chapter, its previous line, and any example of the name taken from another chapter or an earlier book. `a` keeps this passage from hearing the highlighted take again (`A`: every listed take); only this passage changes (`render-work/history-avoid.json`), nothing else renders again, and the chapter is retried.
+  - **Other takes of the word**: every take of the voice saying the problem word, this book then earlier books, in book order: a sweep for takes saying it wrong that are teaching it.
+  - **Stream**: the voice's chain of takes in the chapter that led to the passage, each heard by the next. `r` renders the stream again from the highlighted take (by default the first line): it and every later take of the voice in the chapter (in the chain and the chapter's saved checkpoint) are set aside after you confirm the count, then the chapter is retried. `h` changes only this passage's immediate history (its first and latest turns), like `A` in the first view. Set-aside takes carry a `redo` verdict in `take-feedback.json`: never used or heard again and their acceptance retired (renamed, never deleted), but not counted as a verification disagreement in the feedback export.
 - **Put the book back in the queue** (`Enter` on a failed book in Summary, or `r` on it in Errors, in a multi-book render), for example after choosing its missing voices with `cast` or confirming words with `pronounce` in another terminal. The order of the books on the command line is the queue's priority, and a retried book takes its own place in it. A book listed before one that is rendering is admitted at once: the chapters already rendering finish, then its chapters take the next free chapter slots, ahead of the later books' chapters. A book listed after every rendering book waits for room as a queued book does, still ahead of books listed after it. When only failed books are left, the queue waits for retries the same way.
 - **Listen to the takes** (`t`), for a chapter that failed because no take of one passage passed verification, opens the takes dialog for that passage. When no attempt made audio (each stopped with an engine error, such as Drama 3's silence watch), there is no take to hear; the dialog says so and the retries above make new ones.
 
@@ -459,15 +463,16 @@ requests; there is no setting to turn it off.
   takes (one for each history it was rendered under), and which of them a
   render picked once depended on the order the index listed them, so a fresh
   render could pick another and strict reuse rendered every later line of
-  that voice again. Now a line whose saved takes passed keeps hearing the
-  example they heard (first the one heard by the take the chapter's saved
-  checkpoint uses, then those of its other takes, newest first) while that
-  example's sound and history codes are still on disk, even after it was
-  retired or a stricter name check judged it a misreading: the line was made
-  after exactly that audio and already said the name right, which is all an
-  example is for. One you marked bad is never heard again, so the lines that
-  heard it render again. A line that needs a new take hears only examples that
-  say the name right, equally good ones ordered by request hash.
+  that voice again. Now a line whose saved take passed keeps the history that
+  take had (the take the chapter's saved checkpoint uses, else its newest):
+  the example it heard, while that example's sound and history codes are still
+  on disk, even after it was retired or a stricter name check judged it a
+  misreading, since the line was made after exactly that audio and already
+  said the name right; and no example when it passed without one (chapters
+  render in any order, so a later chapter's take appearing must not change
+  it). One you marked bad (or set aside) is never heard again, so the lines
+  that heard it render again. A line that needs a new take hears only
+  examples that say the name right, equally good ones ordered by request hash.
 - **Each voice change is its own request.** The planner groups consecutive
   chunks only for the same performer (since 2026-10-21), because speaker tags
   cannot guarantee an audible switch and transcript verification cannot detect

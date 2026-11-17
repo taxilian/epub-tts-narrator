@@ -158,7 +158,7 @@ def request_speakers(request):
 class ChapterContinuity:
     """Chapter-owned accepted takes for per-request history composition."""
 
-    def __init__(self, engine_identity, voices, *, examples=None):
+    def __init__(self, engine_identity, voices, *, examples=None, avoid=None):
         # Engine compatibility (transport, runtime updates, model aliases) is
         # the speech cache's decision through the request's own engine
         # identity; history identity names only the exact accepted takes.
@@ -173,13 +173,17 @@ class ChapterContinuity:
         # Other chapters' takes saying a chosen reading right
         # (``reading_examples``), for a line with no such take in this chapter.
         self.examples = examples
+        # Takes a person told one passage never to hear again
+        # (``history_review.load_avoid``: chunk ID -> request hashes).
+        self.avoid = avoid or {}
 
     def accepted_audio(self):
         """Audio checksums of the takes this chapter's history already holds."""
         with self._lock:
             return {entry["identity"]["audio_sha256"] for entry in self.entries}
 
-    def takes(self, speakers, *, before=None, readings=frozenset(), sequence=None, chapter=None, prefer=()):
+    def takes(self, speakers, *, before=None, readings=frozenset(), sequence=None, chapter=None, prefer=(),
+              avoid=frozenset()):
         """Fish's first + latest, from this chapter's takes by these voice ids only.
 
         With ``before`` (a source position) only takes from earlier in the
@@ -191,9 +195,10 @@ class ChapterContinuity:
         take in this chapter does, it holds the same voice's take from another
         chapter that does (``examples``; ``sequence`` and ``chapter`` place the
         line in the book; ``prefer``: takes the line's passing saved takes heard).
+        Takes in ``avoid`` (request hashes) are never chosen.
         """
         with self._lock:
-            entries = list(self.entries)
+            entries = [entry for entry in self.entries if entry["identity"].get("request_hash") not in avoid]
         if before is not None:
             entries = sorted((entry for entry in entries
                               if entry.get("position") is not None and entry["position"] < before),
@@ -222,7 +227,7 @@ class ChapterContinuity:
             if missing and self.examples is not None:
                 example = self.examples.example(speakers, missing, sequence=sequence, chapter=chapter,
                                                 voices_by_asset=self.voices_by_asset, wanted=wanted,
-                                                prefer=prefer)
+                                                prefer=prefer, avoid=avoid)
                 if example is not None and coverage(example) > current:
                     latest = example
         if latest is None:
@@ -235,12 +240,14 @@ class ChapterContinuity:
         so an example they heard is heard again while it is on disk (``reading_examples.kept``)."""
         voices = request_speakers(request)
         readings = _chosen_readings(request)
+        chunk = request.get("chunk") if isinstance(request.get("chunk"), dict) else {}
+        avoid = self.avoid.get(chunk.get("chunk_id"), frozenset())
         if readings and self.examples is not None:
             from .reading_examples import _chapter, _sequence
             place = {"sequence": _sequence(request), "chapter": _chapter(request), "prefer": tuple(heard)}
         else:
             place = {}
-        takes = deepcopy(self.takes(voices, before=position, readings=readings, **place))
+        takes = deepcopy(self.takes(voices, before=position, readings=readings, avoid=avoid, **place))
         identity = {"version": VERSION, "policy": POLICY, "takes": [take["identity"] for take in takes]}
         bound = dict(request, continuity=identity)
         segments = _segments(request["chunk"]) if isinstance(request.get("chunk"), dict) else []

@@ -52,7 +52,7 @@ def raise_interrupts():
 def _verdict_cell(verdict):
     """A rejected take's verdict in the Rejected table."""
     return {"good": Text("good", style="green"), "bad": Text("bad", style="red"),
-            "truncated": Text("truncated", style="yellow"), "?": "?"}.get(
+            "truncated": Text("truncated", style="yellow"), "redo": Text("redo", style="magenta"), "?": "?"}.get(
         verdict, Text("not judged", style="bold yellow"))
 
 
@@ -781,7 +781,23 @@ class RunApp(CapturePrintMixin, App):
                             "attempts, continuing any saved best-effort choice or repair (verified clips are reused)"))
         if takes:
             actions.append("takes")
-        elif review is not None:
+        history = self._history_review(review)
+        problem = {}
+        if history is not None:
+            try:
+                problem = history.problem_words()
+            except (ValueError, OSError):
+                problem = {}
+            word = next(iter(problem.values()), None)
+            actions.append(("heard", "Hear what this passage hears as history (its voice's first and latest lines, "
+                            "a name example from another chapter or book), mark one bad, or keep this passage "
+                            "from hearing it"))
+            if word:
+                actions.append(("word", f"Hear every take of this voice saying “{word}” (around the word) and mark "
+                                        "the ones said wrong"))
+            actions.append(("stream", "Hear this voice's stream in the chapter (each take heard by the next) and "
+                            "render it again from a chosen take, or change only this passage's history"))
+        if not takes and review is not None:
             notes.append("No attempt made audio (each one stopped with the error listed), so there is no take to "
                          "hear or use; retry for new takes.")
         passage = None
@@ -815,6 +831,8 @@ class RunApp(CapturePrintMixin, App):
                 self._retry(item, fresh=action == "retry_fresh")
             elif action == "takes":
                 self._takes(item)
+            elif action in ("heard", "word", "stream"):
+                self._open_history(item, history, action, next(iter(problem), None))
             elif action == "edit_direction":
                 self._edit_direction(item, passage)
             elif action == "resume_book":
@@ -826,6 +844,119 @@ class RunApp(CapturePrintMixin, App):
                 self.action_tab("log")
                 self.refresh_view(force=True)
         self.push_screen(FailureScreen(item, repair_hint(item), actions, details=details, summary=summary), chosen)
+
+    @staticmethod
+    def _history_review(review):
+        """The history views of a failed passage (``renderer.history_review``), or None without its takes."""
+        if review is None or not callable(getattr(review, "_records", None)) or getattr(review, "work", None) is None:
+            return None
+        from .renderer.history_review import HistoryReview
+        return HistoryReview(review)
+
+    def _open_history(self, item, history, mode, key):
+        """What a passage blocked on a name heard, the voice's takes of the word, or its stream."""
+        from .run_shell_screens import HistoryTakesScreen
+        if self._player is None:
+            from .renderer.audition import AudioPlayer
+            self._player = AudioPlayer(item["repair"].player_command)
+        scope = item["scope"]
+        name = self.model.chapter_name(scope.get("book"), scope.get("chapter"))
+        word = history.problem_words().get(key) if key else None
+        titles = {
+            "heard": (f"What the failed passage of {name} hears",
+                      "Each take this passage's attempts heard before speaking: Drama 3 says a name the way its "
+                      "history says it. " + (f"The name check's verdict on “{word}” is shown for each. " if word else "")
+                      + "Mark one bad to retire it everywhere (a take in the book renders again), or press a / A so "
+                      "only this passage stops hearing it: nothing else renders again.",
+                      lambda: history.heard(key)),
+            "word": (f"Every take of this voice saying “{word}”",
+                     "This book first, then the series' earlier books, in book order. Enter plays the take around "
+                     "the word, f the whole take. A take said wrong is a bad example for every line near it: mark it "
+                     "bad (a take in the book renders again).",
+                     lambda: history.word_takes(key)),
+            "stream": (f"This voice's stream in {name}",
+                       "The voice's takes in this chapter that led to the failed passage, each heard by the next. "
+                       "r renders the stream again from the highlighted take (it and every later take of the voice "
+                       "in the chapter are set aside: never used or heard again, not counted as bad). h changes only "
+                       "this passage's history: it stops hearing its first and latest lines, and nothing else renders "
+                       "again.",
+                       lambda: history.stream(key)),
+        }
+        title, intro, loader = titles[mode]
+
+        def chosen(outcome):
+            self.model.judgements_changed()
+            self.refresh_view(force=True)
+            if not outcome:
+                return
+            if outcome["action"] == "avoid":
+                self.run_worker(lambda: self._avoid_history(item, history, outcome["rows"]), thread=True,
+                                group="history-avoid")
+            elif outcome["action"] == "immediate":
+                self.run_worker(lambda: self._avoid_history(item, history, history.immediate(key)), thread=True,
+                                group="history-avoid")
+            elif outcome["action"] == "stream":
+                self.run_worker(lambda: self._plan_stream(item, history, outcome["start"], key), thread=True,
+                                group="history-stream")
+        self.push_screen(HistoryTakesScreen(title, intro, history, loader, self._player, mode=mode,
+                                            on_retired=lambda row: self._history_retired(scope, history, row)), chosen)
+
+    def _history_retired(self, scope, history, row):
+        """A take marked bad from the history views was in its book: its chapter renders again."""
+        if row["work"] != history.work:
+            return f"{row['book']} renders it again on its next render."
+        chapter = row.get("chapter")
+        self.bus.log(f"A take in {row['where']} was marked bad and is no longer used", scope=dict(scope),
+                     severity="warning")
+        when = self.model.request_rebuild(scope.get("book"), chapter)
+        return {"now": f"Chapter {chapter} renders it again, first in line.",
+                "after": f"Chapter {chapter} renders it again as soon as it finishes rendering."}.get(
+            when, "The next render renders it again.")
+
+    def _avoid_history(self, item, history, rows):
+        """The failed passage stops hearing ``rows``; then it is retried with fresh takes."""
+        scope = item["scope"]
+        try:
+            added = history.avoid(rows)
+        except (ValueError, OSError) as error:
+            self.call_from_thread(self.notify, f"Could not save the change to its history: {error}", severity="error")
+            return
+        places = ", ".join(sorted({row["where"] for row in rows}))
+        self.bus.log(f"The failed passage of chapter {scope.get('chapter')} no longer hears {added} take(s) "
+                     f"({places}); nothing else changes", scope=dict(scope), severity="warning")
+        self.call_from_thread(self._retry, item, fresh=True)
+
+    def _plan_stream(self, item, history, start, key):
+        """Count what rendering the stream again from ``start`` sets aside, then ask before doing it."""
+        try:
+            rows = history.stream_from(start, key)
+        except (ValueError, OSError) as error:
+            self.call_from_thread(self.notify, f"Could not read the stream: {error}", severity="error")
+            return
+        self.call_from_thread(self._confirm_stream, item, history, start, rows)
+
+    def _confirm_stream(self, item, history, start, rows):
+        from .tui_widgets import ConfirmScreen
+        if not rows:
+            self.notify("No take of this voice from there on is saved; retry the chapter instead.", severity="warning")
+            return
+        message = (f"Render this voice's stream again from {start['where']}, “{start['text'][:60]}”? "
+                   f"{len(rows)} take(s) of the voice in this chapter are set aside: never used or heard again "
+                   "(kept on disk, not counted as bad). The chapter then renders them again with fresh history; "
+                   "other voices' takes are reused.")
+        self.push_screen(ConfirmScreen(message, title="Render the stream again?", danger=True, yes="Render again"),
+                         lambda yes: yes and self.run_worker(lambda: self._set_aside_stream(item, history, rows),
+                                                             thread=True, group="history-stream"))
+
+    def _set_aside_stream(self, item, history, rows):
+        scope = item["scope"]
+        done = history.set_aside(rows)
+        self.bus.log(f"Set aside {len(done)} take(s) of this voice in chapter {scope.get('chapter')} to render its "
+                     "stream again", scope=dict(scope), severity="warning")
+        if len(done) < len(rows):
+            self.call_from_thread(self.notify, f"{len(rows) - len(done)} take(s) could not be set aside.",
+                                  severity="warning")
+        self.call_from_thread(self._retry, item, fresh=True)
 
     def _edit_direction(self, item, passage):
         from .renderer.passage_edit import check_direction

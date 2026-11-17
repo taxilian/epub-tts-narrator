@@ -2291,7 +2291,8 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
         speech_cache = SpeechCache(work, voices)
     from .continuity import ChapterContinuity, is_pinnable
     from .reading_examples import for_work
-    continuity = ChapterContinuity(context["engine"], voices, examples=for_work(work))
+    from .history_review import load_avoid
+    continuity = ChapterContinuity(context["engine"], voices, examples=for_work(work), avoid=load_avoid(work))
     tolerant = history_reuse_tolerant(config)
 
     def matches_request(request, accepted, chunk):
@@ -2983,7 +2984,8 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
     from .continuity import ChapterContinuity, require_support
     from .reading_examples import for_work
     require_support(engine)
-    continuity = ChapterContinuity(engine_identity, voices, examples=for_work(work))
+    from .history_review import load_avoid
+    continuity = ChapterContinuity(engine_identity, voices, examples=for_work(work), avoid=load_avoid(work))
     saved_takes = _saved_chapter_takes(work, chapter)
     if retry_budget is None:
         # The chapter service passes a submission-bound budget; this permissive

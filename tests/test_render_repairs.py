@@ -114,7 +114,7 @@ class FailedTakeRepairTests(unittest.TestCase):
         review.mark(2, None)
         self.assertEqual([row["verdict"] for row in review.takes()], ["good", None])
         self.assertEqual(review.mark(1, "good", learn=True)["learned"], [("kvothe", "quote")])
-        with self.assertRaisesRegex(ValueError, "good, bad, truncated or none"):
+        with self.assertRaisesRegex(ValueError, "good, bad, truncated, redo or none"):
             review.mark(1, "maybe")
 
     def test_every_take_shows_including_the_one_verification_accepted(self):
@@ -868,3 +868,57 @@ class RepairScreenTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HistoryTakesScreenTests(unittest.IsolatedAsyncioTestCase):
+    """The history views of a passage blocked on a name: rows load, play around the word, and choose a way out."""
+
+    async def asyncSetUp(self):
+        asyncio.get_running_loop().slow_callback_duration = 10
+
+    @staticmethod
+    def rows():
+        def row(where, relation, ok, text):
+            return {"work": Path("/work"), "request_hash": "a" * 64, "attempt": 1, "where": where,
+                    "relation": relation, "word": {"text": "Riva", "heard": "ɹ eɪ v ə" if not ok else "ɹ iː v ə",
+                                                   "ok": ok, "uncertain": False},
+                    "in_use": True, "text": text, "audio_path": f"/clips/{where}.wav", "span": (1.0, 1.3)}
+        return [row("chapter 26", "reading example from another chapter", False, "the gray city of Riva"),
+                row("chapter 29", "latest turn (the voice's previous line)", True, "It was spring.")]
+
+    async def run_screen(self, mode, keys):
+        from textual.app import App
+        from epub_tts_narrator.run_shell_screens import HistoryTakesScreen
+
+        class History:
+            def excerpt(self, row):
+                return row["audio_path"] + "-excerpt"
+        player, outcome = FakePlayer(), []
+        screen = HistoryTakesScreen("What it hears", "intro", History(), self.rows, player, mode=mode)
+
+        class Host(App):
+            def on_mount(self):
+                self.push_screen(screen, outcome.append)
+        async with Host().run_test(size=(200, 40)) as pilot:
+            for _ in range(50):
+                await pilot.pause(0.05)
+                if screen.rows:
+                    break
+            self.assertIn("MISREAD", str(screen.query_one("#history-table").get_row_at(0)))
+            await pilot.press(*keys)
+            await pilot.pause(0.2)
+        return player, outcome
+
+    async def test_enter_plays_around_the_name_and_a_avoids_the_take(self):
+        player, outcome = await self.run_screen("heard", ["enter", "a"])
+        self.assertEqual(player.started, ["/clips/chapter 26.wav-excerpt"])
+        self.assertEqual(outcome[0]["action"], "avoid")
+        self.assertEqual([row["where"] for row in outcome[0]["rows"]], ["chapter 26"])
+
+    async def test_the_stream_renders_again_from_the_highlighted_take(self):
+        player, outcome = await self.run_screen("stream", ["down", "r"])
+        self.assertEqual(outcome[0]["action"], "stream")
+        self.assertEqual(outcome[0]["start"]["where"], "chapter 29")
+        # h changes only the failed passage's immediate history.
+        player, outcome = await self.run_screen("stream", ["h"])
+        self.assertEqual(outcome, [{"action": "immediate"}])

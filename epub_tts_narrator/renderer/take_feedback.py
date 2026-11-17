@@ -33,8 +33,13 @@ FORMAT = "audiobook-take-feedback"
 # "truncated": what the take says is right, but it stops before the passage
 # ends. It is never used as it is; its passage is finished from it
 # (take_completion), keeping what it said and generating only the rest.
-VERDICTS = ("good", "bad", "truncated")
-UNUSABLE = ("bad", "truncated")
+# "redo": set aside by a person to render again with fresh history (a whole
+# stream, ``history_review``), not because verification was wrong about it;
+# never used or heard again, never counted as a disagreement.
+VERDICTS = ("good", "bad", "truncated", "redo")
+UNUSABLE = ("bad", "truncated", "redo")
+# The verdicts that say verification passed a take it should not have.
+WRONGLY_PASSED = ("bad", "truncated")
 _LOCK = threading.Lock()
 
 
@@ -83,7 +88,7 @@ def record_verdict(work, request_hash, row, verdict):
     """Save (or with ``None`` clear) a person's verdict on one take listed by ``take_selection``."""
     from .common import write_json
     if verdict is not None and verdict not in VERDICTS:
-        raise ValueError("A take verdict is good, bad, truncated or none")
+        raise ValueError("A take verdict is good, bad, truncated, redo or none")
     take_record = row.get("record") or {}
     report = take_record.get("report") or {}
     with _locked(work):
@@ -135,7 +140,7 @@ def clip_folder(work, request_hash):
 
 
 def judged_bad_audio(clip_directory):
-    """Audio hashes of every take a person marked bad or truncated in this take folder's render work.
+    """Audio hashes of every take a person marked bad, truncated or set aside (redo) in this take folder's render work.
 
     Neither is ever used as it is. A folder outside a render work's
     ``clips`` has no person verdicts.
@@ -162,7 +167,7 @@ def judged_truncated(clip_directory, request_hash):
 def disagreement(entry):
     if entry["verdict"] == "good" and not entry["passed"]:
         return "false_rejection"
-    if entry["verdict"] in UNUSABLE and entry["passed"]:
+    if entry["verdict"] in WRONGLY_PASSED and entry["passed"]:
         return "false_acceptance"
     return None
 
