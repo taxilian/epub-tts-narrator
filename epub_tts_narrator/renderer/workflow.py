@@ -2633,6 +2633,16 @@ def _recheck_saved_whole_take(text, directory, request, verifier, config, *, not
     return None
 
 
+def _person_chose_take(directory):
+    """Whether a person chose one of this request's own whole takes (``take_selection``)."""
+    path = Path(directory) / "accepted.json"
+    try:
+        record = read_json(path) if path.is_file() and not path.is_symlink() else None
+    except (ValueError, OSError):
+        return False
+    return isinstance(record, dict) and "manual_selection" in (record.get("engine_metadata") or {})
+
+
 def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifier,
                   config, work, take_locks, take_locks_guard, *, notify, retry_budget=None,
                   speech_cache=None, paragraph_split_available=False, continuity=None, saved_takes=None):
@@ -2736,8 +2746,11 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                             generate_tail=generate_tail or tail_generator(text, synthesize_part),
                             generate_spelled=generate_spelled)
 
-                if synthesize_part is not None and recovery_available(
-                        directory, request, text, verifier, config, voices_by_asset=voices_by_asset):
+                if (synthesize_part is not None and not _person_chose_take(directory)
+                        and recovery_available(directory, request, text, verifier, config,
+                                               voices_by_asset=voices_by_asset)):
+                    # A whole take a person chose is used as chosen (verified_take
+                    # below), never passed over to resume a failed split.
                     result = None
                     if getattr(verifier, "speech_resolver", None) is not None:
                         result = _recheck_saved_whole_take(

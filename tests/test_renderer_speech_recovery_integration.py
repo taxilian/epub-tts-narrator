@@ -218,6 +218,31 @@ class SpeechRecoveryIntegrationTests(unittest.TestCase):
         for path, contents in saved.items():
             self.assertEqual(path.read_bytes(), contents)
 
+    def test_a_whole_take_a_person_chose_after_recovery_failed_is_used_instead_of_resuming_it(self):
+        from epub_tts_narrator.renderer.speech_cache import SpeechCache
+        from epub_tts_narrator.renderer.take_selection import select_take
+        # One cache for the whole run, loaded before the person chose: as in a
+        # render that keeps going while a person listens in the run shell.
+        cache = SpeechCache(self.work, self.voices)
+
+        def render():
+            return _render_chunk(self.chunk, 1, 1, self.voices, self.engine, self.engine.identity,
+                                 self.verifier, self.config, self.work, {}, Lock(),
+                                 notify=self.messages.append, retry_budget=SpeechRetryBudget(),
+                                 speech_cache=cache)
+        self.engine.fail_part = LAST
+        with self.assertRaises(SpeechVerificationFailed):
+            render()
+        [marker] = self.markers()
+        # Listening, a person judges the first whole take good and uses it.
+        chosen = select_take(self.work / "clips", marker.parent.name, 1, note="Chosen while listening")
+        calls = len(self.engine.calls)
+        result, acceptance = render()
+        # Used as chosen: no new take, and the split recovery is not resumed.
+        self.assertEqual(len(self.engine.calls), calls)
+        self.assertEqual(Path(result["wav_path"]).parent, marker.parent)
+        self.assertEqual(acceptance["audio_sha256"], chosen["accepted_audio_sha256"])
+
     def test_complete_join_must_also_pass_verification_before_cache_acceptance(self):
         self.verifier.fail_assembly = True
         with self.assertRaises(SpeechVerificationFailed):
