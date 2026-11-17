@@ -811,3 +811,20 @@ class RetiredExampleTests(OtherChapterExampleTests):
         example["accepted"].rename(example["accepted"].with_name("accepted.judged-bad-fixture.json"))
         self.render(self.chapter(["Garion rode ahead.", "Ce’Nedra laughed."], "ch2", 10, "b2"), 2)
         self.assertEqual(histories(self.model)[3], [tagged("Garion rode ahead.")])
+
+
+class PartIndexTests(unittest.TestCase):
+    def test_parts_are_read_once_and_a_part_the_render_makes_is_registered(self):
+        from unittest import mock
+        from epub_tts_narrator.renderer import reading_examples
+        with tempfile.TemporaryDirectory() as root:
+            work = Path(root) / "render-work"
+            old = work / "clips" / ("a" * 64) / "parts" / ("b" * 64)
+            old.mkdir(parents=True)
+            index = reading_examples.ReadingExamples(work)
+            with mock.patch.dict(reading_examples._INDEXES, {"fixture": index}):
+                self.assertEqual(index._parts(work)["b" * 64], [old])
+                new = work / "clips" / ("c" * 64) / "parts" / ("d" * 64)
+                with mock.patch.object(Path, "glob", side_effect=AssertionError("rescanned")):
+                    reading_examples.note_part(new)
+                    self.assertEqual(index._parts(work)["d" * 64], [new])

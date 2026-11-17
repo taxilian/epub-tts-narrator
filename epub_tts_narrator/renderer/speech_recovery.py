@@ -280,6 +280,8 @@ def recover_speech(text, synthesize_part, parent_directory, parent_request, veri
                 if not _legacy_accepted_part(legacy_directory, child_request):
                     child_request["synthesis_request"] = single_speech_recovery_part(parent_request, part)
             child_directory = _directory(directory / "parts" / digest(child_request))
+            from .reading_examples import note_part
+            note_part(child_directory)  # example lookups never rescan the book's take folders
             def generate_part(output, child_seed, piece=part["text"], span=(part["start"], part["end"])):
                 if scoped:
                     # A part of a line with scoped controls carries its own slice of them.

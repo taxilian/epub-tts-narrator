@@ -232,7 +232,7 @@ class HistoryReview:
         index = for_work(self.work)
         for work in self.works():
             clips = Path(work) / "clips"
-            for folder in [clips / request_hash, *index._parts(Path(work), missing=request_hash).get(request_hash, ())]:
+            for folder in [clips / request_hash, *index._parts(Path(work)).get(request_hash, ())]:
                 if not folder.is_dir() or folder.is_symlink():
                     continue
                 for path in [folder / "accepted.json", *sorted(folder.glob("*.json"))]:

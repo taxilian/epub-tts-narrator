@@ -57,6 +57,18 @@ def for_work(work):
         return _INDEXES[key]
 
 
+def note_part(folder):
+    """Register a split-passage part folder (``clips/HASH/parts/PART``) the render is making with every index that read its book."""
+    folder = Path(folder)
+    if folder.parent.name != "parts" or folder.parent.parent.parent.name != "clips":
+        return
+    work = folder.parent.parent.parent.parent
+    with _LOCK:
+        indexes = list(_INDEXES.values())
+    for index in indexes:
+        index._note_part(work, folder)
+
+
 def _sequence(request):
     from .continuity import _segments
     chunk = request.get("chunk")
@@ -182,7 +194,7 @@ class ReadingExamples:
             return "gone", None
         for distance, work in enumerate(self._works()):
             direct = work / "clips" / request_hash
-            folders = [direct] if direct.is_dir() else self._parts(work, missing=request_hash).get(request_hash, [])
+            folders = [direct] if direct.is_dir() else self._parts(work).get(request_hash, [])
             for folder in folders:
                 if not folder.is_dir() or folder.is_symlink():
                     continue
@@ -222,29 +234,31 @@ class ReadingExamples:
                                      "audio_sha256": audio}}
         return "gone", None
 
-    PARTS_REFRESH_SECONDS = 60.0
-
-    def _parts(self, work, *, missing=None):
+    def _parts(self, work):
         """``{request hash: [folder]}`` of a render work's split-passage parts.
 
-        Read once and reread at most every ``PARTS_REFRESH_SECONDS`` when a
-        ``missing`` hash is asked for (a passage split since): globbing them
+        Read from disk once per process: only the render makes take folders,
+        and it registers every part it makes (``note_part``). Globbing them
         for every line searched every take folder of the book per line.
         """
-        import time
+        key = Path(work).resolve()
         with self._lock:
-            cached = self._part_folders.get(work)
-        if cached is not None and (missing is None or missing in cached[1]
-                                   or time.monotonic() - cached[0] < self.PARTS_REFRESH_SECONDS):
-            return cached[1]
-        found = {}
-        clips = Path(work) / "clips"
-        if clips.is_dir() and not clips.is_symlink():
-            for folder in clips.glob("*/parts/*"):
-                found.setdefault(folder.name, []).append(folder)
-        with self._lock:
-            self._part_folders[work] = (time.monotonic(), found)
+            found = self._part_folders.get(key)
+        if found is None:
+            found = {}
+            clips = Path(work) / "clips"
+            if clips.is_dir() and not clips.is_symlink():
+                for folder in clips.glob("*/parts/*"):
+                    found.setdefault(folder.name, []).append(folder)
+            with self._lock:
+                found = self._part_folders.setdefault(key, found)
         return found
+
+    def _note_part(self, work, folder):
+        with self._lock:
+            found = self._part_folders.get(Path(work).resolve())
+            if found is not None and folder not in found.get(folder.name, []):
+                found.setdefault(folder.name, []).append(folder)
 
     def _works(self):
         with self._lock:
