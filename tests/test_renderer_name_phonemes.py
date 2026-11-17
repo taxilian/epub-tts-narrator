@@ -139,6 +139,34 @@ class VerdictTests(unittest.TestCase):
         self.assertFalse(found["ok"])
         self.assertEqual(found["heard"], "v ɹ eɪ v ə")
 
+    def test_a_name_before_its_late_word_timing_is_still_heard(self):
+        # Belgarath said 12.21-12.82 s, timed 12.64-13.12: the name sits in
+        # the gap before its timing, where no other word was timed.
+        text = "As usual. Belgarath, dressed in his robe."
+        words = [{"word": "usual.", "start": 9.32, "end": 9.7}, {"word": "Belgarath,", "start": 12.64, "end": 13.12},
+                 {"word": "dressed", "start": 13.12, "end": 13.6}]
+        report = {"passed": True, "expected_text": text, "words": words}
+        heard = {(12.64, 13.12): [("ɹ", 12.535), ("ɛ", 12.6), ("θ", 12.816)],
+                 (9.32, 13.6): [("j", 9.361), ("uː", 9.401), ("ʒ", 9.521), ("əl", 9.642), ("b", 12.213),
+                                ("ɛ", 12.274), ("l", 12.354), ("ɡ", 12.434), ("ɚ", 12.474), ("ɹ", 12.535),
+                                ("æ", 12.595), ("θ", 12.816), ("d", 13.399), ("ɹ", 13.439), ("ɛ", 13.499)]}
+        with self.listened(heard):
+            [found] = verdicts("take.wav", report, performance(text, "Belgarath", "B EH1 L G AH0 R AE2 TH"))
+        self.assertTrue(found["ok"])
+
+    def test_another_words_sounds_never_pass_for_the_name(self):
+        # "the army TOH Urgas": T AA AO R matched "ar-" of "army" (ɑː ɹ).
+        text = "The bulk of the army Taur Urgas had brought."
+        words = [{"word": "army", "start": 15.44, "end": 15.76}, {"word": "Taur", "start": 15.76, "end": 16.22},
+                 {"word": "Urgas", "start": 16.22, "end": 16.68}]
+        report = {"passed": True, "expected_text": text, "words": words}
+        heard = {(15.76, 16.22): [("m", 15.685), ("i", 15.725), ("t", 15.888), ("oʊ", 15.989)],
+                 (15.44, 16.68): [("ð", 15.34), ("ɪ", 15.381), ("ɑːɹ", 15.502), ("m", 15.685), ("i", 15.725),
+                                  ("t", 15.888), ("oʊ", 15.989), ("ɜː", 16.374), ("ɡ", 16.536), ("ʌ", 16.618)]}
+        with self.listened(heard):
+            [found] = verdicts("take.wav", report, performance(text, "Taur", "T AA1 AO0 R"))
+        self.assertFalse(found["ok"])
+
     def test_a_name_heard_in_another_languages_sounds_is_uncertain_not_misread(self):
         words = [{"word": "Marendra?", "start": 0.0, "end": 0.4}]
         report = dict(self.report(words), expected_text="Marendra?")

@@ -18,8 +18,9 @@ misreading on its own, as is a consonant missing from the middle of the name.
 Sounds around the name (the neighbouring words in the clip) cost nothing.
 When the name's own timed words do not hold it, the window widens by a word
 on each side (word timings can clip a name), but a match there counts only
-when most of the sounds it matched were heard while the name was said
-(``on_the_name``): the neighbours never stand in for the name.
+when most of the sounds it matched were heard while the name was said or
+where no other word was timed (``on_the_name``): the neighbours never stand
+in for the name, and a late word timing does not hide it.
 
 Regular variation in English speech is not a misreading: front vowels merge
 before an R ("Mary", "marry", "merry"), as do the back vowels ("lore",
@@ -69,7 +70,7 @@ VERSION = 6
 # twice is one sound. 4: ER without its R, a nasal or breath beside a vowel,
 # another language's sounds are uncertain. Strictness 3: a secondary-stressed
 # vowel may not cross to the other side of the mouth. Strictness 4: the wider
-# window counts only a match heard mostly while the name was said.)
+# window counts only a match heard mostly on the name, not on other words.)
 STRICTNESS = 4
 MODEL_DIRECTORY = None  # set by configure()
 MISREAD_COST = 1.0
@@ -183,15 +184,18 @@ def _normalize_sources(phones):
             if index == 0 or item[0] != out[index - 1][0] or _is_vowel(item[0])]
 
 
-def on_the_name(reading, timed, start, end):
-    """Whether the cheapest alignment of ``reading`` in ``timed`` phones was heard mostly between ``start`` and ``end``.
+def on_the_name(reading, timed, start, end, others=()):
+    """Whether the cheapest alignment of ``reading`` in ``timed`` phones was the name's own sounds.
 
     A wider window around the name holds the neighbouring words too, and the
     alignment is free to find the reading anywhere in it: "city of RAY-vuh"
-    matched R IY V AH in "-ty of" (ɾ i ʌ v), half of it before the name.
-    More than half of the sounds it matched must have been heard while the
-    name was said (its word timings, padded as when it is heard alone), or
-    it heard something else.
+    matched R IY V AH in "-ty of" (ɾ i ʌ v), and "army TOH" matched T AA AO R
+    in "ar-". A matched sound is the name's when it was heard while the name
+    was said (between ``start`` and ``end``, padded as when it is heard alone)
+    or where no other word was timed (``others``: their ``(start, end)``):
+    word timings can run late, leaving the name in the gap before them
+    ("Belgarath" heard 0.4 s before its timing). More than half of the sounds
+    it matched must be the name's.
     """
     if not timed:
         return False
@@ -200,7 +204,11 @@ def on_the_name(reading, timed, start, end):
     sources = [source for _, source in _normalize_sources(phones)][first:last]
     if not sources:
         return False
-    inside = sum(1 for source in sources if start - PAD_SECONDS <= timed[source][1] <= end + PAD_SECONDS)
+
+    def the_names(when):
+        return (start - PAD_SECONDS <= when <= end + PAD_SECONDS
+                or not any(low <= when <= high for low, high in others))
+    inside = sum(1 for source in sources if the_names(timed[source][1]))
     return inside * 2 > len(sources)
 
 
@@ -392,6 +400,13 @@ def _spans(report, expected_text, control):
     return []
 
 
+def _other_words(report, start, end):
+    """``(start, end)`` of every timed word outside the name's own span."""
+    return [(float(word["start"]), float(word["end"])) for word in report.get("words") or []
+            if isinstance(word, dict) and isinstance(word.get("start"), (int, float))
+            and isinstance(word.get("end"), (int, float)) and (word["end"] <= start or word["start"] >= end)]
+
+
 def verdicts(path, report, performance):
     """``[{"text", "key", "heard", "cost", "ok"}]`` for every chosen reading in a take."""
     from .name_shape import _readings, reading_key
@@ -410,7 +425,8 @@ def verdicts(path, report, performance):
                 timed = phones(path, *span, timed=True)
                 heard = [phone for phone, _ in timed]
                 spent = min([cost(form, heard) for form in (reading, phonemes)
-                             if on_the_name(form, timed, *spans[0])] or [float("inf")])
+                             if on_the_name(form, timed, *spans[0], others=_other_words(report, *spans[0]))]
+                            or [float("inf")])
             if best is None or spent < best[0]:
                 best = (spent, heard)
             if spent < MISREAD_COST:
