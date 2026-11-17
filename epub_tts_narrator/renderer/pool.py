@@ -630,9 +630,12 @@ class RenderPool:
         cannot be started, the render stops (``RenderServiceUnavailable``)
         instead of failing every later take the same way.
         """
+        from .render_pause import PAUSE
         epoch = self._server_epoch
         try:
-            return getattr(engine, method)(*args, **kwargs)
+            # A paused render starts no request, and one whose connection the
+            # pause lost is sent again on resume (``render_pause``).
+            return PAUSE.call(getattr(engine, method), *args, **kwargs)
         except EngineError as error:
             if not (self._auto_serve is not None and worker.settings.get("auto_serve")
                     and getattr(error, "transport_error", False) and getattr(error, "status", None) is None):
@@ -791,6 +794,8 @@ class RenderPool:
             return run()
 
         report_worker_activity(notify, "waiting")
+        from .render_pause import PAUSE
+        PAUSE.wait()  # a paused take waits here, holding no lane thread or worker slot
         try:
             return self._resources.tts.run(run_on_lane, reserve=reserve)
         except BaseException as error:

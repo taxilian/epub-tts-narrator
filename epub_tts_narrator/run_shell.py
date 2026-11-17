@@ -188,6 +188,9 @@ class RunApp(CapturePrintMixin, App):
                 tooltip="Stop waiting for retries; the run reports what still failed (asks first)"),
         Binding("R", "resume", "Resume", tooltip="Run again (only the failed books when one is highlighted); "
                                                  "completed work is reused"),
+        Binding("p", "pause", "Pause", tooltip="Pause or resume: no new speech or model request starts while "
+                                               "paused, and one that loses its connection is sent again on "
+                                               "resume (for moving the laptop)"),
         Binding("ctrl+c", "interrupt", "Stop", priority=True, show=False,
                 tooltip="Stop at safe boundaries, after confirming (again: stop immediately)"),
     ]
@@ -1054,6 +1057,19 @@ class RunApp(CapturePrintMixin, App):
             "Stop waiting for retries? The run then reports the chapters that still failed (no audiobook "
             "is assembled for those books); R resumes them later.", title="Finish the run?", danger=True,
             yes="Finish"), lambda yes: yes and self.model.release_holds())
+
+    def action_pause(self):
+        """Pause or resume the render's speech and model requests (``renderer.render_pause``)."""
+        from .renderer.render_pause import PAUSE
+        paused = PAUSE.toggle()
+        self.model.set_paused(paused)
+        if paused:
+            self.bus.log("Paused: no new speech or model request starts; requests already running finish, and "
+                         "one that loses its connection is sent again on resume. p resumes.", severity="warning")
+            self.notify("Paused — p resumes", severity="warning")
+        else:
+            self.bus.log("Resumed.")
+            self.notify("Resumed")
 
     # Stopping (always confirmed) --------------------------------------------------
 

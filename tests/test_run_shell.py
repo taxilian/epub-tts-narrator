@@ -576,6 +576,31 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Completed audiobook: /books/fixture/audiobook",
                       [event.text for _, event in self.model.logs])
 
+    async def test_p_pauses_new_requests_until_pressed_again(self):
+        from unittest import mock
+        from epub_tts_narrator.renderer import render_pause
+        gate = render_pause.PauseGate()
+        sent, go = [], threading.Event()
+
+        def command():
+            go.wait(5)
+            gate.call(sent.append, "request")  # what a take or review request does
+            return 0
+
+        app = self.make_app(command)
+        with mock.patch.object(render_pause, "PAUSE", gate):
+            async with app.run_test(size=(150, 40)) as pilot:
+                await pilot.press("p")
+                self.assertTrue(gate.paused())
+                self.assertIn("Paused", self.model.health()[1])
+                go.set()
+                await pilot.pause(0.3)
+                self.assertEqual(sent, [])
+                await pilot.press("p")
+                await self.wait_for(pilot, lambda: not self.model.running)
+        self.assertEqual(sent, ["request"])
+        self.assertFalse(self.model.paused)
+
     async def test_ctrl_c_interrupts_the_command_and_the_screen_reports_it(self):
         started = threading.Event()
 

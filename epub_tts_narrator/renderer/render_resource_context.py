@@ -94,7 +94,10 @@ def run_recognition(function, *args, **kwargs):
 
 def run_review_leaf(function, *args, **kwargs):
     """Run one actual network review request on the shared review lane."""
+    from .render_pause import PAUSE
     resources = _resources.get()
     if resources is None or _suppressed.get():
-        return function(*args, **kwargs)
-    return resources.run_review_leaf(function, *args, owner=_owner.get(), **kwargs)
+        return PAUSE.call(function, *args, **kwargs)
+    # Waits before taking a lane thread while paused; a request whose
+    # connection the pause lost is sent again on resume (``render_pause``).
+    return PAUSE.call(resources.run_review_leaf, function, *args, owner=_owner.get(), **kwargs)

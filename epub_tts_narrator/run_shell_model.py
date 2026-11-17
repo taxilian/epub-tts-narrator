@@ -166,6 +166,7 @@ class RunModel:
         self.filter = RunFilter()
         self.seen = {"book": set(), "chapter": set(), "worker": set(), "voice": set()}
         self.stopping = False
+        self.paused = False       # a person paused the render's network work (``renderer.render_pause``)
         self.progress = None      # analysis stage and model-stream status (PROGRESS events)
         self.holds = {}           # book (or None) -> release callable while a render waits for retries
         self.book_states = {}     # book -> {"state", "ready", "total", "key"}
@@ -846,6 +847,14 @@ class RunModel:
                 counts["other"] += 1
         return counts
 
+    def set_paused(self, paused):
+        """Record a pause or resume; the time paused never counts as a stall."""
+        with self._lock:
+            self.paused = bool(paused)
+            if not paused:
+                self.last_progress = self._clock()
+        self.changed.set()
+
     def health(self, now=None):
         """``(level, text)``: ok, busy, warning or error, for the at-a-glance view."""
         now = self._clock() if now is None else now
@@ -862,6 +871,8 @@ class RunModel:
                 return "error", f"Ended with {failures or 'an'} error{'s' if failures != 1 else ''} — R resumes"
             if self.stopping:
                 return "warning", "Stopping at safe boundaries"
+            if self.paused:
+                return "warning", "Paused — no new requests start; running ones finish (p resumes)"
             if self.holds:
                 return "error", f"Waiting for retries: {failures} failure(s)"
             if self.rows and now - self.last_progress > STALL_SECONDS:
