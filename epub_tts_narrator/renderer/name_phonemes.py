@@ -58,13 +58,14 @@ import threading
 
 # Verdicts' identity: saved verdicts and the verdict store are read only
 # under this version, so any change to how a name is heard bumps it.
-VERSION = 4
+VERSION = 5
 # Bumped only when the check may fail a take it passed before: it names the
 # check in validation keys and in the sweep of takes in use, so a change that
 # only accepts more never re-verifies or re-sweeps a book. (3: an R written
 # twice is one sound. 4: ER without its R, a nasal or breath beside a vowel,
-# another language's sounds are uncertain.)
-STRICTNESS = 2
+# another language's sounds are uncertain. Strictness 3: a secondary-stressed
+# vowel may not cross to the other side of the mouth.)
+STRICTNESS = 3
 MODEL_DIRECTORY = None  # set by configure()
 MISREAD_COST = 1.0
 PAD_SECONDS = 0.12
@@ -134,6 +135,17 @@ def _targets(reading):
     return out
 
 
+_FRONT_KINDS = frozenset({"IY", "IH", "EY", "EH", "AE"})
+_BACK_KINDS = frozenset({"UW", "UH", "OW", "AO", "AA", "OY", "AW"})
+_HEARD_FRONT = frozenset({"i", "iː", "ɪ", "e", "eː", "eɪ", "ɛ", "ɛː", "æ", "y", "yː", "ʏ"})
+_HEARD_BACK = frozenset({"u", "uː", "ʊ", "ʉ", "o", "oː", "oʊ", "əʊ", "ɔ", "ɔː", "ɒ", "ʌ", "ɚ", "ɜ", "ɜː"})
+
+
+def _crosses(kind, phone):
+    """Whether a heard vowel is on the other side of the mouth from a reading's vowel kind."""
+    return ((kind in _FRONT_KINDS and phone in _HEARD_BACK) or (kind in _BACK_KINDS and phone in _HEARD_FRONT))
+
+
 def _is_vowel(phone):
     return phone in _IPA_VOWELS or any(phone.startswith(vowel) for vowel in ("ə", "ɚ", "ɜ"))
 
@@ -177,6 +189,9 @@ def _align(reading, phones):
     targets = _targets(reading)
     if not targets:
         return 0.0, 0, 0
+    from ..performance_plan import phoneme_symbols
+    secondary = [symbol.endswith("2") for symbol in phoneme_symbols(reading)
+                 if symbol.rstrip("012") in _KINDS or symbol.rstrip("012") in _CONSONANTS]
     phones = _normalize(phones)
     count = len(targets)
 
@@ -197,6 +212,10 @@ def _align(reading, phones):
             return 0.3 if phone in _VOICING.get(symbol, ()) else 1.0
         if not _is_vowel(phone):
             return 1.0
+        if secondary[index] and phone not in _KINDS[symbol] and _crosses(symbol, phone):
+            # A secondary stress keeps its side of the mouth: "seh-" may reduce
+            # to "sih-"/"suh-" (ə) but not become "soo-" or "sur-".
+            return 1.0
         if not stressed or phone in _KINDS[symbol]:
             return 0.0
         if syllable_final_l(index + 1) and phone in _BEFORE_DARK_L:
@@ -208,7 +227,9 @@ def _align(reading, phones):
     def drop(index):  # a reading sound not heard
         sort, symbol, stressed = targets[index]
         if sort == "vowel":
-            return 1.0 if stressed else 0.4
+            # A secondary stress is a syllable a listener hears: dropping it
+            # and hearing another vowel instead is not cheaper than swapping.
+            return 1.0 if stressed else 0.7 if secondary[index] else 0.4
         if syllable_final_l(index):
             return 0.3
         if symbol in ("R", "L") and "consonant" in (kind(index - 1), kind(index + 1)):

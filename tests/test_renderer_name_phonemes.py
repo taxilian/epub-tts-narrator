@@ -58,6 +58,16 @@ class ReadingCostTests(unittest.TestCase):
         self.assertFalse(said_right(READING, "m ə ɹ ɛ k n d ɹ ə"))  # any other extra consonant still is
         self.assertTrue(said_right("TH AH1 L Z", "f aʊ l z"))
 
+    def test_a_secondary_stress_may_reduce_but_not_cross_the_mouth(self):
+        reading = "S EH2 N EH1 D R AH0"
+        for heard in ("s ɪ n ɛ d ɹ ə", "s ə n ɛ d ɹ ə", "s iː n ɛ d ɹ ə", "s ɛ n ɛ d ɹ ə"):
+            with self.subTest(heard=heard):
+                self.assertTrue(said_right(reading, heard))
+        for heard in ("s uː n ɛ d ɹ ə", "s ɚ n ɛ d ɹ ə", "s ʌ n ɛ d ɹ ɚ"):
+            with self.subTest(heard=heard):
+                self.assertFalse(said_right(reading, heard))
+        self.assertTrue(said_right("M AE0 L AO1 R IY0 AH0 N", "m ʌ l ɔ ɹ i ə n"))  # unstressed stays free
+
     def test_tokens_of_other_languages_are_read_as_english_phones(self):
         self.assertTrue(said_right(READING, "m ə5 ɹ ɛ n ts. ɹ ə"))  # tone digit, stray period
         self.assertTrue(said_right("V AE0 L AO1 R AH0 N", "v ə l oːɹ ɹ ə n"))  # an r-coloured vowel before its R
