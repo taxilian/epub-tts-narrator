@@ -373,6 +373,33 @@ class BroadRepairTests(unittest.TestCase):
         result, acceptance = self.render_chunk()
         self.assertTrue(acceptance["report"]["passed"])
 
+    def test_a_name_misread_with_its_tags_is_sent_as_written_and_still_judged(self):
+        from test_renderer_name_shape import performance
+        from test_renderer_speech_identity import speech_request
+        from epub_tts_narrator.renderer.engines import prepare_synthesis
+        text = "Marendra nodded."
+        self.chunk = speech_request(self.voice, text)["chunk"]
+        self.chunk.update(expressive_direction="",
+                          expressive_performance=performance(text, "Marendra", "M AH0 R EH1 N D R AH0"))
+        synthesize, sent = self.engine.synthesize, []
+
+        def tags_mislead(text, voice, path, *, seed, direction="", performance=None, traits=""):
+            # This engine misreads the name whenever it is sent as phoneme tags.
+            sent.append(any(c.get("alphabet") == "cmu_arpabet" for c in (performance or {}).get("controls", [])))
+            metadata = synthesize(text, voice, path, seed=seed, direction=direction)
+            return {**metadata, **prepare_synthesis(text, direction, performance=performance, traits=traits)[2]}
+        self.engine.synthesize = tags_mislead
+        self.engine.heard_override = lambda text, direction, number: (
+            "Marnedra nodded." if sent[-1] else "Marendra nodded.")
+        result, acceptance = self.render_chunk()
+        self.assertEqual(sent, [True, True, False])
+        record = self.accepted_record(result)
+        self.assertEqual(record["engine_metadata"]["spelling_recovery"]["removed"][0]["text"], "Marendra")
+        self.assertTrue(record["report"]["passed"])
+        # The original request stays its identity: the next render reuses it.
+        self.assertEqual(self.render_chunk()[1]["audio_sha256"], acceptance["audio_sha256"])
+        self.assertEqual(len(sent), 3)
+
     def test_rejected_terminal_repair_allows_fresh_ordinary_generation_on_rerun(self):
         from legacy_recovery_fixtures import LegacySpeechResolver
         from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed

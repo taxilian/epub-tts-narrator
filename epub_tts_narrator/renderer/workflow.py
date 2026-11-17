@@ -407,6 +407,13 @@ def _skipped_word_check(report, verifier, request_hash, wav, directory, purpose,
     return report
 
 
+def _plain_spelling_next(directory, request_hash):
+    """Whether a passage's next take sends its chosen names as written (``spelling_recovery.plain_next``)."""
+    from .history_echo import _attempt_records
+    from .spelling_recovery import plain_next
+    return plain_next(_attempt_records(directory, request_hash))
+
+
 def verified_take(text, generate, directory, request, verifier, config, *, generate_plan_part=None, **options):
     from .clip_recovery import run
     return run(_verified_take, text, generate, directory, request, verifier, config,
@@ -459,7 +466,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                   generate_repaired=None, resolution_episode=None, paragraph_split_available=False,
                   fallback_parts=0, episode_reserve=0, generate_plain=None,
                   allow_split=True, failed_split_report=None, allow_resolution=True,
-                  generate_direction=None, broad_recovery=False, generate_tail=None):
+                  generate_direction=None, broad_recovery=False, generate_tail=None, generate_spelled=None):
     """Reuse byte-bound, request-bound accepted audio. Retain failed takes.
 
     Verification settings govern new candidates and pending verification. An existing
@@ -1074,6 +1081,15 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                             from .take_completion import complete
                             metadata = complete(completing, generate_tail, raw, seed, text=text,
                                                 directory=directory, config=config)
+                        elif generate_spelled is not None and purpose == "speech" and _plain_spelling_next(
+                                directory, request_hash):
+                            # Tagged takes kept misreading a chosen name: send it as
+                            # written; the take is still judged against the reading.
+                            from .spelling_recovery import marker as spelling_marker
+                            notify("  A chosen name kept being misread with its phoneme tags; this take "
+                                   "sends it as written and must still say the chosen reading.")
+                            metadata = generate_spelled(raw, seed)
+                            metadata = {**metadata, "spelling_recovery": spelling_marker(request)}
                         else:
                             metadata = generate(raw, seed)
                     from .continuity_codes import persist
@@ -2616,7 +2632,7 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
 
     def execute_take(text, generate, request, *, synthesize_part=None, generate_repaired=None,
                      generate_plain=None, generate_direction=None, generate_plan_part=None,
-                     generate_tail=None):
+                     generate_tail=None, generate_spelled=None):
         set_phase(notify, "checking saved audio")
         identity = speech_cache.identity(request)
         key = digest(identity)
@@ -2695,7 +2711,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                             generate_direction=generate_direction,
                             generate_plan_part=generate_plan_part,
                             allow_split=False, failed_split_report=exc.report,
-                            generate_tail=generate_tail or tail_generator(text, synthesize_part))
+                            generate_tail=generate_tail or tail_generator(text, synthesize_part),
+                            generate_spelled=generate_spelled)
 
                 if synthesize_part is not None and recovery_available(
                         directory, request, text, verifier, config, voices_by_asset=voices_by_asset):
@@ -2725,7 +2742,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                                                paragraph_split_available=(paragraph_split_available or
                                                    sentence_parts is not None),
                                                fallback_parts=fallback_parts,
-                                               generate_tail=generate_tail or tail_generator(text, synthesize_part))
+                                               generate_tail=generate_tail or tail_generator(text, synthesize_part),
+                                               generate_spelled=generate_spelled)
                     except SpeechVerificationFailed as exc:
                         stop_if_requested()
                         if (synthesize_part is None or exc.report.get("resolution_action") == "stop"
@@ -2887,8 +2905,22 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             slice_performance(chunk["expressive_performance"], chunk["spoken_text"], *span)
         synthesize_scoped_part.check_span = check_scoped_span
 
+        from .spelling_recovery import plain_spelling_request
+        spelled_request = plain_spelling_request(request)
+
+        def generate_spelled(path, seed, v=voice, voice_id=speaker["voice_id"], spelled=spelled_request):
+            # The same line with its chosen phoneme tags left out (spelling_recovery).
+            spelled_chunk = spelled["chunk"]
+            text_sent = (spelled_chunk["spoken_text"] if is_expressive(spelled_chunk)
+                         else trim_speech_text(spelled_chunk["spoken_text"]))
+            metadata = engine.synthesize(text_sent, v, path, seed=seed,
+                                         direction=synthesis_direction(spelled_chunk, voice_id),
+                                         **performance_kwargs(spelled_chunk, voice_id))
+            return {"synthesis_text": text_sent, **metadata}
+
         from .speech_recovery import scoped_split_parts
         recovery = ({'generate_plan_part': synthesize_plan_part,
+                     **({'generate_spelled': generate_spelled} if spelled_request is not None else {}),
                      **({'synthesize_part': synthesize_scoped_part}
                         if len(speakers) == 1 and scoped_split_parts(chunk) is not None else {})}
                     if is_expressive(chunk) else {

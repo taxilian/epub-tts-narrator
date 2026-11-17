@@ -39,7 +39,7 @@ QUIET_DBFS = -50.0
 WINDOW_SECONDS = 0.025
 CUT_TAIL_SECONDS = 0.08
 # Metadata of generations whose text is not the passage's own wording.
-_NOT_COMPLETABLE = {"speech_resolution", "delivery_recovery", "direction_repair", "recovery",
+_NOT_COMPLETABLE = {"speech_resolution", "delivery_recovery", "spelling_recovery", "direction_repair", "recovery",
                     "clip_repair", "fragment_recovery", "exhaustion_selection"}
 # A take is finished only where it stopped at a natural break: after a word
 # ending a sentence or a clause set off by a semicolon or colon (closing

@@ -582,6 +582,15 @@ def _generation_identity(request, voices_by_asset=None, *, engine_metadata=None)
                  or (isinstance(engine_metadata["recovery"], Mapping)
                      and "child_acceptance_version" in engine_metadata["recovery"]))):
         return _recovered_generation_identity(request, voices_by_asset, engine_metadata)
+    if isinstance(engine_metadata, Mapping) and "spelling_recovery" in engine_metadata:
+        # A take sent with the chosen names as written (spelling_recovery):
+        # its audio must match that request; it stands for the original.
+        from .spelling_recovery import validate_marker
+        actual_request = validate_marker(request, engine_metadata["spelling_recovery"])
+        actual_request.pop("synthesis_identity", None)
+        actual_metadata = {key: value for key, value in engine_metadata.items() if key != "spelling_recovery"}
+        generation_identity(actual_request, voices_by_asset, engine_metadata=actual_metadata)
+        return generation_identity(request, voices_by_asset)
     if isinstance(engine_metadata, Mapping) and "delivery_recovery" in engine_metadata:
         return _plain_delivery_generation_identity(request, voices_by_asset, engine_metadata)
     if isinstance(engine_metadata, Mapping) and "direction_repair" in engine_metadata:
