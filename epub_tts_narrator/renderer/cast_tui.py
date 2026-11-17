@@ -186,6 +186,8 @@ class CastApp(CapturePrintMixin, App):
         Binding("n", "notes", "Notes",
                 tooltip="What you know about this character (later names, gender, origin, notes): used for its "
                         "accent and voice description"),
+        Binding("v", "accents", "Accents",
+                tooltip="Review the book's accent plan (as accents BOOK does); q comes back here"),
         Binding("d", "share", "Share", tooltip="Use another voice's recording for this voice"),
         Binding("D", "stop_sharing", "Unshare", show=False, tooltip="Stop sharing (this book's own link only)"),
         Binding("j", "merge", "Same as", show=False,
@@ -737,7 +739,52 @@ class CastApp(CapturePrintMixin, App):
             self.notify(f"Cancelled {len(cancelled)} queued job(s)")
             self.render_all()
 
+    # The accent view ---------------------------------------------------------------
+
+    def _accent_view(self):
+        from .accent_tui import AccentScreen
+        return next((screen for screen in self.screen_stack if isinstance(screen, AccentScreen)), None)
+
+    def check_action(self, action, parameters):
+        """While the accent view is open, the cast's own keys do nothing (its keys are the accent view's)."""
+        if action in _CAST_ACTIONS and action != "quit_cast" and self._accent_view() is not None:
+            return False
+        return True
+
+    def action_accents(self):
+        if self._accent_view() is not None:
+            return
+        self.controller.log("Opening the book's accent plan…")
+        self._attempt(lambda: self.controller.open_accents(self._accents_ready))
+
+    def _accents_ready(self, accents):
+        def show():
+            from .accent_tui import CastAccentScreen
+            if self._accent_view() is not None:
+                accents.close()
+                return
+            planner = accents.planner
+            title = self.book_title
+            screen = CastAccentScreen(accents, title=title)
+
+            def closed(saved):
+                accents.close()
+                self.controller.log("Saved the accent plan; voices now use its accents." if saved or planner.saved
+                                    else "Closed the accent plan without saving.")
+                self._schedule_reload()
+            self.push_screen(screen, closed)
+        try:
+            self.call_from_thread(show)
+        except RuntimeError:
+            accents.close()  # The cast screen closed first.
+
     def action_quit_cast(self):
+        accents = self._accent_view()
+        if accents is not None:
+            # Close the accent view first; it asks before discarding an unsaved plan.
+            if self.screen is accents:
+                accents.action_quit_accents()
+            return
         running = self.controller.jobs.running()
         if running is None:
             self.exit()
@@ -753,6 +800,9 @@ class CastApp(CapturePrintMixin, App):
     def _wait_then_exit(self):
         self.controller.jobs.wait_idle()
         self.call_from_thread(self.exit)
+
+
+_CAST_ACTIONS = {binding.action.split("(")[0] for binding in CastApp.BINDINGS}
 
 
 def run_cast_tui(controller, *, title="Cast"):

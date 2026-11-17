@@ -350,7 +350,7 @@ class AccentAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(app.query_one("#groups", DataTable).row_count, 2)
             self.assertEqual(controller.jobs.jobs(), [])
-            self.assertIn("saved", app.sub_title)
+            self.assertIn("saved", app.screen.sub_title)
 
     async def test_kept_characters_are_shown_and_can_be_given_no_accent(self):
         from epub_tts_narrator.renderer.speech_traits import save_accent
@@ -399,3 +399,73 @@ class AccentAppTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CastAccentViewTests(unittest.IsolatedAsyncioTestCase):
+    """The accent review opens over the cast screen (v) and q returns to the cast."""
+
+    def setUp(self):
+        from cast_tui_fixtures import FakePlayer, FakeSession
+        from epub_tts_narrator.renderer.cast_tui import CastApp
+        from epub_tts_narrator.renderer.cast_tui_model import CastController
+        case = PlannerCase()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        self.case = case
+        self.planner = case.planner(split(("the harbor", "Scottish"), ("inland", "Welsh")))
+        self.session = FakeSession()
+        self.cast = CastController(self.session, FakePlayer(), describe_error=str)
+        self.addCleanup(self.cast.close)
+        self.accents = AccentController(self.planner, describe_error=str)
+        self.addCleanup(self.accents.close)
+        self.cast.accent_factory = lambda: self.accents
+        self.app = CastApp(self.cast, title="Fixture Book", startup=False)
+
+    async def asyncSetUp(self):
+        asyncio.get_running_loop().slow_callback_duration = 10
+
+    async def settle(self, pilot):
+        for _ in range(3):
+            self.cast.jobs.wait_idle(5)
+            self.accents.jobs.wait_idle(5)
+            await pilot.pause()
+
+    async def test_v_opens_the_accent_plan_and_q_comes_back_to_the_cast(self):
+        from epub_tts_narrator.renderer.accent_tui import AccentScreen
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await pilot.press("v")
+            await self.settle(pilot)
+            screen = self.app.screen
+            self.assertIsInstance(screen, AccentScreen)
+            self.assertEqual(screen.query_one("#groups", DataTable).row_count, 2)  # the first plan was proposed
+            # The cast's own keys do nothing here: g would generate a voice in the cast.
+            await pilot.press("g")
+            await pilot.pause()
+            self.assertIs(self.app.screen, screen)
+            self.assertFalse(any(call[0] == "regenerate" for call in self.session.calls))
+            await pilot.press("s")
+            self.assertIsInstance(self.app.screen, ConfirmScreen)
+            await pilot.press("y")
+            await self.settle(pilot)
+            self.assertTrue(self.planner.saved)
+            await pilot.press("q")
+            await self.settle(pilot)
+            self.assertNotIsInstance(self.app.screen, AccentScreen)
+            self.assertTrue(self.app.is_running)
+            self.assertTrue(any("Saved the accent plan" in text for _, _, text in self.cast.messages))
+            self.assertEqual(self.app.query_one("#voices", DataTable).row_count, 7)
+
+    async def test_ctrl_q_with_an_unsaved_plan_asks_before_leaving_the_accent_view(self):
+        from epub_tts_narrator.renderer.accent_tui import AccentScreen
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await pilot.press("v")
+            await self.settle(pilot)
+            self.assertTrue(self.planner.dirty)
+            await pilot.press("ctrl+q")
+            await pilot.pause()
+            self.assertIsInstance(self.app.screen, ConfirmScreen)
+            await pilot.press("y")
+            await self.settle(pilot)
+            self.assertNotIsInstance(self.app.screen, AccentScreen)
+            self.assertTrue(self.app.is_running)  # back on the cast, not quit
+            self.assertFalse(self.planner.saved)

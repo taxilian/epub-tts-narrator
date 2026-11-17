@@ -284,6 +284,14 @@ class CastingSessionNotesTests(unittest.TestCase):
         row = next(row for row in session.rows() if row["voice_id"] == voice_id)
         self.assertEqual((row["notes"], row["notes_source"]), (ZANDRAMAS, "this book"))
         self.assertTrue((directory / notes_module.NOTES_FILENAME).is_file())
+        # The cast screen's accent view (v) reviews this same book, with these notes.
+        controller = CastController(session, FakePlayer(), describe_error=str)
+        self.addCleanup(controller.close)
+        accents = controller._accent_controller()
+        self.addCleanup(accents.close)
+        self.assertEqual(accents.planner.bundle["directory"], bundle["directory"])
+        self.assertEqual(accents.planner.known, {voice_id: ZANDRAMAS})
+        self.assertIn(voice_id, accents.planner.pending)
 
 
 if __name__ == "__main__":

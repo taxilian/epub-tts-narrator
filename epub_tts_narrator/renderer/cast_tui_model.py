@@ -223,6 +223,7 @@ class CastController:
         # Asking the text model to revise descriptions changes nothing, so it waits for nothing either.
         self.jobs.add_independent_lane(ASK_LANE)
         self.requests_factory = None  # tests supply the model; otherwise the book's analysis provider
+        self.accent_factory = None  # tests supply the accent review; otherwise this book's (open_accents)
         # Gemini generations run up to GENERATIONS at once, sharing one store lease and verifier.
         self._pool = None
         self.generation_limit = generation_limit(getattr(session, "config", {}) or {})
@@ -416,6 +417,29 @@ class CastController:
         voice_id = row["voice_id"]
         return self._submit_save(f"Save {FIELDS[field].lower()} for {label(row)}",
                                  lambda: self.session.update_prompt(voice_id, **{field: value}), row)
+
+    # The book's accent plan, reviewed over the cast screen ---------------------
+
+    def open_accents(self, on_ready):
+        """Prepare this book's accent review (``accent_review``) off the screen's thread.
+
+        ``on_ready(controller)`` gets an ``AccentController`` on the saved plan
+        (the model is asked only when the person asks, or for a first plan);
+        the caller closes it when the review closes.
+        """
+        def run():
+            factory = self.accent_factory or self._accent_controller
+            controller = factory()
+            on_ready(controller)
+            return controller
+        return self.jobs.submit("Open the book's accent plan", run, lane=ASK_LANE)
+
+    def _accent_controller(self):
+        from .accent_review import AccentController, AccentPlanner
+        planner = AccentPlanner(self.session.bundle, self.session.config, self.config_path, progress=self.log)
+        if planner.load_saved():
+            self.log(f"Opened the saved accent plan ({len(planner.groups)} group(s)).")
+        return AccentController(planner)
 
     # A person's notes about the character ------------------------------------
 

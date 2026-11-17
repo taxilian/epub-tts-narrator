@@ -14,6 +14,7 @@ import time
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.screen import Screen
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, Footer, Header, OptionList, Static
 from textual.widgets.option_list import Option
@@ -152,27 +153,33 @@ class AccentPickerScreen(ChoiceScreen):
             choices.highlighted = target
 
 
-class AccentApp(CapturePrintMixin, App):
-    """The accent screen. ``controller`` owns the plan; this class only displays it."""
+class AccentScreen(Screen):
+    """The accent review. ``controller`` owns the plan; this screen only displays it.
 
-    TITLE = "Accents"
-    CSS = BASE_CSS + """
-    #busy { display: none; height: auto; padding: 0 1; background: $warning 25%; color: $text; text-style: bold;
-            border: heavy $warning; }
-    #busy.running { display: block; }
-    #main { height: 1fr; }
-    #left { width: 50%; min-width: 40; }
-    #right { width: 1fr; }
-    #groups { height: 1fr; }
-    #detail-scroll { height: 12; border: round $primary-background; padding: 0 1; }
-    #members { height: 1fr; border: round $primary-background; }
-    #bottom { height: 9; }
-    #log { width: 1fr; height: 1fr; border: round $primary-background; }
-    #jobs { width: 40%; height: 1fr; border: round $primary-background; }
+    It is ``accents BOOK``'s whole app (``AccentApp``) and also opens over the
+    cast screen (``cast_tui``, key ``v``), returning there when closed:
+    ``on_close`` ends the standalone app; otherwise the screen dismisses
+    with whether the plan was saved.
+    """
+
+    # Screen CSS applies app-wide: every rule names this screen, so the cast screen's ids are untouched
+    # and every property the cast screen sets on a shared id is set here too.
+    CSS = """
+    AccentScreen #busy { display: none; height: auto; padding: 0 1; background: $warning 25%; color: $text;
+                         text-style: bold; border: heavy $warning; }
+    AccentScreen #busy.running { display: block; }
+    AccentScreen #main { height: 1fr; }
+    AccentScreen #left { width: 50%; min-width: 40; }
+    AccentScreen #right { width: 1fr; }
+    AccentScreen #groups { height: 1fr; }
+    AccentScreen #detail-scroll { height: 12; border: round $primary-background; padding: 0 1; }
+    AccentScreen #members { height: 1fr; border: round $primary-background; }
+    AccentScreen #bottom { height: 9; }
+    AccentScreen #log { width: 1fr; height: 1fr; border: round $primary-background; }
+    AccentScreen #jobs { width: 40%; height: 1fr; border: round $primary-background; }
     """
     BINDINGS = [
         Binding("q", "quit_accents", "Quit"),
-        Binding("ctrl+q", "quit_accents", "Quit", show=False, priority=True),
         Binding("question_mark", "keys", "Keys", tooltip="Show every key"),
         Binding("i", "instruct", "Instruct", tooltip="Type what to change; the model revises the whole plan"),
         Binding("a", "edit('accent')", "Accent", tooltip="Change the highlighted group's accent"),
@@ -184,11 +191,12 @@ class AccentApp(CapturePrintMixin, App):
         Binding("s", "save", "Save", tooltip="Save the accents, groups and reasons"),
     ]
 
-    def __init__(self, controller, *, title="Accents", instructions=None):
+    def __init__(self, controller, *, title="Accents", instructions=None, on_close=None):
         super().__init__()
         self.controller = controller
         self.initial_instructions = instructions  # revise the saved plan with these on opening
         self.book_title = title
+        self._on_close = on_close
         self._ui_thread = None
         self._started = time.monotonic()
         controller._on_change = self._changed
@@ -210,7 +218,6 @@ class AccentApp(CapturePrintMixin, App):
 
     def on_mount(self):
         self._ui_thread = threading.get_ident()
-        self.capture_prints()
         self.title = f"Accents — {self.book_title}"
         self.query_one("#groups", DataTable).add_columns("Accent", "Origin", "Voices")
         self.query_one("#members", DataTable).add_columns("Character", "About")
@@ -229,17 +236,20 @@ class AccentApp(CapturePrintMixin, App):
 
     # Updates ------------------------------------------------------------------
 
-    def on_captured_line(self, text, stderr):
-        self.controller.log(text, "error" if stderr and "rror" in text else "info")
-
     def _changed(self):
+        if not self.is_attached:
+            return  # Closed: a job finishing later has nothing to draw.
         if threading.get_ident() == self._ui_thread:
             self.render_all()
         else:
             try:
-                self.call_from_thread(self.render_all)
+                self.app.call_from_thread(self._render_if_open)
             except RuntimeError:
                 pass  # The app is closing.
+
+    def _render_if_open(self):
+        if self.is_attached:
+            self.render_all()
 
     def _tick(self):
         if self.controller.busy():
@@ -390,7 +400,7 @@ class AccentApp(CapturePrintMixin, App):
     # Actions ------------------------------------------------------------------
 
     def action_keys(self):
-        self.push_screen(KeysScreen(self.BINDINGS, title="Accent keys"))
+        self.app.push_screen(KeysScreen(self.BINDINGS, title="Accent keys"))
 
     def action_switch(self):
         members = self.query_one("#members", DataTable)
@@ -405,7 +415,7 @@ class AccentApp(CapturePrintMixin, App):
             if text and text.strip():
                 self.controller.revise(text)
                 self.render_all()
-        self.push_screen(TextEditScreen(
+        self.app.push_screen(TextEditScreen(
             "What should change?", "",
             help_text="e.g. \"the imperial court should sound Italian\", \"Marn is from the north, keep him with his uncle\", "
                       "\"no upper-class English\". The model revises the whole plan. Ctrl+S sends · Escape cancels"),
@@ -443,7 +453,7 @@ class AccentApp(CapturePrintMixin, App):
         if field == "accent":
             self._pick_accent(f"Accent for {group['origin']}", group["accent"], saved, check, own_origin=group["origin"])
             return
-        self.push_screen(TextEditScreen(title, value or "", single_line=field != "why", validate=check), saved)
+        self.app.push_screen(TextEditScreen(title, value or "", single_line=field != "why", validate=check), saved)
 
     def _pick_accent(self, title, current, then, check, *, own_origin=None):
         """The accent list first; its last row (or a filter matching nothing listed) types one instead."""
@@ -456,11 +466,11 @@ class AccentApp(CapturePrintMixin, App):
                 then(name)
                 return
             typed = picker.typed or picker.typed_default
-            self.push_screen(TextEditScreen(
+            self.app.push_screen(TextEditScreen(
                 title, typed, single_line=True, validate=check,
                 help_text="An accent in one or two words, optionally after a strength word (light, broad, heavy). "
                           "Enter saves · Escape cancels"), then)
-        self.push_screen(picker, picked)
+        self.app.push_screen(picker, picked)
 
     def action_move(self):
         if not self._idle():
@@ -469,7 +479,7 @@ class AccentApp(CapturePrintMixin, App):
         members = self.query_one("#members", DataTable)
         voice_id = highlighted_key(members) if self.focused is members else None
         if voice_id is None:
-            self.push_screen(ChoiceScreen("Move which character?",
+            self.app.push_screen(ChoiceScreen("Move which character?",
                                           [(v, planner.label(v)) for v in planner.entries]), self._move_to)
         else:
             self._move_to(voice_id)
@@ -488,13 +498,13 @@ class AccentApp(CapturePrintMixin, App):
             if target == NO_ACCENT:
                 target = None
             elif target == NEW_GROUP:
-                self.push_screen(TextEditScreen("New group's origin", "", single_line=True),
+                self.app.push_screen(TextEditScreen("New group's origin", "", single_line=True),
                                  lambda origin: origin and self._new_group(voice_id, origin))
                 return
             error = self.controller.edit(planner.move, voice_id, target)
             if error:
                 self.notify(error, severity="error")
-        self.push_screen(ChoiceScreen(f"Move {planner.label(voice_id)} to", options), chosen)
+        self.app.push_screen(ChoiceScreen(f"Move {planner.label(voice_id)} to", options), chosen)
 
     def _new_group(self, voice_id, origin):
         planner = self.controller.planner
@@ -531,12 +541,51 @@ class AccentApp(CapturePrintMixin, App):
 
     def action_quit_accents(self):
         planner = self.controller.planner
+        leave = "Quit" if self._on_close is not None else "Close the accents"
         if self.controller.busy():
-            self._confirm("A model request is still running. Quit without saving?", self.exit)
+            self._confirm(f"A model request is still running. {leave} without saving?", self.close)
         elif planner.dirty:
-            self._confirm("Quit without saving this plan?", self.exit)
+            self._confirm(f"{leave} without saving this plan?", self.close)
         else:
-            self.exit()
+            self.close()
+
+    def close(self):
+        if self._on_close is not None:
+            self._on_close()
+        else:
+            self.dismiss(self.controller.planner.saved)
 
     def _confirm(self, message, then, *, title="Confirm"):
-        self.push_screen(ConfirmScreen(message, title=title), lambda yes: yes and then())
+        self.app.push_screen(ConfirmScreen(message, title=title), lambda yes: yes and then())
+
+
+class CastAccentScreen(AccentScreen):
+    """The accent screen opened over the cast screen: q goes back to the cast."""
+
+    BINDINGS = [Binding("q", "quit_accents", "Back to cast") if binding.key == "q" else binding
+                for binding in AccentScreen.BINDINGS]
+
+
+class AccentApp(CapturePrintMixin, App):
+    """``accents BOOK`` on a terminal: the accent screen as the whole app."""
+
+    TITLE = "Accents"
+    CSS = BASE_CSS
+    BINDINGS = [Binding("ctrl+q", "quit_accents", "Quit", show=False, priority=True)]
+
+    def __init__(self, controller, *, title="Accents", instructions=None):
+        super().__init__()
+        self.controller = controller
+        self.accent_screen = AccentScreen(controller, title=title, instructions=instructions, on_close=self.exit)
+
+    def get_default_screen(self):
+        return self.accent_screen
+
+    def on_mount(self):
+        self.capture_prints()
+
+    def on_captured_line(self, text, stderr):
+        self.controller.log(text, "error" if stderr and "rror" in text else "info")
+
+    def action_quit_accents(self):
+        self.accent_screen.action_quit_accents()
