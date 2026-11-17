@@ -179,8 +179,9 @@ class RunApp(CapturePrintMixin, App):
         Binding("v", "severity", "Level", tooltip="Cycle the message level: info, warnings, errors, everything"),
         Binding("slash", "search", "Search", tooltip="Filter messages by text"),
         Binding("x", "clear_filters", "Clear", tooltip="Clear every filter"),
-        Binding("r", "retry", "Retry", tooltip="Put the highlighted failed chapter back at the front of the queue, or "
-                                               "a failed book back in its command-line place, while the run continues"),
+        Binding("r", "retry", "Retry", tooltip="Try the highlighted failed chapter again, first in line: its failed "
+                                               "passage gets new takes, verified takes are reused (a failed book goes "
+                                               "back in its command-line place)"),
         Binding("t", "takes", "Takes", tooltip="Listen to the failed passage's takes and accept a good one"),
         Binding("d", "detail", "Detail", tooltip="The highlighted failure, chapter or book in full: the whole "
                                                  "error, its passage, every attempt and its repairs"),
@@ -363,6 +364,9 @@ class RunApp(CapturePrintMixin, App):
             return
         self.model.changed.clear()
         model = self.model
+        for notice in model.pop_notices():
+            self.notify(notice, severity="warning", timeout=20)
+            self.bus.log(notice, severity="warning")
         self.sub_title = model.summary()
         self._draw_glance()
         self._draw_profile()
@@ -370,7 +374,9 @@ class RunApp(CapturePrintMixin, App):
         for item in model.visible_failures():
             scope = item["scope"]
             # Keyed by the failure's own id: a row that leaves the list never shifts the highlight to another.
-            failures.append((str(item["id"]), (str(item["attempt"]), item.get("state", "failed"),
+            state = item.get("state", "failed") + (f" after retry {item['after_retry']}"
+                                                   if item.get("after_retry") else "")
+            failures.append((str(item["id"]), (str(item["attempt"]), state,
                                           scope.get("book") or "", str(scope.get("chapter") or ""),
                                           item["record"].get("error_type") or item["kind"],
                                           _failure_takes_cell(model.failure_takes(item)),
@@ -773,12 +779,9 @@ class RunApp(CapturePrintMixin, App):
         if state == "retrying":
             notes.append("This chapter is being rendered again now; its row in Chapters (2) shows its progress.")
         elif state == "failed" and running and not item.get("wanted"):
-            if callable(getattr(review, "reset_for_fresh_takes", None)):
-                actions.append(("retry_fresh", "Retry this passage now with fresh takes: a new allowance of "
-                                "attempts, its saved best-effort choice and repair set aside (the chapter's other "
-                                "passages keep their verified clips)"))
-            actions.append(("retry", "Retry the chapter now, ahead of everything waiting: a new allowance of "
-                            "attempts, continuing any saved best-effort choice or repair (verified clips are reused)"))
+            actions.append(("retry", "Retry now, ahead of everything waiting: the failed passage gets new takes "
+                            "(its used-up best-effort choice and repair are set aside, never deleted); every "
+                            "verified take, and any take you chose, is kept"))
         if takes:
             actions.append("takes")
         history = self._history_review(review)
@@ -827,8 +830,8 @@ class RunApp(CapturePrintMixin, App):
         details = [*_passage_lines(item), *([""] + notes if notes else [])]
 
         def chosen(action):
-            if action in ("retry", "retry_fresh"):
-                self._retry(item, fresh=action == "retry_fresh")
+            if action == "retry":
+                self._retry(item)
             elif action == "takes":
                 self._takes(item)
             elif action in ("heard", "word", "stream"):
@@ -993,7 +996,7 @@ class RunApp(CapturePrintMixin, App):
                       if self.model.running else "R renders it now with fresh takes."))
         self.call_from_thread(self.notify, message, timeout=15)
 
-    def _retry(self, item, *, fresh=False):
+    def _retry(self, item, *, fresh=True):
         scope = item["scope"]
         name = self.model.chapter_name(scope.get("book"), scope.get("chapter"))
         if (fresh and callable(getattr(item.get("repair"), "reset_for_fresh_takes", None))
@@ -1014,7 +1017,8 @@ class RunApp(CapturePrintMixin, App):
                         "books listed after it as soon as their current chapters are done; finished chapters are "
                         "restored and failed ones render with fresh takes.")
         elif route == "chapter":
-            self.notify(f"Retrying {name} first, with a new allowance of attempts; other chapters keep going.")
+            self.notify(f"Retrying {name} first: its failed passage gets new takes and verified takes are reused; "
+                        "other chapters keep going.")
         elif route == "later":
             self.notify(f"{name[0].upper()}{name[1:]} renders again as soon as its book's render can take it: "
                         "when that render ends (in a queue the book goes back in line), or, at the latest, when "

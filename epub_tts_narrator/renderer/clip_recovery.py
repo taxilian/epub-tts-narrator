@@ -85,6 +85,7 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
     if enabled and options.get('retry_budget') is None and 'recovery' not in request:
         options['retry_budget'] = SpeechRetryBudget(retry_paragraphs=True)
     failure_report = None
+    rejected = None
     if not enabled or not pending or accepted.exists() or accepted.is_symlink():
         ordinary_options = dict(options)
         if terminal_repair:
@@ -98,7 +99,7 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
                 return chosen
             if not enabled or exc.request != request or exc.report.get('resolution_action') == 'split':
                 raise
-            failure_report = exc.report
+            failure_report, rejected = exc.report, exc
     notify = options.get('notify', print)
     chosen = _chosen(directory, request)
     if chosen is None and options.get('purpose', 'speech') == 'speech':
@@ -157,6 +158,10 @@ def run(ordinary, text, generate, directory, request, verifier, config, *, gener
             return select_or_filter(directory, request, client, failure_context, text, verifier, config,
                                     notify=notify)
         except NoUsableTake:
+            if rejected is not None and 'recovery' in request:
+                # A sentence split's joined take nothing may publish is a rejected
+                # join: its caller returns to new whole takes rather than stopping.
+                raise rejected
             budget = options.get('retry_budget')
             if budget is None or budget.started(directory, digest(request)):
                 raise

@@ -190,6 +190,7 @@ class RunModel:
         # book could take them yet; its next failed state (in a queue) re-admits
         # the book, and a run that ends resumes it.
         self.wanted_retries = {}
+        self.notices = deque(maxlen=50)  # one-time messages for the person (a retried chapter failed again)
         self.changed = threading.Event()
 
     # Events --------------------------------------------------------------------
@@ -307,13 +308,20 @@ class RunModel:
                         deferred = (book, event.data["retry"])
             elif event.kind == FAILURE:
                 data = dict(event.data or {})
+                retried = None
                 for item in self.failures:
                     # The chapter failed again: its newest failure replaces the older ones.
                     if (item["kind"] == "chapter" and item["scope"].get("book") == event.scope.get("book")
                             and item["scope"].get("chapter") == event.scope.get("chapter")
                             and item.get("state", "failed") in ("failed", "retrying")):
+                        if item.get("state") == "retrying":
+                            retried = item
                         item["state"] = "superseded"
-                self.failures.append({"id": next(self._failure_ids),
+                after_retry = 0
+                if retried is not None:
+                    after_retry = retried.get("after_retry", 0) + 1
+                    self.notices.append(self._failed_again(event, retried, after_retry))
+                self.failures.append({"id": next(self._failure_ids), "after_retry": after_retry,
                                       "kind": "chapter", "scope": dict(event.scope), "error": event.text,
                                       "record": dict(data.get("record") or {}), "retry": data.get("retry"),
                                       "repair": data.get("repair"), "passage": data.get("passage"),
@@ -619,11 +627,32 @@ class RunModel:
         with self._lock:
             item["state"] = "retrying" if route != "later" else "failed"
             item["wanted"] = route == "later"
+            # Takes the retry makes are counted from here (``_failed_again``).
+            item["rejections_before"] = len(self.rejections)
             entry = self._chapter(book, item["scope"].get("chapter"), create=False)
             if item["kind"] == "chapter" and entry is not None and route != "later":
                 entry["state"] = "retrying"
         self.changed.set()
         return route
+
+    def _failed_again(self, event, retried, count):
+        """The notice for a chapter whose retry failed again: what the retry did, in words."""
+        book, chapter = event.scope.get("book"), event.scope.get("chapter")
+        made = sum(1 for item in list(self.rejections)[retried.get("rejections_before", len(self.rejections)):]
+                   if item["scope"].get("book") == book and item["scope"].get("chapter") == chapter)
+        name = self.chapter_name(book, chapter)
+        what = (f"its {made} new take{'s were' if made != 1 else ' was'} rejected" if made
+                else "it made no new take that was rejected")
+        reason = (event.text or "").split(";")[0].strip()
+        return (f"{name[0].upper()}{name[1:]}" + (f" of {book}" if book else "") + " failed again after "
+                + ("your retry" if count == 1 else f"retry {count}") + f": {what}. {reason}"
+                + (" Errors (5) has the passage, its takes and other ways to fix it." if reason else ""))
+
+    def pop_notices(self):
+        """One-time messages for the person, oldest first (each is returned once)."""
+        with self._lock:
+            items, self.notices = list(self.notices), deque(maxlen=50)
+        return items
 
     def wanted_books(self):
         """Books with chapter retries still waiting for a render to take them (resumed when the run ends)."""

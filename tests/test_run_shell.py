@@ -325,6 +325,27 @@ class RunModelTests(unittest.TestCase):
         board.chapter_state("/q/b1", 2, "done")
         self.assertEqual([item["state"] for item in self.model.visible_failures()], ["retried"])
 
+    def test_a_retried_chapter_that_fails_again_says_so_once_with_the_new_takes_it_made(self):
+        board = BusBoard(self.bus)
+        board.book_state("/q/b1", "rendering")
+        record = {"number": 2, "error_type": "RenderBlocked", "error": "Every usable retained take misread a name"}
+        board.chapter_failure(record, book="b1", retry=lambda: True)
+        # A take rejected before the retry is not the retry's.
+        board.rejected_take({"request_hash": "a" * 64, "attempt": 1, "reasons": ["pronunciation_mismatch"]},
+                            None, book="b1")
+        self.assertEqual(self.model.pop_notices(), [])
+        self.assertEqual(self.model.retry(self.model.current_failures()[0]), "chapter")
+        for attempt in (2, 3):
+            self.bus.publish("rejected", "pronunciation_mismatch", scope={"book": "b1", "chapter": 2},
+                             data={"request_hash": "a" * 64, "attempt": attempt,
+                                   "reasons": ["pronunciation_mismatch"]})
+        board.chapter_failure(record, book="b1", retry=lambda: True)
+        [notice] = self.model.pop_notices()
+        self.assertIn("Chapter 2 of b1 failed again after your retry: its 2 new takes were rejected.", notice)
+        self.assertIn("misread a name", notice)
+        self.assertEqual(self.model.pop_notices(), [])
+        self.assertEqual(self.model.current_failures()[0]["after_retry"], 1)
+
     def test_a_chapter_whose_render_ended_retries_through_its_book_or_as_soon_as_one_can_take_it(self):
         board = BusBoard(self.bus)
         board.book_state("/q/b1", "rendering")
@@ -739,7 +760,7 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             return 0 if outcome[-1] else 2
         return command
 
-    async def test_a_failed_passage_shows_its_full_error_every_attempt_and_fresh_retry(self):
+    async def test_a_failed_passage_shows_its_full_error_every_attempt_and_one_retry_with_new_takes(self):
         long_error = "Speech verification failed after 3 attempts in this run. " + "x" * 300 + " END-OF-ERROR"
         calls = []
         retried = threading.Event()
@@ -792,8 +813,9 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Text: Nobody answered the door.", text)
             self.assertEqual(text.count("EngineError: Drama 3 did not finish the text: 'silence'"), 3)
             self.assertIn("No attempt made audio", text)
-            self.assertEqual(app.screen.actions, ["retry_fresh", "retry", "edit_direction", "log", "close"])
-            await pilot.press("enter")  # the first repair: fresh takes for this passage
+            # One retry, and it always makes new takes: never a retry that only re-reads the failure.
+            self.assertEqual(app.screen.actions, ["retry", "edit_direction", "log", "close"])
+            await pilot.press("enter")
             await self.wait_for(pilot, lambda: not self.model.running)
         self.assertEqual((calls, retried.is_set(), app.result), (["reset"], True, 0))
 

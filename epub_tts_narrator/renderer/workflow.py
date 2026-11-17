@@ -2729,22 +2729,30 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
                         parts = split_recovery_text(text)
                         joined_request = {**request, "recovery": {
                             "version": 1, "strategy": "sentence_split", "parts": parts}}
-                        if (getattr(verifier, "speech_resolver", None) is None
-                                or parts is None or exc.request != joined_request
+                        # With or without a resolver: a retry's fresh allowance
+                        # makes new whole takes instead of ending at the same join.
+                        if (parts is None or exc.request != joined_request
                                 or exc.report.get("resolution_action") == "stop"):
                             raise
                         notify("  The joined recording failed verification; returning to whole-speech recovery "
                                "with the remaining shared allowance. The failed split will not be repeated.")
-                        return verified_take(
-                            text, generate, directory, request, verifier, config,
-                            notify=notify, retry_budget=retry_budget, seed_identity=identity,
-                            generate_repaired=generate_repaired or _rewrite_callback(synthesize_part),
-                            generate_plain=generate_plain, resolution_episode=resolution_episode,
-                            generate_direction=generate_direction,
-                            generate_plan_part=generate_plan_part,
-                            allow_split=False, failed_split_report=exc.report,
-                            generate_tail=generate_tail or tail_generator(text, synthesize_part),
-                            generate_spelled=generate_spelled)
+                        started = retry_budget.started(directory, digest(request)) if retry_budget else 0
+                        try:
+                            return verified_take(
+                                text, generate, directory, request, verifier, config,
+                                notify=notify, retry_budget=retry_budget, seed_identity=identity,
+                                generate_repaired=generate_repaired or _rewrite_callback(synthesize_part),
+                                generate_plain=generate_plain, resolution_episode=resolution_episode,
+                                generate_direction=generate_direction,
+                                generate_plan_part=generate_plan_part,
+                                allow_split=False, failed_split_report=exc.report,
+                                generate_tail=generate_tail or tail_generator(text, synthesize_part),
+                                generate_spelled=generate_spelled)
+                        except SpeechVerificationFailed:
+                            if retry_budget is None or retry_budget.started(directory, digest(request)) == started:
+                                # No whole take was left to make in this run: the join's failure says why.
+                                raise exc from None
+                            raise
 
                 if (synthesize_part is not None and not _person_chose_take(directory)
                         and recovery_available(directory, request, text, verifier, config,
