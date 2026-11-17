@@ -364,9 +364,14 @@ class CastingSession:
                 previous[canonical] = read_json(path) if path.exists() else None
             self.notify(f"Refreshing descriptions and sample scripts for {len(groups)} voice(s); "
                         "this replaces their local casting drafts, including custom edits.")
+            from .character_notes import character_notes
+            # A person's notes about these characters, only when there are some (calls are otherwise unchanged).
+            listener_notes = {voice_id: record for voice_id, record in character_notes(self.bundle, self.config).items()
+                              if voice_id in selected or self.store.canonical_id(voice_id) in groups}
             descriptions = refresh_bundle_prompts(
                 self.bundle, config_path, canonical_id=self.store.canonical_id,
-                voice_ids=selected, current_prompts=current_prompts, progress=self.notify)
+                voice_ids=selected, current_prompts=current_prompts, progress=self.notify,
+                **({"listener_notes": listener_notes} if listener_notes else {}))
             prepared = ensure_bundle_scripts(
                 self.bundle, config_path, canonical_id=self.store.canonical_id,
                 voice_ids=selected, refresh=True, progress=self.notify)
@@ -420,6 +425,9 @@ class CastingSession:
         chosen_accents = accent_overrides(self.bundle, self.config, include_cleared=True)
         from .accent_assignment import assigned_accents
         assigned = assigned_accents(self.bundle, self.config)
+        from .character_notes import character_notes, own_character_notes
+        notes = character_notes(self.bundle, self.config)
+        own_notes = own_character_notes(self.bundle, self.config)
         from .config import designer_records_several_clips
         from .voice_clip_counts import clip_choice, clip_overrides
         clip_counts = clip_overrides(self.bundle, self.config)
@@ -498,6 +506,11 @@ class CastingSession:
                     overrides=clip_counts)), designer_records_several=several_clips),
                 **draft,
                 "accent_suggestion": suggest_accent(draft.get("prompt") or profile["description"]),
+                # A person's own knowledge of the character (character_notes.py); a changed voice uses its main voice's.
+                "notes": deepcopy(notes.get(voice_id) or notes.get((derived or {}).get("voice_id")) or {}),
+                "notes_source": ("" if not (notes.get(voice_id) or notes.get((derived or {}).get("voice_id")))
+                                 else "main voice" if voice_id not in notes
+                                 else "this book" if voice_id in own_notes else "earlier book"),
                 "selected": selected,
                 "regeneration": self.store.regeneration_status(voice_id),
                 "candidates": self.store.list_candidates(voice_id),
@@ -564,6 +577,19 @@ class CastingSession:
         self._profile(voice_id)
         canonical = self.store.canonical_id(voice_id)
         save_clip_count(self.bundle, self.config, canonical if canonical in self._profiles else voice_id, count)
+
+    def save_notes(self, voice_id, record):
+        """Save a person's notes about a voice's character for this book (``{}`` clears inherited notes).
+
+        Nothing is regenerated. A character whose accent was assigned with
+        other notes has an undecided accent until it is reassigned
+        (``accents BOOK``, or before a render for a recorded voice).
+        """
+        self._profile(voice_id)
+        from .character_notes import save_character_notes
+        with self._locked():
+            save_character_notes(self.bundle, self.config, voice_id, record)
+        return record
 
     def update_prompt(self, voice_id, prompt=None, reference_text=None, speech_traits=None, accent=None):
         self._profile(voice_id)
@@ -1160,6 +1186,10 @@ class CastingSession:
             return self._clone_locked(voice_id, profile)
         draft = self._draft(voice_id, self.store.load(voice_id))
         prompt = audiobook_voice_prompt(_validate_text(draft["prompt"], "Voice prompt", MAX_PROMPT_CHARACTERS))
+        from .character_notes import character_notes, description_conflict
+        conflict = description_conflict(prompt, character_notes(self.bundle, self.config).get(voice_id))
+        if conflict:
+            self.notify(f"{voice_id}: {conflict}")
         # The voice is designed with the accent its lines will be cued with, so the recording and the cue agree.
         from .speech_traits import accent_cues, with_accent
         accented = with_accent(prompt, accent_cues(self.bundle, self.config, store=self.store).get(voice_id, ""))

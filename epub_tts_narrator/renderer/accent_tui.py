@@ -361,7 +361,7 @@ class AccentApp(CapturePrintMixin, App):
             members = group["voice_ids"]
         detail.update(text)
         sync_table(self.query_one("#members", DataTable),
-                   [(voice_id, (planner.label(voice_id), planner.entries[voice_id]["about"][:120]))
+                   [(voice_id, (planner.label(voice_id), planner.about(voice_id)[:160]))
                     for voice_id in members])
 
     def on_data_table_row_highlighted(self, event):

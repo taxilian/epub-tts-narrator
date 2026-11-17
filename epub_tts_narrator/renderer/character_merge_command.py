@@ -30,6 +30,8 @@ _VOICE_SETTINGS = {
     "voice-accents.json": ("accents", "accent cue"),
     "voice-accent-assignments.json": ("assigned_accents", "assigned accent"),
     "voice-clips.json": ("reference_clips", "reference clip count"),
+    "character-notes.json": ("character_notes", "your character notes"),
+    "voice-accent-assignment-notes.json": ("notes_sha256", "notes an accent was assigned with"),
 }
 _ALIASES = "voice-aliases.json"
 _GROUPS = "voice-accent-groups.json"

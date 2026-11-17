@@ -146,7 +146,8 @@ _REVISION_SIDECARS = {
     # A character merge drops the absorbed voice from every per-voice choice.
     "character-merge": frozenset({"audition-scripts.json", "voice-aliases.json", "voice-traits.json",
                                   "voice-accents.json", "voice-accent-assignments.json",
-                                  "voice-accent-groups.json", "voice-clips.json"}),
+                                  "voice-accent-groups.json", "voice-clips.json", "character-notes.json",
+                                  "voice-accent-assignment-notes.json"}),
 }
 
 

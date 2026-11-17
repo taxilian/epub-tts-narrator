@@ -8,7 +8,7 @@ from .analysis_progress import analysis_cache_directory
 from .attribution_review import _bounded_map
 from .pipeline import CachedRequests, fingerprint
 from .voice_contrast import contrast_findings
-from .voice_refresh_prompts import SYSTEM
+from .voice_refresh_prompts import LISTENER_NOTES, SYSTEM
 
 
 VERSION = 1
@@ -72,8 +72,14 @@ def _provider_identity(requests):
 
 def refresh_voice_descriptions(bundle, requests, *, canonical_id=lambda value: value,
                                voice_ids=None, current_prompts=None, workers=5,
-                               progress=lambda message: None):
-    """Propose validated draft descriptions; only CachedRequests may write files."""
+                               progress=lambda message: None, listener_notes=None):
+    """Propose validated draft descriptions; only CachedRequests may write files.
+
+    ``listener_notes`` ({voice_id: record}) is what a person knows about
+    characters; a voice with notes gets ``listener_notes`` in its request
+    (and ``LISTENER_NOTES`` in its instructions), others are unchanged.
+    """
+    listener_notes = listener_notes or {}
     if type(workers) is not int or not 1 <= workers <= 5:
         raise ValueError("Voice prompt refresh workers must be between one and five")
     profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
@@ -118,11 +124,15 @@ def refresh_voice_descriptions(bundle, requests, *, canonical_id=lambda value: v
                                                      if any(voice in aliases for voice in finding["voice_ids"])]),
                       "current_prompt": prior, "source_evidence": evidence,
                       "source_fingerprint": bundle["manifest"]["source_fingerprint"]})
+        notes = next((listener_notes[voice] for voice in [target, *aliases] if listener_notes.get(voice)), None)
+        if notes:
+            tasks[-1]["listener_notes"] = deepcopy(notes)
     if tasks and requests is None:
         raise ValueError("Voice prompt refresh needs the configured analysis model")
 
     def refresh(payload, cancelled):
-        value = requests.run(SYSTEM, payload, validate_description, cancelled=cancelled)
+        system = SYSTEM + LISTENER_NOTES if "listener_notes" in payload else SYSTEM
+        value = requests.run(system, payload, validate_description, cancelled=cancelled)
         progress(f"Refreshed voice prompt: {payload['voice']['id']}")
         return payload["voice"]["id"], value
 
@@ -133,7 +143,7 @@ def refresh_voice_descriptions(bundle, requests, *, canonical_id=lambda value: v
 
 
 def refresh_bundle_prompts(bundle, config_path=None, *, canonical_id=lambda value: value,
-                           voice_ids=None, current_prompts=None, workers=5, progress=print):
+                           voice_ids=None, current_prompts=None, workers=5, progress=print, listener_notes=None):
     """Use the global analyzer configuration, never the configured speech engine."""
     from .config import load_config
     from .provider import OpenAICompatibleClient
@@ -149,4 +159,5 @@ def refresh_bundle_prompts(bundle, config_path=None, *, canonical_id=lambda valu
                               max_request_chars=settings["max_request_chars"], progress=progress)
     return refresh_voice_descriptions(
         bundle, requests, canonical_id=canonical_id, voice_ids=voice_ids,
-        current_prompts=current_prompts, workers=min(workers, 5, settings["attribution_workers"]), progress=progress)
+        current_prompts=current_prompts, workers=min(workers, 5, settings["attribution_workers"]), progress=progress,
+        listener_notes=listener_notes)

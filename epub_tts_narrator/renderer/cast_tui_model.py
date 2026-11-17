@@ -103,8 +103,9 @@ class CastFilter:
         words = self.text.casefold().split()
         if not words:
             return True
+        from .character_notes import summary
         haystack = " ".join([label(row), row["voice_id"], *row.get("characters", []),
-                             row.get("description", "")]).casefold()
+                             row.get("description", ""), summary(row.get("notes"))]).casefold()
         return all(word in haystack for word in words)
 
 
@@ -170,10 +171,19 @@ def detail_sections(row, rows, status, note):
     clip_text = f"{clips.get('count', 1)} ({'this voice' if clips.get('source') == 'voice' else 'default'})"
     if not clips.get("designer_records_several", False):
         clip_text += "; the current designer records one clip"
+    from .character_notes import description_conflict, summary
+    notes = row.get("notes") or {}
+    notes_text = summary(notes) or "(none: n adds what you know, e.g. a later name, gender or origin)"
+    if notes:
+        notes_text += {"earlier book": " (from an earlier book)", "main voice": " (the main voice's)"}.get(
+            row.get("notes_source"), "")
+    conflict = "" if derived else description_conflict(row.get("prompt", ""), notes)
     sections = [
         ("Status", status + (f" — {note}" if note else ""), ""),
         ("Voice ID", row["voice_id"], ""),
         ("Characters", ", ".join(row.get("characters", [])) or "—", ""),
+        ("Your notes", notes_text, "" if derived else "n"),
+        *([("Check", conflict, "")] if conflict else []),
         ("Clone direction" if derived else FIELDS["prompt"], row.get("prompt", ""), "e"),
         ("Analysis description", row.get("description", ""), ""),
         (FIELDS["reference_text"], row.get("reference_text", ""), "s"),
@@ -407,6 +417,34 @@ class CastController:
         return self._submit_save(f"Save {FIELDS[field].lower()} for {label(row)}",
                                  lambda: self.session.update_prompt(voice_id, **{field: value}), row)
 
+    # A person's notes about the character ------------------------------------
+
+    def notes_text(self, row):
+        """The notes as the lines a person edits (``character_notes.to_text``)."""
+        from .character_notes import to_text
+        return to_text(row.get("notes"))
+
+    def parse_notes(self, row, text):
+        """The notes record the edited text gives; ``ValueError`` saying why it cannot be saved."""
+        from .character_notes import from_text, validate_notes
+        if row.get("derived_from"):
+            raise ValueError("A changed voice shares its main voice's notes; add notes to the main voice")
+        return validate_notes(from_text(text))
+
+    def save_notes(self, row, text):
+        """Save the edited notes for this book; empty notes clear any inherited from an earlier book."""
+        record = self.parse_notes(row, text)
+        voice_id = row["voice_id"]
+        return self._submit_save(f"Save your notes for {label(row)}",
+                                 lambda: self.session.save_notes(voice_id, record), row)
+
+    def follow_notes(self, row, record, on_ready):
+        """Ask the text model to make this voice's description agree with ``record`` (its notes), for review."""
+        from .description_revision_prompts import FOLLOW_NOTES
+        if not record:
+            raise ValueError(f"{label(row)} has no notes for the description to follow")
+        return self.revise_descriptions([{**row, "notes": record}], FOLLOW_NOTES, on_ready)
+
     def share(self, row, target):
         if row["voice_id"] == target["voice_id"]:
             raise ValueError("Choose a different voice to share")
@@ -506,7 +544,7 @@ class CastController:
             raise ValueError("Type what should change in the descriptions")
         voices = [{"voice_id": row["voice_id"], "name": label(row),
                    "description": row.get("prompt") or row.get("description") or "",
-                   "accent": row.get("accent") or ""} for row in rows]
+                   "accent": row.get("accent") or "", "known": row.get("notes") or {}} for row in rows]
 
         def run():
             factory = self.requests_factory or (lambda: book_requests(

@@ -75,6 +75,12 @@ class FakeSession:
         row = next(row for row in self._rows if row["voice_id"] == voice_id)
         row.update(fields)
 
+    def save_notes(self, voice_id, record):
+        self._call("save_notes", voice_id, record)
+        row = next(row for row in self._rows if row["voice_id"] == voice_id)
+        row["notes"] = deepcopy(record)
+        return record
+
     def share_voice(self, voice_id, target_voice_id):
         self._call("share_voice", voice_id, target_voice_id)
 

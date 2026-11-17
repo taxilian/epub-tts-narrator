@@ -183,6 +183,9 @@ class CastApp(CapturePrintMixin, App):
         Binding("t", "edit('speech_traits')", "Traits", tooltip="Edit speech traits"),
         Binding("A", "edit('accent')", "Accent",
                 tooltip="Edit the accent cue said before every line in this voice (empty means none)"),
+        Binding("n", "notes", "Notes",
+                tooltip="What you know about this character (later names, gender, origin, notes): used for its "
+                        "accent and voice description"),
         Binding("d", "share", "Share", tooltip="Use another voice's recording for this voice"),
         Binding("D", "stop_sharing", "Unshare", show=False, tooltip="Stop sharing (this book's own link only)"),
         Binding("j", "merge", "Same as", show=False,
@@ -539,6 +542,41 @@ class CastApp(CapturePrintMixin, App):
                                         help_text=help_text, single_line=field == "accent",
                                         validate=lambda value: self.controller.validate_field(row, field, value)),
                          saved)
+
+    def action_notes(self):
+        row = self._require_row()
+        if row is None:
+            return
+        if row.get("derived_from"):
+            self.notify("A changed voice shares its main voice's notes; add notes to the main voice",
+                        severity="warning")
+            return
+        current = self.controller.notes_text(row)
+        help_text = ("What you know about this character, even beyond what this book has revealed so far. "
+                     "names: other or later names, comma-separated · gender · origin: where they come from · "
+                     "notes: anything else about who they are or how they sound. Used for this character's accent "
+                     "and voice description (sent to the analysis model as a description of the character, never "
+                     "to the voice designer). Empty clears notes inherited from an earlier book. "
+                     "Ctrl+S saves · Escape cancels")
+
+        def saved(text):
+            if text is None or text == current:
+                return
+            record = self._attempt(lambda: self.controller.parse_notes(row, text))
+            if record is None or self._attempt(lambda: self.controller.save_notes(row, text)) is None:
+                return
+            if record and row.get("accent_source") != "chosen":
+                self.controller.log(f"{label(row)}'s accent is reassigned with your notes: by accents BOOK, or "
+                                    "before a render when the voice is already recorded.")
+            if record and not row.get("derived_from"):
+                self._confirm("Ask the analysis model to revise this voice's description so it agrees with your "
+                              "notes? You review the proposal before anything is saved; recordings are unchanged.",
+                              lambda: self._attempt(lambda: self.controller.follow_notes(
+                                  row, record, self._revised("follow your notes"))),
+                              title="Revise the description?")
+
+        self.push_screen(TextEditScreen(f"Your notes — {label(row)}", current, help_text=help_text,
+                                        validate=lambda text: self.controller.parse_notes(row, text)), saved)
 
     def action_share(self):
         row = self._require_row()

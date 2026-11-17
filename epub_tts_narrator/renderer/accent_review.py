@@ -47,9 +47,14 @@ class AccentPlanner:
             raise ValueError(f"--instructions must contain from 1 to {assignment.MAX_NOTES} characters")
         self.explicit_guidance = instructions
         self.base_notes = instructions if instructions is not None else assignment.guidance(bundle, self.config)
-        self.entries = assignment.voice_entries(bundle, assignment.parent_bundles(self.config))
+        from .character_notes import character_notes, stale_assignments
+        self.known = character_notes(bundle, self.config)  # what a person noted about characters
+        self.entries = assignment.voice_entries(bundle, assignment.parent_bundles(self.config), self.known)
         _, self.fixed = assignment._fixed(bundle, self.config, self.entries, own_only=True)
         self.pending = [voice_id for voice_id in self.entries if voice_id not in self.fixed]
+        # Characters whose notes changed since their accent was assigned: undecided until this plan is saved.
+        stale = stale_assignments(bundle, self.config)
+        self.notes_changed = [voice_id for voice_id in self.pending if voice_id in stale]
         self.locked = self._locked()  # decided elsewhere: {voice_id: {"accent", "source", "origin"}}
         self.released = {}  # kept characters moved by hand: {voice_id: source}
         self.keep = {}
@@ -97,7 +102,8 @@ class AccentPlanner:
         Characters added since it was saved are left without an accent (``unassigned``).
         A book saved before groups were recorded shows one group per accent.
         """
-        own = assignment.assigned_accents(self.bundle, self.config, own=True)
+        # Accents whose notes changed since are shown in their groups (``notes_changed``) for review.
+        own = assignment.assigned_accents(self.bundle, self.config, own=True, current=False)
         accents = {voice_id: own[voice_id] for voice_id in self.pending if own.get(voice_id)}
         if not accents:
             return False
@@ -153,7 +159,7 @@ class AccentPlanner:
             self.bundle, self.requests(), self.pending,
             {voice_id: kept["accent"] for voice_id, kept in self.locked.items() if kept["accent"]},
             notes=self.base_notes, terms=self.terms, clues=self.clues, entries=self.entries,
-            origins=self.origins, keep=self.keep, revise=revise)
+            origins=self.origins, keep=self.keep, revise=revise, known=self.known)
         if assignment.asked_more_line(result):
             self.progress(assignment.asked_more_line(result))
         return result
@@ -185,6 +191,17 @@ class AccentPlanner:
 
     def label(self, voice_id):
         return self.entries[voice_id]["label"]
+
+    def about(self, voice_id):
+        """What the screen says about a character: a person's notes first, then the book's summary."""
+        from .character_notes import summary
+        parts = []
+        if voice_id in self.notes_changed:
+            parts.append("your notes changed since this accent was assigned")
+        if self.known.get(voice_id):
+            parts.append("your notes: " + summary(self.known[voice_id]))
+        parts.append(self.entries[voice_id]["about"])
+        return " · ".join(part for part in parts if part)
 
     def accents(self):
         return {voice_id: group["accent"] for group in self.groups for voice_id in group["voice_ids"]}

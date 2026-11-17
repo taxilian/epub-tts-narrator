@@ -107,6 +107,27 @@ class CastAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.session.calls[-1],
                              ("update_prompt", ("v-ava",), {"prompt": "A bright alto with a quick, warm laugh."}))
 
+    async def test_n_edits_a_persons_notes_and_offers_a_description_that_follows_them(self):
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await self.select(pilot, "v-ben")
+            await pilot.press("n")
+            screen = self.app.screen
+            self.assertIsInstance(screen, TextEditScreen)
+            self.assertIn("names:", screen.query_one(TextArea).text)
+            screen.query_one(TextArea).text = "names: <Zandramas>"
+            await pilot.press("ctrl+s")
+            self.assertIs(self.app.screen, screen)  # refused inline: brackets
+            screen.query_one(TextArea).text = "names: Zandramas\ngender: female\norigin: Mallorea"
+            await pilot.press("ctrl+s")
+            await self.settle(pilot)
+            self.assertIn(("save_notes", ("v-ben", {"names": ["Zandramas"], "gender": "female",
+                                                    "origin": "Mallorea"}), {}), self.session.calls)
+            self.assertIsInstance(self.app.screen, ConfirmScreen)  # revise the description to agree?
+            await pilot.press("escape")
+            await self.settle(pilot)
+            self.assertNotIsInstance(self.app.screen, ConfirmScreen)
+            self.assertIn("Zandramas", str(self.app.query_one("#detail").render()))
+
     async def test_escape_discards_an_edit(self):
         async with self.app.run_test(size=(160, 45)) as pilot:
             await self.select(pilot, "v-ava")

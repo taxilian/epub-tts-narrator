@@ -16,7 +16,7 @@ the same descriptions ask nothing new.
 
 from __future__ import annotations
 
-from .description_revision_prompts import REVISE
+from .description_revision_prompts import KNOWN, REVISE
 
 BATCH = 20  # voices per request
 
@@ -35,8 +35,11 @@ def _plain(description, limit):
 def revise(requests, voices, instructions, *, progress=lambda text: None):
     """Proposed descriptions: ``{voice_id: new description}`` for the voices the model changed.
 
-    ``voices`` are ``[{"voice_id", "name", "description", "accent"}]``;
-    unchanged voices are left out of the result.
+    ``voices`` are ``[{"voice_id", "name", "description", "accent"}]``, each
+    optionally with ``"known"``: a person's notes about the character
+    (``character_notes``), sent as a fifth field (with ``KNOWN``) only in
+    requests where some voice has notes; unchanged voices are left out of
+    the result.
     """
     from .voice_prompts import MAX_PROMPT_CHARACTERS
     instructions = " ".join(str(instructions or "").split())
@@ -49,9 +52,13 @@ def revise(requests, voices, instructions, *, progress=lambda text: None):
     for start in range(0, len(voices), BATCH):
         batch = voices[start:start + BATCH]
         ids = {f"v{index + 1}": voice for index, voice in enumerate(batch)}
+        from .character_notes import model_row
+        noted = any(voice.get("known") for voice in batch)
         payload = {"mode": "voice_description_revision", "v": 1, "instructions": instructions,
-                   "voices": [[short, voice["name"], voice["description"], voice.get("accent") or ""]
+                   "voices": [[short, voice["name"], voice["description"], voice.get("accent") or "",
+                               *([model_row(voice["known"])] if voice.get("known") else [])]
                               for short, voice in ids.items()]}
+        system = REVISE + KNOWN if noted else REVISE
 
         def validate(response, ids=ids):
             rows = response.get("d") if isinstance(response, dict) else None
@@ -71,7 +78,7 @@ def revise(requests, voices, instructions, *, progress=lambda text: None):
             return found
         if len(voices) > BATCH:
             progress(f"Revising descriptions {start + 1}–{start + len(batch)} of {len(voices)}")
-        proposals.update(requests.run(REVISE, payload, validate))
+        proposals.update(requests.run(system, payload, validate))
     current = {voice["voice_id"]: " ".join(voice["description"].split()) for voice in voices}
     return {voice_id: text for voice_id, text in proposals.items() if text != current[voice_id]}
 

@@ -30,7 +30,7 @@ import sys
 import uuid
 
 from .accent_catalog import canonical, listed, split as split_accent
-from .accent_prompts import MORE, ASSIGN, NOTES, REVISE
+from .accent_prompts import MORE, ASSIGN, KNOWN, NOTES, REVISE
 
 
 ASSIGNMENTS_FILENAME = "voice-accent-assignments.json"
@@ -73,24 +73,37 @@ def _setting():
         busy_message="Book voice accent assignments are being saved; retry after the current save")
 
 
-def assigned_accents(bundle, config, *, own=False):
-    """Each voice's assigned accent cue ("" = the model gave none), nearest book first, or this book's own."""
+def assigned_accents(bundle, config, *, own=False, current=True):
+    """Each voice's assigned accent cue ("" = the model gave none), nearest book first, or this book's own.
+
+    With ``current`` (the default) an assignment made with other character
+    notes than the voice has now (``character_notes.stale_assignments``) is
+    left out: the character's accent is undecided again.
+    """
     from .book_voice_settings import nearest_book_settings, read_book_setting
     from .book_context import resolve_book_config
     from .speech_traits import plain_accent
+    config = resolve_book_config(bundle, config)
     if own:
-        config = resolve_book_config(bundle, config)
         values = read_book_setting(_setting(), bundle, config["voices"]["series_id"])
     else:
         values = nearest_book_settings(_setting(), bundle, config)
+    if current and values:
+        from .character_notes import stale_assignments
+        stale = stale_assignments(bundle, config)
+        values = {voice_id: value for voice_id, value in values.items() if voice_id not in stale}
     # Accents saved before plain wording was required read plainly ("Received Pronunciation").
     return {voice_id: plain_accent(value) for voice_id, value in values.items()}
 
 
 def save_assignments(bundle, config, accents, *, replace=False):
+    """Save assigned accents, recording the character notes each was made with (``character_notes``)."""
     from .book_context import resolve_book_config
     from .book_voice_settings import save_book_settings
-    save_book_settings(_setting(), bundle, resolve_book_config(bundle, config), accents, replace=replace)
+    from .character_notes import character_notes, save_assignment_notes
+    config = resolve_book_config(bundle, config)
+    save_book_settings(_setting(), bundle, config, accents, replace=replace)
+    save_assignment_notes(bundle, config, list(accents), character_notes(bundle, config), replace=replace)
 
 
 def guidance(bundle, config):
@@ -261,7 +274,7 @@ def _introductions(book, names, limit):
     return found
 
 
-def voice_entries(bundle, parents=()):
+def voice_entries(bundle, parents=(), known=None):
     """What the story says about each voice that speaks.
 
     ``{voice_id: {"label", "names", "about", "intro", "line"}}``: the
@@ -273,8 +286,10 @@ def voice_entries(bundle, parents=()):
     holds further passages naming them and more of their lines, sent only
     if the model asks about them. Derived
     voices (a character's later state) are left out; they take their main
-    voice's accent.
+    voice's accent. ``known`` ({voice_id: character notes}) adds the other
+    names a person gave a character to the names its passages are found by.
     """
+    known = known or {}
     cast = bundle["cast"]
     derived = {voice["id"] for voice in cast["voices"] if isinstance(voice.get("derived_from"), dict)}
     used, spoken = set(), {}
@@ -324,6 +339,7 @@ def voice_entries(bundle, parents=()):
                 first_about = "; ".join(character.get("description", "") for character in here
                                         if character.get("description"))
             words = [name for character in here for name in [character["name"], *character.get("aliases", [])]]
+            words += (known.get(voice_id) or {}).get("names", [])
             intro += _introductions(book, words, MAX_INTRO + MORE_PASSAGES - len(intro))
             if len(intro) >= MAX_INTRO + MORE_PASSAGES:
                 break
@@ -376,7 +392,7 @@ def voice_clues(bundle, config=None, *, store=None):
 
 
 def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=frozenset(), clues=None,
-                       entries=None, origins=(), keep=None, revise=None):
+                       entries=None, origins=(), keep=None, revise=None, known=None):
     """One request assigning ``voice_ids`` around ``fixed`` ({voice_id: cue}).
 
     ``clues`` ({voice_id: (voice description, traits)}, ``voice_clues``) go
@@ -384,6 +400,9 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
     decisions: a group reusing one must keep its accent. ``keep``
     ({voice_id: cue}, voices among ``voice_ids``) must come back with exactly
     that accent, so only their grouping and reasons are asked for.
+    ``known`` ({voice_id: record}, ``character_notes``) is what a person
+    knows about some of ``voice_ids``, sent as ``known`` (with ``KNOWN``)
+    only when there is some, so requests without notes are unchanged.
     ``revise`` = (groups, instructions) asks for that plan changed as the
     person's instructions say. Returns
     {"groups": [{"origin", "accent", "why", "voice_ids", "names"}],
@@ -417,6 +436,10 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
     if keep:
         payload["keep"] = [[ids[voice_id], cue] for voice_id, cue in keep.items() if voice_id in ids]
     system = ASSIGN
+    from .character_notes import model_row
+    known_rows = [[ids[voice_id], *model_row(known[voice_id])] for voice_id in voice_ids if (known or {}).get(voice_id)]
+    if known_rows:
+        system, payload = system + KNOWN, {**payload, "known": known_rows}
     if notes:
         system, payload = system + NOTES, {**payload, "notes": notes}
     if revise is not None:
@@ -429,7 +452,8 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
 
     # Accents allowed off the list: ones already decided, and ones the person's own words name.
     decided_accents = [*fixed.values(), *(item["accent"] for item in origins), *keep.values()]
-    person = " ".join([notes or "", revise[1] if revise is not None else ""])
+    person = " ".join([notes or "", revise[1] if revise is not None else "",
+                       *(" ".join(str(item) for item in row[1:]) for row in known_rows)])
 
     def allowed(cue):
         if listed(cue) is not None or any(_same_accent(cue, other) for other in decided_accents):
@@ -535,7 +559,7 @@ def _fixed(bundle, config, entries, *, own_only=False):
     assigned = assigned_accents(bundle, config)
     if own_only:
         # Reassigning this book keeps only what earlier books decided.
-        own = assigned_accents(bundle, config, own=True)
+        own = assigned_accents(bundle, config, own=True, current=False)
         assigned = {voice_id: value for voice_id, value in assigned.items() if voice_id not in own}
     fixed = {voice_id: chosen[voice_id] or "" for voice_id in entries if voice_id in chosen}
     fixed.update({voice_id: value for voice_id, value in assigned.items()
@@ -550,7 +574,9 @@ def prepare_accents(bundle, config, config_path, *, notify=print):
     config = resolve_book_config(bundle, config)
     if not config.get("casting", {}).get("assign_accents", True):
         return None
-    entries = voice_entries(bundle, parent_bundles(config))
+    from .character_notes import character_notes
+    known = character_notes(bundle, config)
+    entries = voice_entries(bundle, parent_bundles(config), known)
     chosen, fixed = _fixed(bundle, config, entries)
     pending = [voice_id for voice_id in entries if voice_id not in fixed]
     if not pending:
@@ -570,7 +596,7 @@ def prepare_accents(bundle, config, config_path, *, notify=print):
     result = request_assignment(bundle, requests, pending, {k: v for k, v in fixed.items() if v},
                                 notes=guidance(bundle, config), terms=_book_terms(bundle),
                                 clues=voice_clues(bundle, config, store=voice_store(bundle, config)),
-                                entries=entries, origins=series_origins(bundle, config))
+                                entries=entries, origins=series_origins(bundle, config), known=known)
     save_groups(bundle, result["groups"])
     save_assignments(bundle, config, {voice_id: result["accents"].get(voice_id, "") for voice_id in pending})
     _report(result, entries, notify, series_origins(bundle, config, own=False))
@@ -626,7 +652,11 @@ def run_accents_command(bundle, config, args, config_path):
               "you ask for a revision or a new plan" + (", starting with --instructions." if args.instructions
                                                         else ".") +
               (f" {len(planner.unassigned())} character(s) added since have no accent yet."
-               if planner.unassigned() else ""))
+               if planner.unassigned() else "") +
+              (f" Your notes about {', '.join(planner.label(voice_id) for voice_id in planner.notes_changed[:6])}"
+               f"{' and others' if len(planner.notes_changed) > 6 else ''} changed since their accents were "
+               "assigned: ask for a revision to place them with your notes, or save to keep their accents."
+               if planner.notes_changed else ""))
     if screen:
         from .accent_tui import AccentApp
         from .accent_review import AccentController
