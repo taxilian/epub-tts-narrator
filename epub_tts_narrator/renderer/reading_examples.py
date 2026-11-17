@@ -16,6 +16,16 @@ chapter history at all are indexed: ordinary verified generations of their
 exact text, not repairs, joins, choices, stalls or takes that went silent.
 The nearest earlier take in book order is chosen, else the nearest later one.
 
+The choice depends only on what is saved, never on when the index was read:
+an example line usually has several passing takes on disk (each rendering of
+it under another history keeps its own), and listing order once decided
+between them, so a fresh render chose differently from the one that made a
+take, and strict history reuse rendered every later line of the voice again
+with no source change. A line whose saved takes heard an example keeps
+hearing it while it is still an example (``prefer``: the request hashes those
+takes heard, the chapter checkpoint's take first); otherwise equal candidates
+are ordered by request hash.
+
 A character keeps their voice through a series, so when the book has no such
 take, the same voice's take from an earlier book of the series is heard
 (nearest book first, ``analysis_directory.continuation_directories``; each
@@ -141,19 +151,23 @@ class ReadingExamples:
                        for item in self._candidates):
                 self._candidates.append(candidate)
 
-    def example(self, speakers, readings, *, sequence, chapter, voices_by_asset, wanted=()):
+    def example(self, speakers, readings, *, sequence, chapter, voices_by_asset, wanted=(), prefer=()):
         """A history entry from another chapter saying the most of ``readings`` right, or None.
 
         Among those, one also saying more of ``wanted`` (all the line's chosen
         readings) right comes first: a line using two chosen names needs a
         turn saying both, since a turn saying only the missing one would
-        trade away the turn saying the other.
+        trade away the turn saying the other. An equally good one the line's
+        saved takes already heard (``prefer``, request hashes) comes before
+        the rest, which are ordered by request hash, never by listing order.
         """
         from .common import read_json
         from .continuity_codes import load_codes
         from .common import digest
         readings = set(readings)
         wanted = set(wanted) | readings
+        # Earlier in ``prefer`` ranks higher; anything else ranks below it.
+        rank = {request_hash: len(prefer) - index for index, request_hash in enumerate(dict.fromkeys(prefer))}
         if not readings or sequence is None:
             return None
         scored = []
@@ -167,9 +181,10 @@ class ReadingExamples:
             # This book first, then the nearest earlier book; within a book the
             # nearest earlier take in book order, then the nearest later one.
             before = earlier_book > 0 or item["sequence"] < sequence
-            scored.append((covered, len(wanted & item["readings"]), -earlier_book, before,
-                           item["sequence"] if before else -item["sequence"], item))
-        for *_, item in sorted(scored, key=lambda row: row[:5], reverse=True):
+            scored.append((covered, len(wanted & item["readings"]), rank.get(item["request_hash"], 0),
+                           -earlier_book, before, item["sequence"] if before else -item["sequence"],
+                           str(item["request_hash"]), item))
+        for *_, item in sorted(scored, key=lambda row: row[:7], reverse=True):
             try:
                 current = read_json(item["accepted"])
                 codes = item["accepted"].parent / item["marker"]["file"]

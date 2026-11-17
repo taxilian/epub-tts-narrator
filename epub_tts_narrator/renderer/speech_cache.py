@@ -272,6 +272,46 @@ class SpeechCache:
                 return saved[1:]
         return None
 
+    def heard(self, request, *, first=None):
+        """Request hashes of the takes heard by this chunk's saved takes, most relevant first.
+
+        Same chunk, text, voice, delivery and history policy (its tolerant
+        position), whatever exact takes they heard. History composition keeps
+        an example they heard (``continuity.transaction(heard=...)``), so the
+        same saved work composes the same history on every render. ``first``
+        (a take's request hash: the one a chapter checkpoint uses) puts what
+        that take heard first; the other takes follow newest acceptance first.
+        """
+        from .continuity import POLICY, VERSION
+        if not isinstance(request, dict) or not isinstance(request.get("chunk"), dict):
+            return ()
+        try:
+            identity = self.identity(dict(request, continuity={"version": VERSION, "policy": POLICY, "takes": []}))
+        except ValueError:
+            return ()
+        position = self._position_key(identity, request)
+        if position is None:
+            return ()
+        with self.lock:
+            self._load()
+            entries = [entry for entry in (self.entries.get(key) for key in self.positions.get(position, ()))
+                       if entry is not None]
+
+        def recency(entry):
+            if entry["request_hash"] == first:
+                return (1, 0.0, entry["request_hash"])
+            try:
+                return (0, (self.work / "clips" / entry["request_hash"] / "accepted.json").stat().st_mtime,
+                        entry["request_hash"])
+            except OSError:
+                return (0, 0.0, entry["request_hash"])
+        ordered = []
+        for entry in sorted(entries, key=recency, reverse=True):
+            for take in entry["identity"]["continuity"]["takes"]:
+                if take.get("request_hash") not in ordered:
+                    ordered.append(take.get("request_hash"))
+        return tuple(ordered)
+
     def find_earlier_history(self, identity, *, request, exclude=()):
         """This chunk's accepted take that heard a since-changed earlier take.
 

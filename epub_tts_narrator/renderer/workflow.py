@@ -2252,6 +2252,19 @@ def _checkpoint_path(work, chapter):
     return Path(work) / "completed-chapters" / (chapter["id"] + ".json")
 
 
+def _saved_chapter_takes(work, chapter):
+    """Chunk ID -> request hash of the take the chapter's saved checkpoint uses (``{}`` without one)."""
+    if not isinstance(chapter.get("id"), str):
+        return {}
+    try:
+        record = read_json(regular_file(_checkpoint_path(work, chapter)))
+        return {entry["chunk_id"]: entry["request_hash"] for entry in record.get("acceptance", [])
+                if isinstance(entry, dict) and isinstance(entry.get("chunk_id"), str)
+                and isinstance(entry.get("request_hash"), str)}
+    except (ValueError, OSError, TypeError, AttributeError):
+        return {}
+
+
 def _read_checkpoint(work, chapter):
     path = _checkpoint_path(work, chapter)
     if not path.exists() and not path.is_symlink():
@@ -2288,7 +2301,10 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
         # takes of the same voice that heard it no longer match either, while
         # other voices' takes are unaffected.
         # Under tolerant history reuse an earlier take's change keeps it.
-        with continuity.transaction(request, pinnable=is_pinnable(chunk)) as bound:
+        # The examples its saved takes heard are heard again while they still
+        # are examples, so unchanged work restores on every render.
+        with continuity.transaction(request, pinnable=is_pinnable(chunk),
+                                    heard=speech_cache.heard(request, first=accepted.get("request_hash"))) as bound:
             continuity.bind(digest(speech_cache.identity(bound)))
             if not speech_cache.matches(bound, accepted, tolerate_history=tolerant):
                 return False
@@ -2618,8 +2634,13 @@ def _recheck_saved_whole_take(text, directory, request, verifier, config, *, not
 
 def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifier,
                   config, work, take_locks, take_locks_guard, *, notify, retry_budget=None,
-                  speech_cache=None, paragraph_split_available=False, continuity=None):
-    """Render one complete performance; publication and ordering stay upstream."""
+                  speech_cache=None, paragraph_split_available=False, continuity=None, saved_takes=None):
+    """Render one complete performance; publication and ordering stay upstream.
+
+    ``saved_takes`` maps chunk IDs to the take the chapter's saved checkpoint
+    uses, whose heard examples history composition keeps (``speech_cache.heard``).
+    """
+    saved_takes = saved_takes or {}
     if chunk["silent_control"]:
         return dict(chunk, wav_path=None), None
     if retry_budget is None and getattr(verifier, "speech_resolver", None) is not None:
@@ -2775,7 +2796,8 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
         from .continuity import is_pinnable
         # The chunk's source position: history never includes a later line
         # that another voice's queue accepted first.
-        with continuity.transaction(request, pinnable=is_pinnable(chunk), position=number) as bound:
+        with continuity.transaction(request, pinnable=is_pinnable(chunk), position=number,
+                                    heard=speech_cache.heard(request, first=saved_takes.get(chunk.get("chunk_id")))) as bound:
             continuity.bind(digest(speech_cache.identity(bound)))
             result = execute_take(text, generate, bound, **options)
             continuity.accept(*result, tolerate_history=tolerant_history)
@@ -2962,6 +2984,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
     from .reading_examples import for_work
     require_support(engine)
     continuity = ChapterContinuity(engine_identity, voices, examples=for_work(work))
+    saved_takes = _saved_chapter_takes(work, chapter)
     if retry_budget is None:
         # The chapter service passes a submission-bound budget; this permissive
         # default remains for direct callers such as tools and benchmarks.
@@ -2993,7 +3016,7 @@ def _render_chapter_chunks(chapter, voices, engine, engine_identity, verifier, c
                                          engine_identity, verifier, config, work, take_locks,
                                          take_locks_guard, notify=task_notify, retry_budget=retry_budget,
                                          speech_cache=speech_cache,
-                                         continuity=continuity,
+                                         continuity=continuity, saved_takes=saved_takes,
                                          paragraph_split_available=paragraph_split_available)
             if resources is not None:
                 # Every logical runner carries its chapter's resource scope

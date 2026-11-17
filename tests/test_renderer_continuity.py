@@ -660,6 +660,37 @@ class OtherChapterExampleTests(unittest.TestCase):
         from epub_tts_narrator.renderer.reading_examples import for_work
         self.assertEqual(for_work(self.root / "work").candidates(), [])
 
+    def test_unchanged_work_hears_the_same_example_however_the_index_lists_its_takes(self):
+        # Under strict reuse a line's history is part of its identity. A line
+        # used as an example often has several passing takes on disk (one per
+        # history it was rendered under); which one a fresh render picked once
+        # depended on listing order, so finished chapters rendered again with
+        # no change to anything.
+        from unittest.mock import patch
+        from epub_tts_narrator.renderer import reading_examples
+        self.config["render"]["history_reuse"] = "strict"
+        self.model = self.engine._model = NameModel()
+        self.verifier = Verifier(self.model)
+        first = self.chapter(["The road ran on.", "Ce’Nedra objected."], "ch1", 1, "b1")
+        self.render(first, 1)
+        second = self.chapter(["Garion rode ahead.", "Ce’Nedra laughed."], "ch2", 10, "b2")
+        self.render(second, 2)
+        # Chapter one's opening line changes, so its name line is rendered
+        # again under the new history: two passing takes of it are kept.
+        first[0]["spoken_text"] = first[0]["segment"]["text"] = "The road ran on and on."
+        self.render(first, 1)
+        named = [path for path in (self.root / "work" / "clips").glob("*/accepted.json")
+                 if "objected" in read_json(path)["request"]["chunk"]["spoken_text"]]
+        self.assertEqual(len(named), 2)
+        made = len(self.model.calls)
+        build = reading_examples.ReadingExamples._build
+        for order in (lambda rows: rows, lambda rows: rows[::-1]):
+            reading_examples._INDEXES.clear()  # a fresh render reads the index again
+            with patch.object(reading_examples.ReadingExamples, "_build",
+                              lambda index, order=order: order(build(index))):
+                self.render(second, 2)
+            self.assertEqual(len(self.model.calls), made)
+
 
 class ExampleChoiceTests(unittest.TestCase):
     def test_a_line_with_two_chosen_names_hears_an_example_saying_both(self):

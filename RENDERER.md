@@ -453,6 +453,18 @@ requests; there is no setting to turn it off.
   `renderer/reading_examples.py`). The index of such takes is read once per
   render, grows as takes are accepted, and is checked again before an example
   is used, so a take since retired (marked bad, misread) is never heard.
+  The example a line hears depends only on what is saved, so an unchanged
+  chapter composes the same history on every render and restores even under
+  `history_reuse = "strict"`. An example line usually keeps several passing
+  takes (one for each history it was rendered under), and which of them a
+  render picked once depended on the order the index listed them, so a fresh
+  render could pick another and strict reuse rendered every later line of
+  that voice again. Now a line whose saved takes heard an example keeps
+  hearing it while it is still one: first the example heard by the take the
+  chapter's saved checkpoint uses, then those of its other takes, newest
+  first. Otherwise equally good examples are ordered by request hash. A heard
+  example that has since been retired, or now fails the name check, is
+  replaced, and under strict the line renders again.
 - **Each voice change is its own request.** The planner groups consecutive
   chunks only for the same performer (since 2026-10-21), because speaker tags
   cannot guarantee an audible switch and transcript verification cannot detect

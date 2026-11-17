@@ -205,7 +205,8 @@ def cache_report(bundle, config, engine_identity, *, multi_speaker=True, max_exa
                                if "paragraph_turns" in chunk else
                                _speech_request(chunk, available[group[0]["voice_id"]], engine_identity,
                                                config, performer=group[0] if len(speakers) > 1 else None))
-                    with continuity.transaction(request, pinnable=is_pinnable(chunk)) as bound:
+                    with continuity.transaction(request, pinnable=is_pinnable(chunk),
+                                                heard=cache.heard(request)) as bound:
                         identity = cache.identity(bound)
                         continuity.bind(digest(identity))
                         found = cache.find(identity, request=bound)
