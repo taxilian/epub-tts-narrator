@@ -190,7 +190,7 @@ class ChapterContinuity:
         holds the most recent take that says the most of them right. When no
         take in this chapter does, it holds the same voice's take from another
         chapter that does (``examples``; ``sequence`` and ``chapter`` place the
-        line in the book; ``prefer`` names examples the line's saved takes heard).
+        line in the book; ``prefer``: takes the line's passing saved takes heard).
         """
         with self._lock:
             entries = list(self.entries)
@@ -231,8 +231,8 @@ class ChapterContinuity:
 
     @contextmanager
     def transaction(self, request, *, pinnable=True, position=None, heard=()):
-        """Compose the request's history. ``heard``: request hashes its saved takes heard (``speech_cache.heard``),
-        so an example they heard is kept while it is still one (``reading_examples``)."""
+        """Compose the request's history. ``heard``: the takes its passing saved takes heard (``speech_cache.heard``),
+        so an example they heard is heard again while it is on disk (``reading_examples.kept``)."""
         voices = request_speakers(request)
         readings = _chosen_readings(request)
         if readings and self.examples is not None:

@@ -691,6 +691,40 @@ class OtherChapterExampleTests(unittest.TestCase):
                 self.render(second, 2)
             self.assertEqual(len(self.model.calls), made)
 
+    def test_a_line_that_passed_keeps_its_example_after_the_example_is_retired(self):
+        # Retiring an example (misread under a stricter check) must not make a
+        # line that already said the name right render again, with every later
+        # line of its voice under strict reuse: it was made after exactly that
+        # audio, which is still on disk. A line needing a take never hears it,
+        # and one a person marked bad is never heard again.
+        from epub_tts_narrator.renderer import reading_examples
+        from epub_tts_narrator.renderer.take_feedback import record_verdict
+        from epub_tts_narrator.renderer.take_review import retire_acceptance
+        self.config["render"]["history_reuse"] = "strict"
+        self.model = self.engine._model = NameModel()
+        self.verifier = Verifier(self.model)
+        self.render(self.chapter(["The road ran on.", "Ce’Nedra objected."], "ch1", 1, "b1"), 1)
+        second = self.chapter(["Garion rode ahead.", "Ce’Nedra laughed."], "ch2", 10, "b2")
+        self.render(second, 2)
+        [example] = [path for path in (self.root / "work" / "clips").glob("*/accepted.json")
+                     if "objected" in read_json(path)["request"]["chunk"]["spoken_text"]]
+        record = read_json(example)
+        retire_acceptance(example.parent, record, "name-shape", {"reason": "fixture"})
+        reading_examples._INDEXES.clear()
+        made = len(self.model.calls)
+        self.render(second, 2)
+        self.assertEqual(len(self.model.calls), made)
+        # A new chapter's line, with no take yet, does not hear it (chapter two's is valid).
+        self.render(self.chapter(["Silk smiled.", "Ce’Nedra sighed."], "ch3", 20, "b3"), 3)
+        self.assertNotIn("objected", " ".join(histories(self.model)[-1]))
+        self.assertIn("laughed", " ".join(histories(self.model)[-1]))
+        # Marked bad by a person: the line that heard it renders again.
+        record_verdict(self.root / "work", record["request_hash"], {"attempt": record["attempt"], "record": record}, "bad")
+        reading_examples._INDEXES.clear()
+        made = len(self.model.calls)
+        self.render(second, 2)
+        self.assertGreater(len(self.model.calls), made)
+
 
 class ExampleChoiceTests(unittest.TestCase):
     def test_a_line_with_two_chosen_names_hears_an_example_saying_both(self):

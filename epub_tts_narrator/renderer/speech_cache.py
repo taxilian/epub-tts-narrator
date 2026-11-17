@@ -273,7 +273,7 @@ class SpeechCache:
         return None
 
     def heard(self, request, *, first=None):
-        """Request hashes of the takes heard by this chunk's saved takes, most relevant first.
+        """The takes (continuity identities) heard by this chunk's saved takes, most relevant first.
 
         Same chunk, text, voice, delivery and history policy (its tolerant
         position), whatever exact takes they heard. History composition keeps
@@ -305,11 +305,13 @@ class SpeechCache:
                         entry["request_hash"])
             except OSError:
                 return (0, 0.0, entry["request_hash"])
-        ordered = []
+        ordered, seen = [], set()
         for entry in sorted(entries, key=recency, reverse=True):
             for take in entry["identity"]["continuity"]["takes"]:
-                if take.get("request_hash") not in ordered:
-                    ordered.append(take.get("request_hash"))
+                key = (take.get("request_hash"), take.get("audio_sha256"))
+                if key not in seen:
+                    seen.add(key)
+                    ordered.append(dict(take))
         return tuple(ordered)
 
     def find_earlier_history(self, identity, *, request, exclude=()):

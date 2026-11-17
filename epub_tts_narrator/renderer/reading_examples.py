@@ -21,10 +21,15 @@ an example line usually has several passing takes on disk (each rendering of
 it under another history keeps its own), and listing order once decided
 between them, so a fresh render chose differently from the one that made a
 take, and strict history reuse rendered every later line of the voice again
-with no source change. A line whose saved takes heard an example keeps
-hearing it while it is still an example (``prefer``: the request hashes those
-takes heard, the chapter checkpoint's take first); otherwise equal candidates
-are ordered by request hash.
+with no source change. A line whose saved takes passed keeps hearing the
+example they heard (``prefer``: those takes' heard history, the chapter
+checkpoint's take first) while its sound and codes are still on disk, even
+when the example has since been retired or judged a misreading, unless a
+person marked it bad: the line's take was made after exactly that audio and
+already said the name right, which is all an example is for, and a new
+example would make strict history reuse render it and every later line of
+its voice again. A line needing a new take hears only valid examples, equal
+ones ordered by request hash.
 
 A character keeps their voice through a series, so when the book has no such
 take, the same voice's take from an earlier book of the series is heard
@@ -73,6 +78,7 @@ class ReadingExamples:
     def __init__(self, work):
         self.work = Path(work)
         self._candidates = None
+        self._series = None
         self._lock = threading.Lock()
 
     @staticmethod
@@ -151,23 +157,87 @@ class ReadingExamples:
                        for item in self._candidates):
                 self._candidates.append(candidate)
 
+    def kept(self, identity, speakers, readings, *, chapter, voices_by_asset):
+        """The history entry for an example a line's saved take heard (``identity``), while it is on disk; else None.
+
+        Found by its request hash and exact sound and codes in this book's or
+        an earlier book's takes, retired or not (a take's attempt records and
+        codes are never renamed); never one a person marked bad, never one of
+        the line's own chapter in this book, never another voice.
+        """
+        from .common import digest, read_json
+        from .continuity import _chosen_readings, request_speakers
+        from .continuity_codes import load_codes
+        from .take_feedback import judged_bad_audio
+        if not isinstance(identity, dict) or not isinstance(identity.get("request_hash"), str):
+            return None
+        request_hash, audio = identity["request_hash"], identity.get("audio_sha256")
+        if len(request_hash) != 64 or not all(c in "0123456789abcdef" for c in request_hash):
+            return None
+        for distance, work in enumerate(self._works()):
+            folders = [work / "clips" / request_hash, *(work / "clips").glob(f"*/parts/{request_hash}")]
+            for folder in folders:
+                if not folder.is_dir() or folder.is_symlink():
+                    continue
+                for path in sorted(folder.glob("*.json")):
+                    if path.name.endswith(".codes.json") or path.is_symlink():
+                        continue
+                    try:
+                        record = read_json(path)
+                    except (ValueError, OSError):
+                        continue
+                    marker = (record.get("engine_metadata") or {}).get("continuity_codes") if isinstance(record, dict) else None
+                    if (not isinstance(marker, dict) or record.get("audio_sha256") != audio
+                            or record.get("request_hash") != request_hash
+                            or marker.get("sha256") != identity.get("codes_sha256")
+                            or not isinstance(record.get("request"), dict)):
+                        continue
+                    try:
+                        voices = sorted(request_speakers(record["request"]))
+                        if (not set(voices) <= set(speakers) or (not distance and _chapter(record["request"]) == chapter)
+                                or not all(asset in voices_by_asset for asset in marker.get("speakers", []))
+                                or audio in judged_bad_audio(folder)):
+                            return None
+                        named = frozenset(_chosen_readings(record["request"]))
+                        if not set(readings) & named:
+                            return None
+                        codes = folder / marker["file"]
+                        load_codes(codes, marker)
+                    except (ValueError, OSError, KeyError, TypeError):
+                        return None
+                    return {"path": str(codes), "marker": dict(marker), "pinnable": False, "voices": voices,
+                            "position": None, "readings": named, "example": True,
+                            "identity": {"codes_sha256": marker["sha256"], "text_sha256": digest(marker["text"]),
+                                         "speakers": list(marker["speakers"]), "request_hash": request_hash,
+                                         "audio_sha256": audio}}
+        return None
+
+    def _works(self):
+        with self._lock:
+            if self._series is None:
+                self._series = [self.work, *self._earlier_works()]
+            return list(self._series)
+
     def example(self, speakers, readings, *, sequence, chapter, voices_by_asset, wanted=(), prefer=()):
         """A history entry from another chapter saying the most of ``readings`` right, or None.
 
         Among those, one also saying more of ``wanted`` (all the line's chosen
         readings) right comes first: a line using two chosen names needs a
         turn saying both, since a turn saying only the missing one would
-        trade away the turn saying the other. An equally good one the line's
-        saved takes already heard (``prefer``, request hashes) comes before
-        the rest, which are ordered by request hash, never by listing order.
+        trade away the turn saying the other. Equal ones are ordered by
+        request hash, never by listing order. An example the line's passing
+        saved takes heard (``prefer``: continuity take identities, most
+        relevant first) is heard again while it is on disk (``kept``).
         """
+        for identity in prefer:
+            kept = self.kept(identity, speakers, readings, chapter=chapter, voices_by_asset=voices_by_asset)
+            if kept is not None:
+                return kept
         from .common import read_json
         from .continuity_codes import load_codes
         from .common import digest
         readings = set(readings)
         wanted = set(wanted) | readings
-        # Earlier in ``prefer`` ranks higher; anything else ranks below it.
-        rank = {request_hash: len(prefer) - index for index, request_hash in enumerate(dict.fromkeys(prefer))}
         if not readings or sequence is None:
             return None
         scored = []
@@ -181,10 +251,9 @@ class ReadingExamples:
             # This book first, then the nearest earlier book; within a book the
             # nearest earlier take in book order, then the nearest later one.
             before = earlier_book > 0 or item["sequence"] < sequence
-            scored.append((covered, len(wanted & item["readings"]), rank.get(item["request_hash"], 0),
-                           -earlier_book, before, item["sequence"] if before else -item["sequence"],
-                           str(item["request_hash"]), item))
-        for *_, item in sorted(scored, key=lambda row: row[:7], reverse=True):
+            scored.append((covered, len(wanted & item["readings"]), -earlier_book, before,
+                           item["sequence"] if before else -item["sequence"], str(item["request_hash"]), item))
+        for *_, item in sorted(scored, key=lambda row: row[:6], reverse=True):
             try:
                 current = read_json(item["accepted"])
                 codes = item["accepted"].parent / item["marker"]["file"]
