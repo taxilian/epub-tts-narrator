@@ -137,6 +137,42 @@ class VerdictStoreTests(unittest.TestCase):
         self.assertTrue(first[0]["ok"])
 
 
+class ConfirmedSoundTests(unittest.TestCase):
+    def test_a_take_a_person_marked_good_teaches_exactly_the_sound_it_was_heard_saying(self):
+        import tempfile
+        from pathlib import Path
+        from epub_tts_narrator.renderer.common import write_json
+        from epub_tts_narrator.renderer.take_feedback import record_verdict
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        work = Path(temporary.name) / "work"
+        text = "Then Marendra nodded."
+        words = [{"word": "Then", "start": 0.0, "end": 0.2}, {"word": "Marendra", "start": 0.2, "end": 0.6},
+                 {"word": "nodded.", "start": 0.6, "end": 0.9}]
+        report = {"passed": True, "expected_text": text, "words": words}
+        control = performance(text, "Marendra", READING)
+
+        def heard_as(sound, folder):
+            folder.mkdir(parents=True, exist_ok=True)
+            with mock.patch.object(name_phonemes, "phones", return_value=sound.split()):
+                return verdicts(folder / "take.wav", report, control)
+        listened = work / "clips" / ("a" * 64)
+        [first] = heard_as("m ə ɹ eɪ n d ɹ ə", listened)
+        self.assertFalse(first["ok"])
+        record = {"attempt": 1, "audio_sha256": "s" * 64,
+                  "report": dict(report, passed=False, name_phonemes={"version": 4, "words": [first]})}
+        write_json(listened / "attempt-001.json", record)
+        record_verdict(work, "a" * 64, {"attempt": 1, "record": record}, "good")
+        # The same sound in another take is now said right; any other sound is judged as before.
+        [again] = heard_as("ð ɛ n m ə ɹ eɪ n d ɹ ə n ɑː", work / "clips" / ("b" * 64))
+        self.assertEqual((again["ok"], again.get("confirmed")), (True, True))
+        [other] = heard_as("m ə ɹ iː n d ɹ ə", work / "clips" / ("c" * 64))
+        self.assertFalse(other["ok"])
+        # Outside that book's render work nothing is confirmed.
+        [elsewhere] = heard_as("m ə ɹ eɪ n d ɹ ə", Path(temporary.name) / "other" / "clips" / ("d" * 64))
+        self.assertFalse(elsewhere["ok"])
+
+
 class CommandScopeTests(unittest.TestCase):
     def test_a_command_never_leaves_the_phoneme_check_on_for_what_runs_next(self):
         from epub_tts_narrator.renderer import cli

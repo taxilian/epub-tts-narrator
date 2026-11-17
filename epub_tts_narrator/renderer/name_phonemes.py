@@ -32,6 +32,12 @@ languages: tone digits, stray periods and aspiration marks are dropped, an
 r-coloured vowel is a vowel and an R, and a syllabic L is a vowel and an L
 (``_normalize``).
 
+A person's ear decides over the model's: when they mark a take good
+(``take_feedback``) that this check heard saying a name differently, the
+exact phones heard for that name (``core``) count as said right for that
+reading in that book from then on (``confirmed``). Only that exact sound is
+accepted; a take heard saying it any other way is judged as before.
+
 Verdicts heard from a saved take's audio (``judge``) are kept in its render
 work's ``name-phoneme-verdicts.jsonl`` (one appended line per take), keyed by the take's audio, request and
 word timings and this module's ``VERSION``, so a sweep of a book's takes
@@ -157,9 +163,20 @@ def _normalize(phones):
 
 def cost(reading, phones):
     """The cheapest alignment of ``reading`` (CMU) inside ``phones`` (eSpeak), free at both ends of ``phones``."""
+    return _align(reading, phones)[0]
+
+
+def core(reading, phones):
+    """The heard phones the cheapest alignment of ``reading`` covers, as a tuple (the name as heard)."""
+    _, start, end = _align(reading, phones)
+    return tuple(_normalize(phones)[start:end])
+
+
+def _align(reading, phones):
+    """``(cost, start, end)``: the cheapest alignment and the stretch of normalized ``phones`` it covers."""
     targets = _targets(reading)
     if not targets:
-        return 0.0
+        return 0.0, 0, 0
     phones = _normalize(phones)
     count = len(targets)
 
@@ -208,21 +225,24 @@ def cost(reading, phones):
         return _is_vowel(phone[:1]) and (not stressed or phone[:1] in _KINDS[symbol] or phone[:2] in _KINDS[symbol])
     rows, cols = count, len(phones)
     big = float("inf")
-    # table[i][j]: cost of aligning targets[:i] ending at phones[:j]; a free start anywhere in phones.
-    table = [[0.0] * (cols + 1)] + [[big] * (cols + 1) for _ in range(rows)]
+    # table[i][j]: (cost, start) of aligning targets[:i] ending at phones[:j];
+    # a free start anywhere in phones, remembered to name the stretch heard.
+    table = [[(0.0, j) for j in range(cols + 1)]] + [[(big, 0)] * (cols + 1) for _ in range(rows)]
     for i in range(1, rows + 1):
-        table[i][0] = table[i - 1][0] + drop(i - 1)
+        table[i][0] = (table[i - 1][0][0] + drop(i - 1), 0)
         for j in range(1, cols + 1):
-            best = min(table[i - 1][j - 1] + substitute(i - 1, phones[j - 1]),
-                       table[i - 1][j] + drop(i - 1),
-                       table[i][j - 1] + extra(phones[j - 1]))
+            options = [(table[i - 1][j - 1][0] + substitute(i - 1, phones[j - 1]), table[i - 1][j - 1][1]),
+                       (table[i - 1][j][0] + drop(i - 1), table[i - 1][j][1]),
+                       (table[i][j - 1][0] + extra(phones[j - 1]), table[i][j - 1][1])]
             if glides(i - 1, phones[j - 1]):
-                best = min(best, table[i - 2][j - 1])
+                options.append(table[i - 2][j - 1])
             if phones[j - 1] == "ɹ" and base(i - 1) == "ER" and j >= 2:
                 # The R of an r-coloured ER vowel, written after it ("d ɔ ɹ n").
-                best = min(best, table[i][j - 1])
-            table[i][j] = best
-    return round(min(table[rows]), 2)
+                options.append(table[i][j - 1])
+            table[i][j] = min(options, key=lambda option: option[0])
+    end = min(range(cols + 1), key=lambda j: table[rows][j][0])
+    spent, start = table[rows][end]
+    return round(spent, 2), start, end
 
 
 def configure(directory):
@@ -340,7 +360,7 @@ def verdicts(path, report, performance):
             # said, so it is not called a misreading.
             verdict.update(ok=True, uncertain=True)
         results.append(verdict)
-    return results
+    return _confirm(results, _work_of(Path(path).parent))
 
 
 def _foreign(heard):
@@ -354,6 +374,62 @@ def _foreign(heard):
             if not _is_vowel(token) and token not in consonants:
                 return True
     return False
+
+
+_CONFIRMED = {}
+
+
+def confirmed(work):
+    """``{reading key: {phones}}`` a person heard said right in this render work (takes they marked good)."""
+    if work is None:
+        return {}
+    work = Path(work)
+    path = work / "take-feedback.json"
+    try:
+        stamp = path.stat().st_mtime_ns if path.is_file() else None
+    except OSError:
+        stamp = None
+    with _STORE_LOCK:
+        cached = _CONFIRMED.get(work)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+    found = {}
+    if stamp is not None:
+        from .common import read_json
+        from .take_feedback import clip_folder, load
+        for entry in load(work)["takes"].values():
+            if entry.get("verdict") != "good" or not isinstance(entry.get("request_hash"), str):
+                continue
+            folder = clip_folder(work, entry["request_hash"])
+            attempt = entry.get("attempt")
+            if folder is None or type(attempt) is not int:
+                continue
+            try:
+                record = read_json(folder / f"attempt-{attempt:03d}.json")
+            except (ValueError, OSError):
+                continue
+            if record.get("audio_sha256") != entry.get("audio_sha256"):
+                continue
+            for word in ((record.get("report") or {}).get("name_phonemes") or {}).get("words") or []:
+                if isinstance(word, dict) and isinstance(word.get("key"), str) and isinstance(word.get("heard"), str):
+                    found.setdefault(word["key"], set()).add(core(word["key"], word["heard"].split()))
+    with _STORE_LOCK:
+        _CONFIRMED[work] = (stamp, found)
+    return found
+
+
+def _confirm(words, work):
+    """``words`` with readings heard exactly as a person confirmed them marked said right."""
+    sounds = confirmed(work)
+    if not sounds or not words:
+        return words
+    result = []
+    for word in words:
+        if (isinstance(word, dict) and not word.get("ok") and word.get("key") in sounds
+                and core(word["key"], str(word.get("heard", "")).split()) in sounds[word["key"]]):
+            word = dict(word, ok=True, confirmed=True)
+        result.append(word)
+    return result
 
 
 def saved(report):
@@ -441,7 +517,7 @@ def judge(record, directory):
     report = record.get("report") or {}
     words = saved(report)
     if words is not None:
-        return words
+        return _confirm(words, _work_of(directory))
     if not available():
         return None
     from .name_shape import _readings
@@ -463,7 +539,7 @@ def judge(record, directory):
         with _STORE_LOCK:
             kept = store["entries"].get(key)
         if isinstance(kept, list):
-            return kept
+            return _confirm(kept, work)
     found = verdicts(path, report, performance)
     if store is not None:
         with _STORE_LOCK:
