@@ -292,6 +292,19 @@ class CastingSessionNotesTests(unittest.TestCase):
         self.assertEqual(accents.planner.bundle["directory"], bundle["directory"])
         self.assertEqual(accents.planner.known, {voice_id: ZANDRAMAS})
         self.assertIn(voice_id, accents.planner.pending)
+        # Each capitalized name (and a later name from the notes) is listed with how it is said.
+        from epub_tts_narrator.name_pronunciations import save_definition
+        save_definition(directory, "Zandramas", "Z AE2 N D R AA1 M AH0 S", status="confirmed", source="manual")
+        row = next(row for row in session.rows() if row["voice_id"] == voice_id)
+        self.assertEqual(row["pronunciations"]["Zandramas"], "Z AE2 N D R AA1 M AH0 S")
+        # An ordinary dictionary word (the fixture's "Mara") is listed only once it has a reading.
+        from epub_tts_narrator.name_pronunciations import in_dictionary
+        name = bundle["cast"]["characters"][0]["name"].split()[0]
+        self.assertTrue(in_dictionary(name))
+        self.assertNotIn(name, row["pronunciations"])
+        save_definition(directory, name, "M AA1 R AH0", status="confirmed", source="manual")
+        row = next(row for row in session.rows() if row["voice_id"] == voice_id)
+        self.assertEqual(row["pronunciations"][name], "M AA1 R AH0")
 
 
 if __name__ == "__main__":

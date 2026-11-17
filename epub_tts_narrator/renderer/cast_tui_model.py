@@ -183,6 +183,8 @@ def detail_sections(row, rows, status, note):
         ("Voice ID", row["voice_id"], ""),
         ("Characters", ", ".join(row.get("characters", [])) or "—", ""),
         ("Your notes", notes_text, "" if derived else "n"),
+        ("Pronunciations", "; ".join(f"{word}: {reading}" for word, reading in (row.get("pronunciations") or {}).items())
+         or "(no names to pronounce: w types a word)", "w"),
         *([("Check", conflict, "")] if conflict else []),
         ("Clone direction" if derived else FIELDS["prompt"], row.get("prompt", ""), "e"),
         ("Analysis description", row.get("description", ""), ""),
@@ -594,6 +596,52 @@ class CastController:
                 jobs.append(self.save_field(row, "prompt", text))
         return jobs
 
+    # Generating many voices at once (only when the person asks) ------------------
+
+    def bulk_rows(self, scope, voice_ids=()):
+        """The rows a bulk generation covers: ``missing`` (no voice and no takes), ``untaken`` (no
+        accepted take), or ``chosen`` (``voice_ids``, in cast order)."""
+        if scope == "missing":
+            return [row for row in self._rows if row.get("selected") is None and not row.get("candidates")
+                    and not row.get("regeneration")]
+        if scope == "untaken":
+            return [row for row in self._rows if row.get("selected") is None and not row.get("regeneration")]
+        if scope == "chosen":
+            wanted = set(voice_ids)
+            return [row for row in self._rows if row["voice_id"] in wanted]
+        raise ValueError("Unknown bulk generation scope")
+
+    def undecided_accents(self, rows):
+        """The labels of ``rows`` whose accent nobody has decided, which cannot be designed yet."""
+        bundle = getattr(self.session, "bundle", None)
+        if not isinstance(bundle, dict):
+            return []
+        from . import accent_readiness
+        missing = set(accent_readiness.undecided(bundle, self.session.config,
+                                                 [row["voice_id"] for row in rows if not row.get("derived_from")]))
+        return [label(row) for row in rows if row["voice_id"] in missing]
+
+    def _require_accents(self, rows):
+        names = self.undecided_accents(rows)
+        if names:
+            shown = ", ".join(names[:6]) + (f" and {len(names) - 6} more" if len(names) > 6 else "")
+            raise ValueError(f"Decide accents first: {shown} {'has' if len(names) == 1 else 'have'} no accent yet, "
+                             "and each voice is designed with its accent. Press v to review the accent plan.")
+
+    def bulk_generate(self, scope, voice_ids=(), designer="local"):
+        """Generate the scope's voices: one queued job per voice (``untaken`` reuses saved takes first)."""
+        rows = self.bulk_rows(scope, voice_ids)
+        if not rows:
+            raise ValueError({"missing": "Every voice already has a voice or takes",
+                              "untaken": "Every voice already has an accepted take",
+                              "chosen": "Choose at least one voice"}[scope])
+        self._require_accents(rows)
+        if scope == "untaken":
+            return [self.prepare_pending()]
+        jobs = [self.regenerate(row, designer) for row in rows]
+        self.log(f"Queued {len(jobs)} voice generation(s) {DESIGNERS[designer]}.")
+        return jobs
+
     def prepare_pending(self):
         """Prepare every voice without an accepted take, reusing saved takes first."""
         pending = [row for row in self._rows if row.get("selected") is None and not row.get("regeneration")]
@@ -621,13 +669,40 @@ class CastController:
                                 lambda: _prepare_playback_samples(self.player, self.session.rows(), self.log))
 
     def startup(self):
-        """The line menu's opening work, as visible jobs: drafts, pending voices, playback."""
+        """Opening work, as visible jobs: drafts and playback copies. No voice is generated until asked.
+
+        Voices are designed with their accents, so a person settles accents
+        (v) before generating (g for one voice, B for many).
+        """
         prepare = getattr(self.session, "prepare_samples", None)
         if callable(prepare):
             self.jobs.submit("Save default voice drafts", prepare)
         self.refresh()
-        self.prepare_pending()
+        missing = sum(row.get("selected") is None for row in self._rows)
+        if missing:
+            self.log(f"{missing} voice(s) have no accepted take. Nothing is generated until you ask: review accents "
+                     "first (v), then g generates one voice and B generates many.")
         self.prepare_playback()
+
+    # Pronunciations of the cast's names -------------------------------------------
+
+    def pronounce_command(self, row, word):
+        """The ``pronounce`` command for ``word`` in this voice (``argv``), run with the cast screen suspended."""
+        import sys
+        from ..name_pronunciations import name_key
+        word = " ".join(str(word or "").split())
+        if not word:
+            raise ValueError("Type the word to pronounce")
+        name_key(word)  # One word as written, e.g. Zandramas or Ce'Nedra.
+        bundle = getattr(self.session, "bundle", None) or {}
+        if "directory" not in bundle:
+            raise ValueError("This cast has no book directory to save pronunciations in")
+        argv = [sys.executable, "-m", "epub_tts_narrator.renderer", "pronounce", str(bundle["directory"]), word]
+        if row.get("selected") is not None:
+            argv += ["--voice-id", row["voice_id"]]  # The test sentence in this character's voice.
+        if self.config_path:
+            argv += ["--config", str(self.config_path)]
+        return argv
 
     def retry(self, job_id):
         return self.jobs.retry(job_id)

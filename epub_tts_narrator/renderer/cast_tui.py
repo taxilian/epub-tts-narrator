@@ -17,7 +17,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, Footer, Header, Input, Label, SelectionList, Static
 
 from epub_tts_narrator.tui_widgets import (
-    BASE_CSS, CapturePrintMixin, ChoiceScreen, VimKeysMixin, ConfirmScreen, DetailScreen, Dialog, JobsTable, KeysScreen, MessageLog, TextEditScreen, highlighted_key, sync_table,
+    BASE_CSS, CapturePrintMixin, ChoiceScreen, MultiChoiceScreen, VimKeysMixin, ConfirmScreen, DetailScreen, Dialog, JobsTable, KeysScreen, MessageLog, TextEditScreen, highlighted_key, sync_table,
 )
 
 from . import playback_speed
@@ -197,8 +197,11 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
                 tooltip="Type how descriptions should change; the model revises them for you to review"),
         Binding("r", "refresh_prompt", "Rewrite", show=False,
                 tooltip="Rewrite the description and script with the analysis model"),
-        Binding("M", "prepare_missing", "All missing", show=False,
-                tooltip="Prepare every voice without an accepted take"),
+        Binding("B,M", "bulk", "Bulk",
+                tooltip="Generate many voices: every one without a voice, every one without an accepted take, "
+                        "or the ones you choose (accents must be decided first)"),
+        Binding("w", "pronounce", "Pronounce",
+                tooltip="Choose how one of this character's names is said (opens pronounce for it)"),
         Binding("R", "retry", "Retry", tooltip="Retry a failed job (highlighted in Jobs, else this voice's last)"),
         Binding("X", "cancel_job", "Cancel",
                 tooltip="Cancel a queued job (highlighted in Jobs, else this voice's queued jobs)"),
@@ -710,8 +713,116 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
                 pass  # The screen closed before the reply arrived.
         return ready
 
-    def action_prepare_missing(self):
-        self._attempt(lambda: self.controller.prepare_pending() or self.notify("Every voice has a take"))
+    # Many voices at once --------------------------------------------------------
+
+    def _designers(self):
+        default = (getattr(self.controller.session, "config", {}).get("voice_design") or {}).get("type")
+        order = ["gemini", "local", "elevenlabs"] if default == "gemini" else ["local", "gemini", "elevenlabs"]
+        return [(name, f"Generate {DESIGNERS[name]}") for name in order]
+
+    def action_bulk(self):
+        controller = self.controller
+        missing, untaken = controller.bulk_rows("missing"), controller.bulk_rows("untaken")
+        scopes = [("missing", f"Every voice with no voice yet ({len(missing)})"),
+                  ("untaken", f"Every voice without an accepted take ({len(untaken)}); saved verified takes are "
+                              "used first"),
+                  ("chosen", "Voices I choose…")]
+
+        def scoped(scope):
+            if scope is None:
+                return
+            if scope == "chosen":
+                options = [(row["voice_id"], f"{label(row)} — {status}") for row, status, _ in controller.visible()]
+                self.push_screen(MultiChoiceScreen("Generate which voices?", options,
+                                                   help_text="Space marks voices · Enter generates the marked ones "
+                                                             "(or the highlighted one) · Escape cancels"),
+                                 lambda chosen: chosen and self._bulk_designer("chosen", chosen))
+            else:
+                self._bulk_designer(scope, ())
+        self.push_screen(ChoiceScreen("Generate many voices", scopes, filterable=False), scoped)
+
+    def _bulk_designer(self, scope, voice_ids):
+        controller = self.controller
+        rows = self._attempt(lambda: controller.bulk_rows(scope, voice_ids))
+        if not rows:
+            if rows is not None:
+                self.notify("No voice to generate there", severity="warning")
+            return
+        undecided = controller.undecided_accents(rows)
+        if undecided:
+            self.notify(f"Decide accents first ({len(undecided)} without one): press v", severity="warning")
+            controller.log(f"Not generated: {', '.join(undecided[:8])} {'has' if len(undecided) == 1 else 'have'} "
+                           "no accent yet. Press v to review the accent plan, then generate.", "warning")
+            return
+        if scope == "untaken":
+            self._confirm(f"Prepare {len(rows)} voice(s) without an accepted take? Saved verified takes are used "
+                          "first; the rest are generated with the default designer.",
+                          lambda: self._attempt(lambda: controller.bulk_generate(scope)),
+                          title="Generate many voices?")
+            return
+
+        def chosen(designer):
+            if designer is None:
+                return
+            replaced = [label(row) for row in rows if row.get("selected") is not None]
+            warning = (f" The accepted take of {len(replaced)} of them ({', '.join(replaced[:4])}"
+                       f"{'…' if len(replaced) > 4 else ''}) is replaced by the new one; old takes stay."
+                       if replaced else "")
+            self._confirm(f"Generate {len(rows)} voice(s) {DESIGNERS[designer]}?{warning}",
+                          lambda: self._attempt(lambda: controller.bulk_generate(scope, voice_ids, designer)),
+                          title="Generate many voices?")
+        self.push_screen(ChoiceScreen(f"Generate {len(rows)} voice(s) with", self._designers(), filterable=False),
+                         chosen)
+
+    # Pronunciations ---------------------------------------------------------------
+
+    TYPE_WORD = "\0type"
+
+    def action_pronounce(self):
+        row = self._require_row()
+        if row is None:
+            return
+        options = [(word, f"{word} — {reading}") for word, reading in (row.get("pronunciations") or {}).items()]
+        options.append((self.TYPE_WORD, "Another word…"))
+
+        def chosen(word):
+            if word is None:
+                return
+            if word == self.TYPE_WORD:
+                self.push_screen(TextEditScreen("Which word?", "", single_line=True,
+                                                help_text="One word as the book writes it, e.g. Zandramas. "
+                                                          "Enter opens it · Escape cancels",
+                                                validate=lambda text: self.controller.pronounce_command(row, text)),
+                                 lambda text: text and self._pronounce(row, text))
+            else:
+                self._pronounce(row, word)
+        self.push_screen(ChoiceScreen(f"Pronounce a name of {label(row)}", options, filterable=False), chosen)
+
+    def _pronounce(self, row, word):
+        argv = self._attempt(lambda: self.controller.pronounce_command(row, word))
+        if argv is None:
+            return
+        self.controller.log(f"Opening pronounce for {word}; the cast comes back when it closes.")
+        code = self.run_external(argv)
+        self.controller.log(f"Pronounce for {word} closed" + ("." if code == 0 else f" (exit code {code})."),
+                            "info" if code in (0, 2) else "error")
+        self._schedule_reload()
+
+    def run_external(self, argv):
+        """Run a command on the real terminal with this screen suspended; its exit code."""
+        import subprocess
+        with self.suspend():
+            code = subprocess.run(argv, check=False).returncode
+            if code not in (0, 2):
+                # Keep its error on screen until read. sys.stdin may be the screen's dialog bridge, so ask the terminal.
+                try:
+                    with open("/dev/tty", "r+") as terminal:
+                        terminal.write(f"\n{argv[3]} exited with code {code}. Press Enter to return to the cast… ")
+                        terminal.flush()
+                        terminal.readline()
+                except (OSError, KeyboardInterrupt):
+                    pass
+        return code
 
     def action_retry(self):
         jobs = self.query_one("#jobs", JobsTable)

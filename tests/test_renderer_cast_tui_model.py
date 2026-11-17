@@ -192,11 +192,48 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.failures(), [])
         self.assertEqual(self.session.calls[-1], ("regenerate", ("v-eli",), {"voice_designer": "gemini"}))
 
-    def test_startup_prepares_only_voices_without_an_accepted_take(self):
+    def test_startup_generates_no_voice_and_says_how_to(self):
         self.controller.startup()
         self.settle()
-        self.assertEqual(self.session.calls[0][0], "prepare_samples")
-        self.assertEqual(self.session.calls[1], ("ensure_ready_many", (["v-ben", "v-cole"],), {}))
+        self.assertEqual([call[0] for call in self.session.calls], ["prepare_samples"])
+        self.assertTrue(any("Nothing is generated until you ask" in text for _, _, text in self.controller.messages))
+
+    def test_bulk_generation_covers_missing_untaken_or_chosen_voices(self):
+        self.assertEqual([row["voice_id"] for row in self.controller.bulk_rows("missing")], ["v-ben"])
+        self.assertEqual([row["voice_id"] for row in self.controller.bulk_rows("untaken")], ["v-ben", "v-cole"])
+        self.controller.bulk_generate("untaken")
+        self.settle()
+        self.assertEqual(self.session.calls[-1], ("ensure_ready_many", (["v-ben", "v-cole"],), {}))
+        self.controller.bulk_generate("chosen", ["v-cole", "v-ava"], "gemini")
+        self.settle()
+        regenerated = [call for call in self.session.calls if call[0] == "regenerate"]
+        self.assertEqual(regenerated, [("regenerate", ("v-ava",), {"voice_designer": "gemini"}),
+                                       ("regenerate", ("v-cole",), {"voice_designer": "gemini"})])
+        with self.assertRaisesRegex(ValueError, "Choose at least one"):
+            self.controller.bulk_generate("chosen", [])
+
+    def test_bulk_generation_waits_for_accents(self):
+        from unittest.mock import patch
+        self.session.bundle = {"directory": "/book", "cast": {}, "source": {}}
+        with patch("epub_tts_narrator.renderer.accent_readiness.undecided", return_value=["v-ben"]):
+            with self.assertRaisesRegex(ValueError, "Decide accents first: Ben has no accent yet.*Press v"):
+                self.controller.bulk_generate("missing", designer="local")
+        self.assertFalse(any(call[0] == "regenerate" for call in self.session.calls))
+
+    def test_a_names_pronunciation_is_shown_and_opens_pronounce_in_that_voice(self):
+        import sys
+        ava = dict(self.row("v-ava"), pronunciations={"Ava": "AA1 V AH0", "Quill": "engine default"})
+        sections = {title: (value, key) for title, value, key in self.controller.details(ava)}
+        self.assertEqual(sections["Pronunciations"], ("Ava: AA1 V AH0; Quill: engine default", "w"))
+        self.session.bundle = {"directory": "/books/one"}
+        self.controller.config_path = "/config/epub-tts-narrator.toml"
+        self.assertEqual(self.controller.pronounce_command(ava, "Quill"),
+                         [sys.executable, "-m", "epub_tts_narrator.renderer", "pronounce", "/books/one", "Quill",
+                          "--voice-id", "v-ava", "--config", "/config/epub-tts-narrator.toml"])
+        # A voice without a recording lets pronounce choose the voice that says the name most.
+        self.assertNotIn("--voice-id", self.controller.pronounce_command(self.row("v-ben"), "Ben"))
+        with self.assertRaises(ValueError):
+            self.controller.pronounce_command(ava, "two words")
 
     def test_regeneration_warns_about_shared_inherited_and_accepted_voices(self):
         self.assertIn("Fay", self.controller.regenerate_warning(self.row("v-ava")))

@@ -142,6 +142,44 @@ class CastAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(bindings["J"], "merge")
             self.assertEqual(bindings["g"], "generate")  # the cast's own g keeps generating
 
+    async def test_b_generates_the_voices_you_choose_after_confirming(self):
+        from epub_tts_narrator.tui_widgets import MultiChoiceScreen
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await pilot.press("B")
+            await pilot.pause()
+            self.assertIsInstance(self.app.screen, ChoiceScreen)
+            self.app.screen.dismiss("chosen")
+            await pilot.pause()
+            self.assertIsInstance(self.app.screen, MultiChoiceScreen)
+            self.app.screen.dismiss(["v-ben", "v-cole"])
+            await pilot.pause()
+            self.assertIsInstance(self.app.screen, ChoiceScreen)  # which designer
+            self.app.screen.dismiss("local")
+            await pilot.pause()
+            self.assertIsInstance(self.app.screen, ConfirmScreen)
+            self.assertEqual([call[0] for call in self.session.calls], [])  # nothing before confirming
+            await pilot.press("y")
+            await self.settle(pilot)
+            self.assertEqual([call for call in self.session.calls if call[0] == "regenerate"],
+                             [("regenerate", ("v-ben",), {"voice_designer": "local"}),
+                              ("regenerate", ("v-cole",), {"voice_designer": "local"})])
+
+    async def test_w_opens_pronounce_for_one_of_the_characters_names(self):
+        self.session._rows[0]["pronunciations"] = {"Ava": "engine default"}
+        self.session.bundle = {"directory": "/books/one"}
+        ran = []
+        self.app.run_external = lambda argv: ran.append(argv) or 0
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await self.select(pilot, "v-ava")
+            self.assertIn("Ava: engine default", str(self.app.query_one("#detail").render()))
+            await pilot.press("w")
+            await pilot.pause()
+            self.assertIsInstance(self.app.screen, ChoiceScreen)
+            self.app.screen.dismiss("Ava")
+            await self.settle(pilot)
+            self.assertEqual(ran[0][3:6], ["pronounce", "/books/one", "Ava"])
+            self.assertIn("--voice-id", ran[0])
+
     async def test_escape_discards_an_edit(self):
         async with self.app.run_test(size=(160, 45)) as pilot:
             await self.select(pilot, "v-ava")

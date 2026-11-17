@@ -42,6 +42,61 @@ def _validate_text(value, label, limit):
     return value
 
 
+_WORD = re.compile(r"[^\W\d_][\w'’\-‐‑]*")
+
+
+def _name_words(names):
+    """The capitalized words of a character's names and aliases, each once (``Ce'Nedra``, ``Tor-Vell``)."""
+    from ..name_pronunciations import name_key
+    words = {}
+    for name in names:
+        for match in _WORD.finditer(name or ""):
+            word = match.group().strip("'’-‐‑")
+            if not word[:1].isupper():
+                continue  # "the shape", "cowled": ordinary words keep the engine's reading
+            try:
+                key = name_key(word)
+            except ValueError:
+                continue
+            words.setdefault(key, word)
+    return list(words.values())
+
+
+def _name_readings(directory):
+    """``reading(word)``: how ``pronounce`` says a word in this book (confirmed, a draft, or the default)."""
+    from ..name_pronunciations import describe_reading, effective_definitions, load_local, name_key, reading_of
+    try:
+        definitions, drafts = effective_definitions(directory), load_local(directory)["drafts"]
+    except (OSError, ValueError) as error:
+        return lambda word: f"unreadable ({error})"
+
+    def reading(word):
+        key = name_key(word)
+        if key in definitions:
+            origin = " (from an earlier book)" if definitions[key]["inherited"] else ""
+            return describe_reading(reading_of(definitions[key])) + origin
+        if key in drafts:
+            return f"draft {describe_reading(reading_of(drafts[key]))}, not confirmed"
+        return "engine default"
+    return reading
+
+
+def _pronunciations(words, readings):
+    """{word: how it is said} for the words worth choosing a reading for.
+
+    A word with a reading already is always listed; otherwise ordinary
+    dictionary words in a title or epithet ("The", "Princess", "Old") are left
+    out, and invented names ("Zandramas", "Garath") are listed.
+    """
+    from ..name_pronunciations import in_dictionary
+    listed = {}
+    for word in words:
+        reading = readings(word)
+        if reading != "engine default" or not in_dictionary(word):
+            listed[word] = reading
+    return listed
+
+
 def speaking_voices(bundle):
     """The voice IDs with at least one line in this book, or None when the bundle carries no chapter rows.
 
@@ -428,6 +483,7 @@ class CastingSession:
         from .character_notes import character_notes, own_character_notes
         notes = character_notes(self.bundle, self.config)
         own_notes = own_character_notes(self.bundle, self.config)
+        readings = _name_readings(self.bundle["directory"])
         from .config import designer_records_several_clips
         from .voice_clip_counts import clip_choice, clip_overrides
         clip_counts = clip_overrides(self.bundle, self.config)
@@ -508,6 +564,11 @@ class CastingSession:
                 "accent_suggestion": suggest_accent(draft.get("prompt") or profile["description"]),
                 # A person's own knowledge of the character (character_notes.py); a changed voice uses its main voice's.
                 "notes": deepcopy(notes.get(voice_id) or notes.get((derived or {}).get("voice_id")) or {}),
+                # How each of the character's names is said (``pronounce``), for the cast screen's w.
+                "pronunciations": _pronunciations(_name_words(
+                    [name for character in cast["characters"] if character.get("voice_id") == voice_id
+                     for name in [character["name"], *character.get("aliases", [])]]
+                    + (notes.get(voice_id) or {}).get("names", [])), readings),
                 "notes_source": ("" if not (notes.get(voice_id) or notes.get((derived or {}).get("voice_id")))
                                  else "main voice" if voice_id not in notes
                                  else "this book" if voice_id in own_notes else "earlier book"),
