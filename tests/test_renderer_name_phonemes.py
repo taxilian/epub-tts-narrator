@@ -10,6 +10,19 @@ from test_renderer_name_shape import performance
 READING = "M AH0 R EH1 N D R AH0"  # muh-REN-druh
 
 
+def hearing(heard):
+    """Stand in for the recognizer hearing ``heard`` in any window, evenly timed across it when asked."""
+    sounds = heard.split() if isinstance(heard, str) else list(heard)
+
+    def phones(path, start=None, end=None, *, timed=False):
+        if not timed:
+            return list(sounds)
+        start, end = (0.0, 1.0) if start is None else (start, end)
+        step = (end - start) / max(1, len(sounds))
+        return [(phone, round(start + (index + 0.5) * step, 3)) for index, phone in enumerate(sounds)]
+    return mock.patch.object(name_phonemes, "phones", side_effect=phones)
+
+
 def said_right(reading, heard):
     return cost(reading, heard.split()) < MISREAD_COST
 
@@ -81,33 +94,64 @@ class VerdictTests(unittest.TestCase):
     def report(self, words):
         return {"passed": True, "expected_text": self.TEXT, "transcript": " Marendra nodded.", "words": words}
 
+    @staticmethod
+    def listened(heard):
+        """A ``phones`` stand-in: ``heard[(start, end)]`` is ``[(phone, seconds), ...]``."""
+        def phones(path, start=None, end=None, *, timed=False):
+            found = heard[(start, end)]
+            return found if timed else [phone for phone, _ in found]
+        return mock.patch.object(name_phonemes, "phones", side_effect=phones)
+
+    @staticmethod
+    def timed(text, start, step=0.06):
+        return [(phone, round(start + index * step, 3)) for index, phone in enumerate(text.split())]
+
     def test_a_name_clipped_by_its_word_timings_is_heard_again_with_its_neighbours(self):
+        # Said from 0.0 to 0.5 s, its timings end it at 0.3 s.
         words = [{"word": "Marendra", "start": 0.0, "end": 0.3}, {"word": "nodded.", "start": 0.6, "end": 0.9}]
-        heard = {(0.0, 0.3): ["n"], (0.0, 0.9): "m ə ɹ ɛ n d ɹ ə n ɑː d ᵻ d".split()}
-        with mock.patch.object(name_phonemes, "phones", side_effect=lambda path, start=None, end=None: heard[(start, end)]):
+        heard = {(0.0, 0.3): [("n", 0.2)], (0.0, 0.9): self.timed("m ə ɹ ɛ n d ɹ ə n ɑː d ᵻ d", 0.0)}
+        with self.listened(heard):
             found = verdicts("take.wav", self.report(words), performance(self.TEXT, "Marendra", READING))
         self.assertEqual([(item["text"], item["ok"]) for item in found], [("Marendra", True)])
 
     def test_a_misread_name_stays_misread_with_its_neighbours(self):
         words = [{"word": "Marendra", "start": 0.0, "end": 0.3}, {"word": "nodded.", "start": 0.6, "end": 0.9}]
-        heard = {(0.0, 0.3): "m ə ɹ iː n d ɹ ə".split(), (0.0, 0.9): "m ə ɹ iː n d ɹ ə n ɑː d ᵻ d".split()}
-        with mock.patch.object(name_phonemes, "phones", side_effect=lambda path, start=None, end=None: heard[(start, end)]):
+        heard = {(0.0, 0.3): self.timed("m ə ɹ iː n d ɹ ə", 0.0, 0.04),
+                 (0.0, 0.9): self.timed("m ə ɹ iː n d ɹ ə n ɑː d ᵻ d", 0.0)}
+        with self.listened(heard):
             found = verdicts("take.wav", self.report(words), performance(self.TEXT, "Marendra", READING))
         self.assertEqual([(item["ok"], item["heard"]) for item in found], [(False, "m ə ɹ iː n d ɹ ə")])
+
+    def test_neighbouring_words_never_stand_in_for_the_name(self):
+        # "the gray city of Riva, he sent" said as RAY-vuh: in the wider
+        # window R IY V AH matched "-ty of" (ɾ i ʌ v), half of it before the
+        # name; only the name's own sounds may decide (times as heard).
+        text = "The gray city of Riva, he sent for them."
+        words = [{"word": "city", "start": 7.0, "end": 7.34}, {"word": "of", "start": 7.34, "end": 7.54},
+                 {"word": "Riva,", "start": 7.54, "end": 7.84}, {"word": "he", "start": 8.2, "end": 8.52}]
+        report = {"passed": True, "expected_text": text, "words": words}
+        heard = {(7.54, 7.84): [("v", 7.52), ("ɹ", 7.585), ("eɪ", 7.646), ("v", 7.788), ("ə", 7.83)],
+                 (7.34, 8.52): [("ɪ", 7.261), ("ɾ", 7.321), ("i", 7.342), ("ʌ", 7.423), ("v", 7.504),
+                                ("ɹ", 7.585), ("eɪ", 7.646), ("v", 7.788), ("ɐ", 7.829), ("h", 8.457),
+                                ("iː", 8.498), ("s", 8.579)]}
+        with self.listened(heard):
+            [found] = verdicts("take.wav", report, performance(text, "Riva", "R IY1 V AH0"))
+        self.assertFalse(found["ok"])
+        self.assertEqual(found["heard"], "v ɹ eɪ v ə")
 
     def test_a_name_heard_in_another_languages_sounds_is_uncertain_not_misread(self):
         words = [{"word": "Marendra?", "start": 0.0, "end": 0.4}]
         report = dict(self.report(words), expected_text="Marendra?")
-        with mock.patch.object(name_phonemes, "phones", return_value="x ai5 tɕh iou2".split()):
+        with hearing("x ai5 tɕh iou2"):
             [found] = verdicts("take.wav", report, performance("Marendra?", "Marendra", READING))
         self.assertTrue(found["ok"])
         self.assertTrue(found["uncertain"])
-        with mock.patch.object(name_phonemes, "phones", return_value="m ə ɹ iː n d ɹ ə".split()):
+        with hearing("m ə ɹ iː n d ɹ ə"):
             [found] = verdicts("take.wav", report, performance("Marendra?", "Marendra", READING))
         self.assertFalse(found["ok"])
 
     def test_without_word_timings_the_whole_take_is_searched(self):
-        with mock.patch.object(name_phonemes, "phones", return_value="m ə ɹ ɛ n d ɹ ə n ɑː d ᵻ d".split()) as heard:
+        with hearing("m ə ɹ ɛ n d ɹ ə n ɑː d ᵻ d") as heard:
             found = verdicts("take.wav", self.report([]), performance(self.TEXT, "Marendra", READING))
         heard.assert_called_once_with("take.wav")
         self.assertTrue(found[0]["ok"])
@@ -132,7 +176,7 @@ class VerdictStoreTests(unittest.TestCase):
         self.addCleanup(name_phonemes._STORES.clear)
         with mock.patch.object(name_phonemes, "available", return_value=True), \
                 mock.patch("epub_tts_narrator.renderer.stored_audio.audio_present", return_value=True), \
-                mock.patch.object(name_phonemes, "phones", return_value=heard) as listened:
+                hearing(heard) as listened:
             first = judge(record, folder)
             self.assertEqual(judge(record, folder), first)
             self.assertEqual(listened.call_count, 1)
@@ -164,7 +208,7 @@ class ConfirmedSoundTests(unittest.TestCase):
 
         def heard_as(sound, folder):
             folder.mkdir(parents=True, exist_ok=True)
-            with mock.patch.object(name_phonemes, "phones", return_value=sound.split()):
+            with hearing(sound):
                 return verdicts(folder / "take.wav", report, control)
         listened = work / "clips" / ("a" * 64)
         [first] = heard_as("m ə ɹ eɪ n d ɹ ə", listened)

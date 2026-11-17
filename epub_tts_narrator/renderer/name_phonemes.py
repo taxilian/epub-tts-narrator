@@ -16,6 +16,10 @@ reading's vowel kind (``_KINDS``: "eh" is not "ay" or "ee"); an unstressed
 vowel may be any vowel. A stressed vowel missing or of another kind is a
 misreading on its own, as is a consonant missing from the middle of the name.
 Sounds around the name (the neighbouring words in the clip) cost nothing.
+When the name's own timed words do not hold it, the window widens by a word
+on each side (word timings can clip a name), but a match there counts only
+when most of the sounds it matched were heard while the name was said
+(``on_the_name``): the neighbours never stand in for the name.
 
 Regular variation in English speech is not a misreading: front vowels merge
 before an R ("Mary", "marry", "merry"), as do the back vowels ("lore",
@@ -58,14 +62,15 @@ import threading
 
 # Verdicts' identity: saved verdicts and the verdict store are read only
 # under this version, so any change to how a name is heard bumps it.
-VERSION = 5
+VERSION = 6
 # Bumped only when the check may fail a take it passed before: it names the
 # check in validation keys and in the sweep of takes in use, so a change that
 # only accepts more never re-verifies or re-sweeps a book. (3: an R written
 # twice is one sound. 4: ER without its R, a nasal or breath beside a vowel,
 # another language's sounds are uncertain. Strictness 3: a secondary-stressed
-# vowel may not cross to the other side of the mouth.)
-STRICTNESS = 3
+# vowel may not cross to the other side of the mouth. Strictness 4: the wider
+# window counts only a match heard mostly while the name was said.)
+STRICTNESS = 4
 MODEL_DIRECTORY = None  # set by configure()
 MISREAD_COST = 1.0
 PAD_SECONDS = 0.12
@@ -152,9 +157,14 @@ def _is_vowel(phone):
 
 def _normalize(phones):
     """The recognizer's tokens as English phones (see the module notes)."""
+    return [phone for phone, _ in _normalize_sources(phones)]
+
+
+def _normalize_sources(phones):
+    """``_normalize`` with, for each English phone, the index of the recognizer token it came from."""
     import re
     out = []
-    for phone in phones:
+    for source, phone in enumerate(phones):
         phone = re.sub(r"[0-9.]+$", "", phone)
         if not phone:
             continue
@@ -163,14 +173,35 @@ def _normalize(phones):
         if phone in _R_SYMBOLS:
             phone = "ɹ"  # one R sound however it is written
         if len(phone) > 1 and phone.endswith("ɹ") and _is_vowel(phone[:-1]):
-            out += [phone[:-1], "ɹ"]
+            out += [(phone[:-1], source), ("ɹ", source)]
         elif phone in ("əl", "ɫ̩"):
-            out += ["ə", "l"]
+            out += [("ə", source), ("l", source)]
         else:
-            out.append(phone)
+            out.append((phone, source))
     # A consonant written twice in a row (an r-coloured vowel before its R) is one sound.
-    return [phone for index, phone in enumerate(out)
-            if index == 0 or phone != out[index - 1] or _is_vowel(phone)]
+    return [item for index, item in enumerate(out)
+            if index == 0 or item[0] != out[index - 1][0] or _is_vowel(item[0])]
+
+
+def on_the_name(reading, timed, start, end):
+    """Whether the cheapest alignment of ``reading`` in ``timed`` phones was heard mostly between ``start`` and ``end``.
+
+    A wider window around the name holds the neighbouring words too, and the
+    alignment is free to find the reading anywhere in it: "city of RAY-vuh"
+    matched R IY V AH in "-ty of" (ɾ i ʌ v), half of it before the name.
+    More than half of the sounds it matched must have been heard while the
+    name was said (its word timings, padded as when it is heard alone), or
+    it heard something else.
+    """
+    if not timed:
+        return False
+    phones = [phone for phone, _ in timed]
+    _, first, last = _align(reading, phones)
+    sources = [source for _, source in _normalize_sources(phones)][first:last]
+    if not sources:
+        return False
+    inside = sum(1 for source in sources if start - PAD_SECONDS <= timed[source][1] <= end + PAD_SECONDS)
+    return inside * 2 > len(sources)
 
 
 def cost(reading, phones):
@@ -295,8 +326,12 @@ def _model():
         return _MODEL
 
 
-def phones(path, start=None, end=None):
-    """eSpeak phonemes heard in ``path`` (a WAV or its stored FLAC), optionally between two times."""
+def phones(path, start=None, end=None, *, timed=False):
+    """eSpeak phonemes heard in ``path`` (a WAV or its stored FLAC), optionally between two times.
+
+    With ``timed`` each is ``(phone, seconds into the take)``: when the
+    recognizer emitted it.
+    """
     from math import gcd
     import numpy as np
     import soundfile
@@ -307,10 +342,14 @@ def phones(path, start=None, end=None):
         data, rate = soundfile.read(str(wav), dtype="float32")
     if data.ndim > 1:
         data = data.mean(axis=1)
+    offset = 0.0
     if start is not None:
-        data = data[max(0, int((start - PAD_SECONDS) * rate)):int((end + PAD_SECONDS) * rate)]
+        first = max(0, int((start - PAD_SECONDS) * rate))
+        offset = first / rate
+        data = data[first:int((end + PAD_SECONDS) * rate)]
     if not len(data):
         return []
+    seconds = len(data) / rate
     factor = gcd(16000, rate)
     clip = resample_poly(data, 16000 // factor, rate // factor).astype(np.float32)
     extractor, model, vocab, device = _model()
@@ -319,10 +358,10 @@ def phones(path, start=None, end=None):
         with torch.no_grad():
             ids = torch.argmax(model(**inputs).logits, dim=-1)[0].tolist()
     heard, last = [], None
-    for index in ids:
+    for frame, index in enumerate(ids):
         token = vocab.get(index)
         if index != last and token not in (None, "<pad>", "<s>", "</s>", "<unk>"):
-            heard.append(token)
+            heard.append((token, round(offset + frame * seconds / len(ids), 3)) if timed else token)
         last = index
     return heard
 
@@ -361,9 +400,17 @@ def verdicts(path, report, performance):
     for control, phonemes in _readings(performance):
         reading = control["phonemes"].strip()
         best = None
-        for span in _spans(report, expected_text, control):
-            heard = phones(path, *span)
-            spent = min(cost(reading, heard), cost(phonemes, heard))  # a possessive with or without its "s"
+        spans = _spans(report, expected_text, control)
+        for index, span in enumerate(spans):
+            if index == 0:
+                heard = phones(path, *span)
+                spent = min(cost(reading, heard), cost(phonemes, heard))  # a possessive with or without its "s"
+            else:
+                # The wider window counts only where it heard the name itself.
+                timed = phones(path, *span, timed=True)
+                heard = [phone for phone, _ in timed]
+                spent = min([cost(form, heard) for form in (reading, phonemes)
+                             if on_the_name(form, timed, *spans[0])] or [float("inf")])
             if best is None or spent < best[0]:
                 best = (spent, heard)
             if spent < MISREAD_COST:
