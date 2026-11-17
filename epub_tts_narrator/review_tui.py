@@ -52,6 +52,10 @@ def _audio_player(command):
     return AudioPlayer(command)
 
 
+# Vim keys the review handles like page and Home/End keys (Ctrl+D/Ctrl+U arrive as control characters).
+VIM_KEYS = {"\x04": "NPAGE", "\x15": "PPAGE", "g": "HOME", "G": "END"}
+
+
 class ReviewApp:
     """Curses-independent review state machine with receipt-bound saves."""
 
@@ -691,6 +695,21 @@ class ReviewApp:
         else:
             self._commit_speaker([role_id])
 
+    def _jump(self, key):
+        """HOME/END (vim g/G): the first or last row of the current list."""
+        far = -10 ** 9 if key == "HOME" else 10 ** 9
+        if self.view == "toc":
+            self._move_chapter(far)
+        elif self.view == "passages":
+            self._move_passage(far)
+        elif self.view == "info":
+            self.info_cursor = 0 if far < 0 else max(0, len(self._info_rows()) - 1)
+            self.info_scroll = 0 if far < 0 else self.info_scroll
+        elif self.view == "speaker" and self.speaker_options:
+            self.speaker_index = 0 if far < 0 else len(self.speaker_options) - 1
+        elif self.view == "takes" and self.takes_rows:
+            self.takes_index = 0 if far < 0 else len(self.takes_rows) - 1
+
     def handle_key(self, key, *, screen=None):
         """Apply one symbolic key and return whether the app continues running."""
         if self.view == "confirm_quit":
@@ -704,6 +723,13 @@ class ReviewApp:
             return self.running
         if self.view == "direction":
             self._handle_direction(key)
+            return self.running
+        # Vim movement (j/k are handled with UP/DOWN below): page, first/last, and h/l between a passage's clips.
+        key = VIM_KEYS.get(key, key)
+        if self.view == "takes" and key in {"h", "l"}:
+            key = "LEFT" if key == "h" else "RIGHT"
+        if key in {"HOME", "END"}:
+            self._jump(key)
             return self.running
         if self.view == "speaker":
             self._handle_speaker(key)
@@ -867,7 +893,7 @@ class ReviewApp:
             text = (f"{marker}{prefix}{row['title']}  {row['passage_count']} passages; "
                     f"{row['review_count']} review; {row['unassigned_count']} unassigned")
             screen.write(line, 0, text, _selected(index == self.toc_index))
-        self._footer(screen, "Up/Down  Enter open  I ignore/restore  H ignored  F failed  S save  Q quit")
+        self._footer(screen, "Up/Down/j/k  Enter open  I ignore/restore  H ignored  F failed  S save  Q quit")
 
     def _draw_passages(self, screen):
         height, _ = screen.size()
@@ -1075,6 +1101,7 @@ class CursesScreen:
                 self.curses.KEY_UP: "UP", self.curses.KEY_DOWN: "DOWN",
                 self.curses.KEY_LEFT: "LEFT", self.curses.KEY_RIGHT: "RIGHT",
                 self.curses.KEY_PPAGE: "PPAGE", self.curses.KEY_NPAGE: "NPAGE",
+                self.curses.KEY_HOME: "HOME", self.curses.KEY_END: "END",
                 self.curses.KEY_ENTER: "ENTER", self.curses.KEY_BACKSPACE: "BACKSPACE",
                 self.curses.KEY_F2: "F2", self.curses.KEY_F3: "F3", self.curses.KEY_F4: "F4",
                 self.curses.KEY_RESIZE: "RESIZE",

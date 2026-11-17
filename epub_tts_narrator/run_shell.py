@@ -29,7 +29,7 @@ from .run_events import EventBus
 from .run_shell_model import CHAPTER_STATES, RunModel, next_severity, plain_failure, repair_hint
 from .tui_support import prompt_streams, screen_host
 from .tui_widgets import (
-    BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, DetailScreen, KeysScreen, PromptBridge,
+    BASE_CSS, CapturePrintMixin, ChoiceScreen, VimKeysMixin, ConfirmScreen, DetailScreen, KeysScreen, PromptBridge,
     SEVERITY_STYLES, TextEditScreen, format_seconds, highlighted_key, sync_table,
 )
 
@@ -126,7 +126,7 @@ def _failure_takes_cell(counts):
     return Text(f"{rejected}, {rejected - judged} to judge", style="bold yellow")
 
 
-class RunApp(CapturePrintMixin, App):
+class RunApp(VimKeysMixin, CapturePrintMixin, App):
     """At-a-glance health, books, chapters, workers, log and errors for one command run (and its resumes)."""
 
     CSS = BASE_CSS + """

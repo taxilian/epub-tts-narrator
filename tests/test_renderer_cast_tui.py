@@ -128,6 +128,20 @@ class CastAppTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIsInstance(self.app.screen, ConfirmScreen)
             self.assertIn("Zandramas", str(self.app.query_one("#detail").render()))
 
+    async def test_j_and_k_move_through_the_voices_and_J_merges(self):
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            table = self.app.query_one("#voices", DataTable)
+            table.focus()
+            await pilot.press("j", "j", "k")
+            await pilot.pause()
+            self.assertEqual(table.cursor_row, 1)
+            await pilot.press("G")
+            await pilot.pause()
+            self.assertEqual(table.cursor_row, len(self.voice_keys()) - 1)
+            bindings = {binding.key: binding.action for binding in CastApp.BINDINGS}
+            self.assertEqual(bindings["J"], "merge")
+            self.assertEqual(bindings["g"], "generate")  # the cast's own g keeps generating
+
     async def test_escape_discards_an_edit(self):
         async with self.app.run_test(size=(160, 45)) as pilot:
             await self.select(pilot, "v-ava")

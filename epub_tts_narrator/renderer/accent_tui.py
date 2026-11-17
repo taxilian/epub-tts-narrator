@@ -20,7 +20,7 @@ from textual.widgets import DataTable, Footer, Header, OptionList, Static
 from textual.widgets.option_list import Option
 
 from epub_tts_narrator.tui_widgets import (
-    BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, JobsTable, KeysScreen, MessageLog, TextEditScreen,
+    BASE_CSS, CapturePrintMixin, ChoiceScreen, VimKeysMixin, ConfirmScreen, JobsTable, KeysScreen, MessageLog, TextEditScreen,
     highlighted_key, sync_table,
 )
 
@@ -566,7 +566,7 @@ class CastAccentScreen(AccentScreen):
                 for binding in AccentScreen.BINDINGS]
 
 
-class AccentApp(CapturePrintMixin, App):
+class AccentApp(VimKeysMixin, CapturePrintMixin, App):
     """``accents BOOK`` on a terminal: the accent screen as the whole app."""
 
     TITLE = "Accents"

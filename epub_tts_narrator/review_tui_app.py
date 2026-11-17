@@ -25,7 +25,7 @@ from textual.widgets import DataTable, Footer, Header, Static
 from .review_tui import _KIND_BADGES, _flat
 from .review_tui_model import palette
 from .tui_widgets import (
-    BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, KeysScreen, MessageLog, MultiChoiceScreen,
+    BASE_CSS, CapturePrintMixin, ChoiceScreen, VimKeysMixin, ConfirmScreen, KeysScreen, MessageLog, MultiChoiceScreen,
     TextEditScreen, highlighted_key, sync_table,
 )
 
@@ -42,7 +42,7 @@ def _severity(notice, ok=True):
     return "info" if ok else "warning"
 
 
-class ReviewTuiApp(CapturePrintMixin, App):
+class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
     """Browse and edit a published book. ``controller`` owns all state; this class only displays it."""
 
     TITLE = "Review"

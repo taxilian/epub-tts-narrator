@@ -14,6 +14,8 @@ optional extra, and nothing else in the package imports it at module level.
 * ``MessageLog`` — a scrolling, severity-colored log fed from ``(time,
   severity, text)`` records.
 * ``JobsTable`` — a ``DataTable`` showing a ``tui_jobs.JobQueue``.
+* ``VimKeysMixin`` — for an ``App``: vim movement keys do what the arrow,
+  page and home/end keys do wherever the person is.
 """
 
 from __future__ import annotations
@@ -127,7 +129,86 @@ def format_seconds(seconds):
     return f"{hours:d}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes:02d}:{seconds:02d}"
 
 
-class Dialog(ModalScreen):
+# Vim movement: each key does what the key it stands for does in the focused list, table or pane.
+VIM_KEYS = {"j": "down", "k": "up", "h": "left", "l": "right", "ctrl+d": "pagedown", "ctrl+u": "pageup",
+            "g": "top", "G": "bottom"}
+_VIM_ACTION = "vim_key"
+
+
+def _binding_keys(binding):
+    return {key.strip() for key in binding.key.split(",")}
+
+
+class VimKeysMixin:
+    """For an ``App`` or a screen: j/k/h/l, Ctrl+D/Ctrl+U and g/G move like the arrow, page and home/end keys.
+
+    Apps get it, and so does every ``Dialog``, because Textual checks no app
+    bindings under a modal screen. A vim key the class (or a base) already
+    binds keeps that meaning (the cast's ``g`` generates; a takes dialog's
+    ``g`` marks a take good), and a subclass's own key replaces an
+    inherited vim key; a screen that binds or handles a key itself still
+    wins over the app's, because app bindings are checked last; and text
+    boxes still type the letters. Each key is replayed as the key it stands for, so it
+    does exactly what that key does where the person is: the cursor of a
+    table or list, a dialog's own up/down, or scrolling a pane. ``g``/``G``
+    go to the first/last row of a table (Ctrl+Home/End there) and the
+    top/bottom of a list or pane.
+    """
+
+    def __init_subclass__(cls, **kwargs):
+        own = list(cls.__dict__.get("BINDINGS", []))
+        inherited = kwargs.get("inherit_bindings", True)
+        classes = cls.__mro__[1:] if inherited else ()
+        taken = {key for klass in (cls, *classes) for binding in
+                 (own if klass is cls else klass.__dict__.get("BINDINGS", []))
+                 if isinstance(binding, Binding) for key in _binding_keys(binding)}
+        added = [Binding(key, f"{_VIM_ACTION}({key!r})", f"Vim {motion}", show=False)
+                 for key, motion in VIM_KEYS.items() if key not in taken]
+        if added:
+            cls.BINDINGS = [*own, *added]
+        super().__init_subclass__(**kwargs)
+
+    def action_vim_key(self, key):
+        from textual.app import App
+        app = self.app
+        motion = VIM_KEYS[key]
+        if motion in {"top", "bottom"}:
+            # A table's Home/End scroll sideways; its first/last row is Ctrl+Home/End.
+            wanted = "ctrl+home" if motion == "top" else "ctrl+end"
+            node, binds = app.focused, False
+            while node is not None and not isinstance(node, App) and not binds:
+                binds = any(wanted in _binding_keys(binding) for binding in getattr(node, "BINDINGS", [])
+                            if isinstance(binding, Binding))
+                node = node.parent
+            motion = wanted if binds else ("home" if motion == "top" else "end")
+        app.simulate_key(motion)
+
+
+def vim_help(bindings):
+    """The one key-help row for the vim keys among ``bindings`` (an app's), else None."""
+    keys = [key for binding in bindings if isinstance(binding, Binding) and binding.action.startswith(_VIM_ACTION)
+            for key in _binding_keys(binding)]
+    if not keys:
+        return None
+    names = {"j": "j/k", "k": "j/k", "h": "h/l", "l": "h/l", "ctrl+d": "Ctrl+D/U", "ctrl+u": "Ctrl+D/U",
+             "g": "g/G", "G": "g/G"}
+    shown = []
+    for key in keys:
+        if names[key] not in shown:
+            shown.append(names[key])
+    # A pair whose second key the app uses for something else is shown with only the free one.
+    free = set(keys)
+    shown = [name if all(part in free for part in _pair(name)) else next(part for part in _pair(name) if part in free)
+             for name in shown]
+    return (", ".join(_key_name(name) if "/" not in name else name for name in shown),
+            "Vim movement: down/up, left/right, page down/up, first/last (as the arrow, page and Home/End keys)")
+
+
+def _pair(name):
+    return {"j/k": ("j", "k"), "h/l": ("h", "l"), "Ctrl+D/U": ("ctrl+d", "ctrl+u"), "g/G": ("g", "G")}[name]
+
+
+class Dialog(VimKeysMixin, ModalScreen):
     """A modal screen that closes once.
 
     Two selections can reach a dialog before it closes (a held or bouncing
@@ -188,7 +269,10 @@ class KeysScreen(Dialog):
         super().__init__()
         self.title_text = title
         self.rows = []
+        bindings = list(bindings)
         for binding in bindings:
+            if binding.action.startswith(_VIM_ACTION):
+                continue  # Summed up in one row below.
             keys = ", ".join(_key_name(key) for key in binding.key.split(","))
             detail = binding.description
             if binding.tooltip and binding.tooltip != binding.description:
@@ -197,6 +281,10 @@ class KeysScreen(Dialog):
         self.rows.append(("Tab", "Move between the panels"))
 
     def compose(self) -> ComposeResult:
+        # The vim keys are the app's (``VimKeysMixin``), whichever screen's keys are listed.
+        vim = vim_help(binding for klass in type(self.app).__mro__ for binding in klass.__dict__.get("BINDINGS", []))
+        if vim is not None and vim not in self.rows:
+            self.rows.append(vim)
         text = Text()
         width = max((len(keys) for keys, _ in self.rows), default=0)
         for keys, description in self.rows:

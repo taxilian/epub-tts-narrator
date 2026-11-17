@@ -308,6 +308,32 @@ class ReviewAppTests(unittest.TestCase):
         app.handle_key("DOWN")
         app.handle_key("ENTER")
 
+    def test_vim_keys_page_and_jump_to_the_first_and_last_row(self):
+        app, _, _ = self.app(two_chapters=True)
+        app.handle_key("G")
+        self.assertEqual(app.toc_index, 1)
+        app.handle_key("g")
+        self.assertEqual(app.toc_index, 0)
+        app.handle_key("\x04")  # Ctrl+D pages down
+        self.assertEqual(app.toc_index, 1)
+        app.handle_key("\x15")  # Ctrl+U pages up
+        self.assertEqual(app.toc_index, 0)
+        app.handle_key("ENTER")
+        app.handle_key("G")
+        last = app.passage_index
+        self.assertGreater(last, 0)
+        app.handle_key("g")
+        self.assertEqual(app.passage_index, 0)
+        app.handle_key("j")
+        self.assertEqual(app.passage_index, 1)
+        # Typing a direction keeps every letter.
+        app.handle_key("ENTER")
+        app._activate_info_field("direction")
+        app.direction_buffer = ""
+        for key in "gGjk":
+            app.handle_key(key)
+        self.assertEqual(app.direction_buffer, "gGjk")
+
     def test_toc_navigation_opens_the_selected_chapter_passages(self):
         app, _, _ = self.app(two_chapters=True)
         first = FakeScreen()

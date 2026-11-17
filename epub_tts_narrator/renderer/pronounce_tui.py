@@ -23,7 +23,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Label, OptionList, SelectionList, Static
 from textual.widgets.option_list import Option
 
-from ..tui_widgets import BASE_CSS, Dialog, MessageLog, TextEditScreen
+from ..tui_widgets import BASE_CSS, Dialog, MessageLog, TextEditScreen, VimKeysMixin
 from . import playback_speed
 
 
@@ -88,7 +88,7 @@ def sentence_text(sentence, spans):
     return text
 
 
-class PronounceApp(App):
+class PronounceApp(VimKeysMixin, App):
     """Runs ``command(input_fn, output, playback_fn, observer)`` on a worker; its exit code is the result."""
 
     CSS = BASE_CSS + """

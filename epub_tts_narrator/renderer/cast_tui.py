@@ -17,7 +17,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import DataTable, Footer, Header, Input, Label, SelectionList, Static
 
 from epub_tts_narrator.tui_widgets import (
-    BASE_CSS, CapturePrintMixin, ChoiceScreen, ConfirmScreen, DetailScreen, Dialog, JobsTable, KeysScreen, MessageLog, TextEditScreen, highlighted_key, sync_table,
+    BASE_CSS, CapturePrintMixin, ChoiceScreen, VimKeysMixin, ConfirmScreen, DetailScreen, Dialog, JobsTable, KeysScreen, MessageLog, TextEditScreen, highlighted_key, sync_table,
 )
 
 from . import playback_speed
@@ -143,7 +143,7 @@ def _cut(text, width):
     return text if len(text) <= width else text[:width - 1].rstrip() + "…"
 
 
-class CastApp(CapturePrintMixin, App):
+class CastApp(VimKeysMixin, CapturePrintMixin, App):
     """The casting screen. ``controller`` owns all state; this class only displays it."""
 
     TITLE = "Cast"
@@ -190,7 +190,7 @@ class CastApp(CapturePrintMixin, App):
                 tooltip="Review the book's accent plan (as accents BOOK does); q comes back here"),
         Binding("d", "share", "Share", tooltip="Use another voice's recording for this voice"),
         Binding("D", "stop_sharing", "Unshare", show=False, tooltip="Stop sharing (this book's own link only)"),
-        Binding("j", "merge", "Same as", show=False,
+        Binding("J", "merge", "Same as", show=False,
                 tooltip="This character is the same character as another: merge the two cast entries into one"),
         Binding("c", "clips", "Clips", tooltip="Reference clip count for the next generation"),
         Binding("i", "instruct", "Instruct",
@@ -276,7 +276,12 @@ class CastApp(CapturePrintMixin, App):
         self.call_from_thread(self.render_all)
 
     def _tick(self):
-        if self.query_one("#voices", DataTable).size.width != self._fitted_width:
+        from textual.css.query import NoMatches
+        try:
+            width = self.query_one("#voices", DataTable).size.width
+        except NoMatches:
+            return  # The screen is closing; a last timer tick has nothing to draw.
+        if width != self._fitted_width:
             # The screen was resized: fit the voice table's columns to its new width.
             self.render_all()
         if self.controller.reopen and self.controller.jobs.running() is None:
@@ -802,7 +807,8 @@ class CastApp(CapturePrintMixin, App):
         self.call_from_thread(self.exit)
 
 
-_CAST_ACTIONS = {binding.action.split("(")[0] for binding in CastApp.BINDINGS}
+# The cast's own actions; vim movement keys keep moving in the accent view.
+_CAST_ACTIONS = {binding.action.split("(")[0] for binding in CastApp.BINDINGS} - {"vim_key"}
 
 
 def run_cast_tui(controller, *, title="Cast"):
