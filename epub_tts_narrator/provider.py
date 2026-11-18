@@ -10,6 +10,7 @@ import math
 import random
 import socket
 import ssl
+import threading
 import time
 import uuid
 from email.utils import parsedate_to_datetime
@@ -44,12 +45,72 @@ _RATE_LIMIT_HEADERS = {
     "X-Concurrent-Limit-Active": "concurrent_active",
     "X-Concurrent-Limit-Max": "concurrent_max",
 }
+_RATE_LIMIT_CODES = {
+    "concurrent_budget_exceeded", "tpm_uncached_exceeded", "rate_limit_exceeded", "rate_limit_error",
+    "concurrency_limit_exceeded", "tpm_limit_exceeded", "tokens_per_minute_exceeded",
+    "uncached_tpm_limit_exceeded",
+}
+RESUME_SPACING_SECONDS = 5.0  # after a rate-limit pause, requests start again this far apart
 _LOGGER = logging.getLogger(__name__)
 _DEFAULT_STREAM_OBSERVER = None
 _JSON_INSTRUCTION = (
     "Return a single JSON object only, without Markdown code fences or "
     "surrounding commentary."
 )
+
+
+def _rate_limited(failure) -> bool:
+    """A failure that says the account sent too much (a shared limit), not that this request failed."""
+    return failure.status_code == 429 or failure.code in _RATE_LIMIT_CODES
+
+
+class _RateLimitPause:
+    """One pause shared by every request a client makes, so parallel workers back off together.
+
+    When any request is told it is over a rate limit, every request waits out
+    the same pause before it is sent (or sent again), instead of each retrying
+    on its own timer and colliding with the others. Afterwards requests start
+    again ``RESUME_SPACING_SECONDS`` apart until one succeeds, so the limit is
+    not hit again at once by all of them. Without a rate limit nothing waits.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._resume_at = 0.0
+        self._next_start = 0.0
+        self._recovering = False
+
+    def pause(self, delay: float) -> float:
+        """Record a pause of ``delay`` seconds from now; return how long the caller must wait."""
+        with self._lock:
+            now = time.monotonic()
+            self._recovering = True
+            if now + delay >= self._resume_at:
+                self._resume_at = self._next_start = now + delay
+                return delay
+            return self._resume_at - now  # another request already paused for longer
+
+    def wait(self, waited_until: float = 0.0) -> float:
+        """Wait, before sending, for a pause in effect; return when the request may be sent.
+
+        ``waited_until`` is when the caller's own pause (already slept) ended.
+        """
+        with self._lock:
+            now = max(time.monotonic(), waited_until)
+            if not self._recovering and now >= self._resume_at:
+                return now
+            start = max(now, self._resume_at, self._next_start)
+            if self._recovering:
+                self._next_start = start + RESUME_SPACING_SECONDS
+        if start > now:
+            time.sleep(start - now)
+        return start
+
+    def succeeded(self, sent_at: float) -> None:
+        """A request sent at ``sent_at`` succeeded; one sent after the pause ends the slow restart."""
+        with self._lock:
+            if sent_at >= self._resume_at:
+                self._recovering = False
 
 
 class ProviderError(Exception):
@@ -270,6 +331,7 @@ class OpenAICompatibleClient:
         self.token_limit_field = token_limit_field
         self.reasoning_effort = reasoning_effort
         self.max_retries = max_retries
+        self._rate_limit_pause = _RateLimitPause()
         self.retry_initial_delay = float(retry_initial_delay)
         self.retry_max_delay = float(retry_max_delay)
         self.stall_timeout = float(stall_timeout)
@@ -398,8 +460,10 @@ class OpenAICompatibleClient:
         request_id = uuid.uuid4().hex
         self._stream_event(request_id, phase="started")
         try:
+            paused_until = 0.0
             for attempt in range(self.max_retries + 1):
                 failure = None
+                sent_at = self._rate_limit_pause.wait(paused_until)
                 try:
                     request = Request(
                         f"{self.base_url}/chat/completions", data=encoded, headers=headers, method="POST"
@@ -409,6 +473,7 @@ class OpenAICompatibleClient:
                             failure = self._http_failure(response.status, getattr(response, "headers", {}), response)
                         else:
                             raw = self._read_response(response, request_id)
+                            self._rate_limit_pause.succeeded(sent_at)
                             self._stream_event(request_id, phase="completed")
                             return raw
                 except HTTPError as error:
@@ -438,16 +503,22 @@ class OpenAICompatibleClient:
                     if failure.retry_after_seconds > self.retry_max_delay:
                         raise failure from None
                     delay = max(delay, failure.retry_after_seconds)
+                shared = _rate_limited(failure)
+                if shared:
+                    # Every request of this client waits out the same pause.
+                    delay = self._rate_limit_pause.pause(delay)
                 if failure.status_code is None:
                     _LOGGER.warning("API transient transport failure; retry %d/%d in %.1f seconds.",
                                     attempt + 1, self.max_retries, delay)
                 else:
                     limit_summary = ", ".join(f"{key}={value}" for key, value in failure.rate_limits.items())
-                    _LOGGER.warning("API HTTP %s%s%s; retry %d/%d in %.1f seconds.",
+                    _LOGGER.warning("API HTTP %s%s%s; retry %d/%d in %.1f seconds%s.",
                                     failure.status_code, f" ({failure.code})" if failure.code else "",
                                     f" [{limit_summary}]" if limit_summary else "",
-                                    attempt + 1, self.max_retries, delay)
+                                    attempt + 1, self.max_retries, delay,
+                                    " (every request waits, then they start again one at a time)" if shared else "")
                 self._stream_event(request_id, phase="retry", attempt=attempt + 1, delay=delay)
+                paused_until = time.monotonic() + delay if shared else 0.0
                 time.sleep(delay)
             raise AssertionError("Unreachable retry state")
         except BaseException:

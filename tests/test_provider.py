@@ -21,6 +21,7 @@ from epub_tts_narrator.provider import (
     OutputTruncatedError,
     ProviderError,
     _NoRedirect,
+    _RateLimitPause,
     provider_failure_summary,
     set_default_stream_observer,
 )
@@ -90,6 +91,65 @@ class SocketBackedResponse(FakeResponse):
         super().__init__(data)
         self.sock = RecordingSocket()
         self.fp = SimpleNamespace(raw=SimpleNamespace(_sock=self.sock))
+
+
+class FakeClock:
+    """``time.monotonic``/``time.sleep`` stand-ins: sleeping moves the clock on."""
+
+    def __init__(self):
+        self.now, self.sleeps = 1000.0, []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(round(seconds, 6))
+        self.now += seconds
+
+
+class RateLimitPauseTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = FakeClock()
+        for name in ("monotonic", "sleep"):
+            patcher = patch(f"epub_tts_narrator.provider.time.{name}", getattr(self.clock, name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_without_a_rate_limit_nothing_waits(self):
+        pause = _RateLimitPause()
+        for _ in range(3):
+            self.assertEqual(pause.wait(), self.clock.now)
+        self.assertEqual(self.clock.sleeps, [])
+
+    def test_every_request_waits_out_the_pause_then_they_start_again_apart(self):
+        pause = _RateLimitPause()
+        self.assertEqual(pause.pause(30), 30)
+        ended = self.clock.now + 30
+        # Another request told it is over the limit sooner waits for the same, longer pause.
+        self.assertEqual(pause.pause(10), 30)
+        first = pause.wait()  # a request that was about to be sent
+        self.assertEqual(first, ended)
+        self.clock.now = ended
+        second, third = pause.wait(), pause.wait()
+        self.assertEqual([second - ended, third - ended], [5.0, 10.0])
+        # A request sent after the pause succeeds: no more spacing.
+        pause.succeeded(first)
+        self.assertEqual(pause.wait(), self.clock.now)
+
+    def test_a_request_sent_before_the_pause_does_not_end_the_slow_restart(self):
+        pause = _RateLimitPause()
+        sent_before = pause.wait()
+        pause.pause(20)
+        pause.succeeded(sent_before)
+        pause.wait()
+        pause.wait()
+        self.assertEqual(self.clock.sleeps, [20, 5])
+
+    def test_the_request_that_slept_its_own_pause_is_sent_at_once(self):
+        pause = _RateLimitPause()
+        own_end = self.clock.now + pause.pause(12)
+        self.clock.now = own_end
+        self.assertEqual(pause.wait(own_end), own_end)
 
 
 class ProviderTests(unittest.TestCase):
@@ -286,6 +346,45 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(all(error.fp.closed for error in failures))
         self.assertIn("concurrent_budget_exceeded", " ".join(logs.output))
         self.assertNotIn("private", " ".join(logs.output))
+
+    def test_parallel_requests_of_one_client_back_off_together_from_a_rate_limit(self):
+        import threading
+        import time as real_time
+        limited, sent, lock = threading.Event(), [], threading.Lock()
+
+        def answer(request, timeout):
+            with lock:
+                sent.append((threading.current_thread().name, real_time.monotonic()))
+                first = len(sent) == 1
+            if first:
+                limited.set()
+                raise self.http_error(details={"code": "tpm_uncached_exceeded"})
+            real_time.sleep(0.5)  # a model takes a while to answer
+            return FakeResponse(json.dumps(completion()).encode())
+
+        self.opener.open.side_effect = answer
+        client = OpenAICompatibleClient("model", max_retries=2, retry_initial_delay=1, retry_max_delay=1)
+        results = []
+
+        def run(name):
+            results.append(client.complete("Analyze", {"worker": name}))
+
+        with patch("epub_tts_narrator.provider.random.uniform", return_value=0), \
+                patch("epub_tts_narrator.provider.RESUME_SPACING_SECONDS", 0.3), patch("epub_tts_narrator.provider._LOGGER"):
+            first = threading.Thread(target=run, args=("a",), name="worker-a")
+            first.start()
+            self.assertTrue(limited.wait(5))
+            paused_at = real_time.monotonic()
+            second = threading.Thread(target=run, args=("b",), name="worker-b")
+            second.start()
+            first.join(10)
+            second.join(10)
+        self.assertEqual(len(results), 2)
+        later = sorted(at for name, at in sent[1:])
+        # The second worker was not sent while the first worker's pause lasted, and the two
+        # requests after the pause started apart.
+        self.assertGreaterEqual(later[0] - paused_at, 0.9)
+        self.assertGreaterEqual(later[1] - later[0], 0.25)
 
     def test_retry_exhaustion_is_bounded_and_exposes_only_safe_metadata(self):
         self.opener.open.side_effect = [self.http_error(details={"code": "tpm_uncached_exceeded", "message": "private-key private-book"}) for _ in range(4)]
