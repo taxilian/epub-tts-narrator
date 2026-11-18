@@ -19,3 +19,11 @@ DIRECTION_CHECK = f"""You review an audiobook director's line directions. Who sp
 Input: "before"/"after" = neighbouring text for context only, "text" = numbered paragraphs (N|text) where each line is prefixed by its id and speaker, like ‹q17 Mara›; ‹q18 Mara, thought› is a thought and ‹q19 Mara, written› written text read aloud. "d" = each line's current direction ("" = none). "cues" = for some lines, the narration beside the line that says how its speaker says it: a direction must agree with it.
 A direction is {_DELIVERY}
 Return {{"q":[[qid,delivery]]}} with a corrected delivery only for lines whose current direction is wrong: it contradicts the scene or a cue, invents a feeling, volume, pace or sound the text does not support, overacts an ordinary line, or misses what the speech tag or the scene plainly shows. Leave out every line whose direction is acceptable; most are. Return {{"q":[]}} when none is wrong."""
+
+GENDER_REVIEW_VERSION = "1"
+
+GENDER_CHECK = f"""You check the gender of characters in an audiobook cast against the book's text.
+{_DATA}
+
+Each item gives an entry (name|aliases|the gender its voice was given) and numbered paragraphs (N|text) that mention it.
+{{"r":[[item_id,gender,N,quote]]}} for every item: gender "Male", "Female" or "Androgynous" as the text shows it for this character (pronouns that refer to them, words like woman or man, titles), with a short exact quote from paragraph N that shows it; or [item_id,"?"] when these paragraphs do not show it. Only the text counts; the given gender may be wrong."""

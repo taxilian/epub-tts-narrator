@@ -103,7 +103,7 @@ class SplitCheckTests(unittest.TestCase):
 
 
 class ReadingClient(NarratorClient):
-    """The narrator fixture, also answering the speaker scan and the direction review with no corrections."""
+    """The narrator fixture, also answering the rerun reviews (speakers, directions, genders) with nothing found."""
 
     def complete(self, system, payload):
         if payload.get("mode") == "attribution_review_scan":
@@ -112,6 +112,9 @@ class ReadingClient(NarratorClient):
         if payload.get("mode") == "direction_review":
             self.calls.append(deepcopy(payload))
             return {"q": []}
+        if payload.get("mode") == "gender_review":
+            self.calls.append(deepcopy(payload))
+            return {"r": [[item["id"], "?"] for item in payload["items"]]}
         return super().complete(system, payload)
 
 

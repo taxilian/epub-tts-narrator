@@ -508,6 +508,11 @@ def main(argv=None, *, in_shell=False):
             if review_cast(directory, config, args.config, provider_client, progress):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # A voice description whose gender the book (or a person's notes) contradicts is fixed.
+            from .gender_review import review_genders
+            if review_genders(directory, config, args.config, provider_client, progress):
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every paragraph's speakers and split are checked once, and again after it changes.
             from .attribution_recheck import recheck_attributions
             if recheck_attributions(directory, config, provider_client, progress):
