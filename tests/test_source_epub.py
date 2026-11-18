@@ -18,7 +18,7 @@ from epub_tts_narrator.renderer.bundle import load_bundle
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.series import link_analysis
 from epub_tts_narrator.source_epub import SOURCE_EPUB_HINT, remember_source_epub, source_epub_hint
-from shared_fixtures import make_serial_epub, repack_epub, skip_attribution_check
+from shared_fixtures import make_serial_epub, repack_epub, skip_rerun_reviews
 from test_series import fixture
 
 
@@ -31,7 +31,7 @@ class _NameFixtureClient:
 
 class SourceEpubTests(unittest.TestCase):
     def setUp(self):
-        skip_attribution_check(self)
+        skip_rerun_reviews(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from shared_fixtures import skip_attribution_check
+from shared_fixtures import skip_rerun_reviews
 from epub_tts_narrator.analysis_directory import _completed_directory
 from epub_tts_narrator.analysis_progress import CACHE_DIRNAME
 from epub_tts_narrator.audition_scripts import audition_preparation_pending
@@ -47,7 +47,7 @@ class AuditionClient(FakeClient):
 
 class AuditionAnalysisCompletionTests(unittest.TestCase):
     def setUp(self):
-        skip_attribution_check(self)
+        skip_rerun_reviews(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()

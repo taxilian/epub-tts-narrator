@@ -10,7 +10,7 @@ from epub_tts_narrator.analysis_progress import CACHE_DIRNAME
 from epub_tts_narrator.cli import main
 from epub_tts_narrator.pronunciations import discovery_pending, preparation_pending, load_pronunciations, set_pronunciation
 from epub_tts_narrator.provider import ProviderError
-from shared_fixtures import make_epub, snapshot, skip_attribution_check
+from shared_fixtures import make_epub, snapshot, skip_rerun_reviews
 from test_cli import NarrativeClient
 
 
@@ -36,7 +36,7 @@ class CandidateClient(NarrativeClient):
 
 class PronunciationWorkflowTests(unittest.TestCase):
     def setUp(self):
-        skip_attribution_check(self)
+        skip_rerun_reviews(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)

@@ -20,7 +20,7 @@ from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import write_json
 from epub_tts_narrator.series import link_analysis
 from epub_tts_narrator.source_epub import source_epub_hint
-from tests.shared_fixtures import make_serial_epub, snapshot, skip_attribution_check
+from tests.shared_fixtures import make_serial_epub, snapshot, skip_rerun_reviews
 from tests.test_book_update import CHAPTER_ONE, CHAPTER_THREE, SerialClient
 from tests.test_series import fixture
 
@@ -33,7 +33,7 @@ class AnalysisRecoveryTests(unittest.TestCase):
     config: Path = Path()
 
     def setUp(self):
-        skip_attribution_check(self)
+        skip_rerun_reviews(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()

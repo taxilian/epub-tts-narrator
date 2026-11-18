@@ -212,13 +212,15 @@ def route_mlx_takes_to_fake_generate(testcase):
         testcase.addCleanup(patcher.stop)
 
 
-def skip_attribution_check(testcase):
-    """Rerunning ``analyze BOOK`` here does not double-check attribution (``attribution_recheck``).
+def skip_rerun_reviews(testcase):
+    """Rerunning ``analyze BOOK`` here skips its reviews of a saved book (cast, speakers and splits).
 
-    For tests of other rerun behaviour whose fake models do not answer the
-    attribution scan; ``test_attribution_recheck`` tests the check itself.
+    For tests of other rerun behaviour whose fake models do not answer those
+    reviews; ``test_cast_review`` and ``test_attribution_recheck`` test them.
     """
     from unittest.mock import patch
-    patcher = patch("epub_tts_narrator.attribution_recheck.recheck_attributions", return_value=False)
-    patcher.start()
-    testcase.addCleanup(patcher.stop)
+    for target in ("epub_tts_narrator.attribution_recheck.recheck_attributions",
+                   "epub_tts_narrator.cast_review.review_cast"):
+        patcher = patch(target, return_value=False)
+        patcher.start()
+        testcase.addCleanup(patcher.stop)

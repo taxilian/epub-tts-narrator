@@ -503,6 +503,11 @@ def main(argv=None, *, in_shell=False):
                                                  document=repaired, misread=misread):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # Cast entries that are one person are merged (asked first when a voice would change).
+            from .cast_review import review_cast
+            if review_cast(directory, config, args.config, provider_client, progress):
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every paragraph's speakers and split are checked once, and again after it changes.
             from .attribution_recheck import recheck_attributions
             if recheck_attributions(directory, config, provider_client, progress):

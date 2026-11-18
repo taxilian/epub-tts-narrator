@@ -21,7 +21,7 @@ from epub_tts_narrator.cli import main, source_from
 from epub_tts_narrator.pipeline import analyze
 from epub_tts_narrator.speaker_completion import unassigned_segments
 from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
-from shared_fixtures import Terminal, make_epub, snapshot, skip_attribution_check
+from shared_fixtures import Terminal, make_epub, snapshot, skip_rerun_reviews
 from test_pipeline import FakeClient
 
 EPUB_BODY = ('<html xmlns="http://www.w3.org/1999/xhtml"><head><title>One</title></head>'
@@ -94,7 +94,7 @@ class PipelineClient(FakeClient):
 
 class AnalyzeCheckpointTests(unittest.TestCase):
     def setUp(self):
-        skip_attribution_check(self)
+        skip_rerun_reviews(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
