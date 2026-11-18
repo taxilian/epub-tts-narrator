@@ -855,7 +855,8 @@ class NarratedAnalyzeTests(unittest.TestCase):
                 self.assertEqual(row["delivery"]["direction"], direction)
                 _, compiled, _ = prepare_synthesis(row["text"], row["delivery"]["direction"],
                                                    performance=row.get("performance_controls"))
-                self.assertTrue(compiled.startswith("[soft and quiet, "))
+                # Each part of a direction is its own tag (performance_compiler.direction_tags).
+                self.assertTrue(compiled.startswith("[soft and quiet]["))
                 self.assertNotIn("whisper", compiled.casefold())
         whispered = rows['"Hush,"']
         _, compiled, _ = prepare_synthesis(whispered["text"], whispered["delivery"]["direction"],
