@@ -7,7 +7,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.attribution_recheck import recheck_attributions, unchecked_blocks
+from epub_tts_narrator.attribution_recheck import record_checks, recheck_attributions, unchecked_blocks
 from epub_tts_narrator.config import DEFAULTS
 from test_attribution_verification import AuditClient
 from test_attribution_verification_cli import AttributionCLIHarness, NoFindingAuditClient
@@ -63,6 +63,38 @@ class RecheckTests(AttributionCLIHarness):
         self.assertIn("paragraph(s) corrected", output)
         self.assertIn("revision journal", output)
         self.assertEqual(unchecked_blocks(after), [])
+
+    def added(self, document, name, *, speaks_in=None):
+        """``document`` with a person's new character ``name`` (speaking the line in ``speaks_in``)."""
+        changed = deepcopy(document)
+        character = deepcopy(changed["cast"]["characters"][0])
+        character.update(id="char_new", name=name, aliases=[], voice_id="voice_new")
+        voice = deepcopy(changed["cast"]["voices"][-1])
+        voice.update(id="voice_new")
+        role = deepcopy(next(role for role in changed["cast"]["roles"] if role.get("character_id")))
+        role.update(id="role_new", character_id="char_new", voice_id="voice_new")
+        changed["cast"]["characters"].append(character)
+        changed["cast"]["voices"].append(voice)
+        changed["cast"]["roles"].append(role)
+        if speaks_in is not None:
+            row = next(row for row in changed["segments"] if row["block_id"] == speaks_in and row["kind"] == "dialogue")
+            row.update(role_id="role_new", voice_id="voice_new")
+        return changed
+
+    def test_a_character_added_after_the_check_has_the_lines_around_it_checked_again(self):
+        self.make_book(risk=False)
+        self.check(NoFindingAuditClient())
+        document = self.analysis()
+        self.assertEqual(unchecked_blocks(document), [])
+        # Mentioned in the second paragraph only ("They left."), speaking nowhere yet.
+        self.assertEqual(unchecked_blocks(self.added(document, "Left")), ["b2"])
+        # Given a line by a person: the paragraphs around that line are checked again.
+        blocks = [block["id"] for block in document["source"]["blocks"]]
+        self.assertEqual(unchecked_blocks(self.added(document, "Quill", speaks_in="b2")), blocks)
+        # Once checked with the new character in the cast, nothing is checked again.
+        changed = self.added(document, "Quill", speaks_in="b2")
+        record_checks(changed, unchecked_blocks(changed))
+        self.assertEqual(unchecked_blocks(changed), [])
 
     def test_only_a_paragraph_whose_split_changed_is_checked_again(self):
         self.make_book(risk=False)

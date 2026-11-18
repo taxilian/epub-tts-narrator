@@ -12,6 +12,11 @@ whose text or split changed since, or every paragraph when ``VERSION`` or the
 review prompts change. The run ID comes from the saved book, so an
 interrupted rerun replays its responses instead of asking again.
 
+A character added since the last check (a person's new character, for
+instance) makes the paragraphs that mention it, and those around the lines it
+speaks, be checked again with it among the choices: its other lines may be
+its too. The record keeps the cast's character IDs for this.
+
 A paragraph with a person's speaker choice is never changed: it is sent only as context.
 """
 
@@ -48,26 +53,67 @@ def block_states(document):
         for block in document["source"]["blocks"]}
 
 
+NEARBY = 3
+
+
+def _record(document):
+    record = document["provenance"].get("attribution_checks")
+    return record if isinstance(record, dict) and record.get("version") == VERSION else {}
+
+
+def new_characters(document):
+    """Cast characters added since the last check (a person's new character, a merge's survivor stays)."""
+    known = _record(document).get("characters")
+    if known is None:
+        return []
+    return [row for row in document["cast"]["characters"] if row["id"] not in set(known)]
+
+
+def near_new_characters(document):
+    """Paragraphs that mention a newly added character or lie within ``NEARBY`` of a line they speak.
+
+    Their other lines may be theirs too, so these are checked again with the
+    new character among the choices.
+    """
+    import re
+    added = new_characters(document)
+    if not added:
+        return set()
+    blocks = document["source"]["blocks"]
+    position = {block["id"]: index for index, block in enumerate(blocks)}
+    roles = {role["id"] for role in document["cast"]["roles"] if role.get("character_id") in {row["id"] for row in added}}
+    names = [name for row in added for name in [row["name"], *row.get("aliases", [])] if name.strip()]
+    pattern = re.compile(r"\b(?:" + "|".join(re.escape(name) for name in names) + r")\b", re.I) if names else None
+    found = {block["id"] for block in blocks if pattern is not None and pattern.search(block["text"])}
+    for segment in document["segments"]:
+        if set(_role_ids(segment)) & roles:
+            index = position[segment["block_id"]]
+            found.update(block["id"] for block in blocks[max(0, index - NEARBY):index + NEARBY + 1])
+    return found
+
+
 def unchecked_blocks(document):
-    """Source-ordered IDs of paragraphs not checked at this version since they last changed.
+    """Source-ordered IDs of paragraphs to check: not checked at this version since they last changed, or
+    near a character added since the last check.
 
     A paragraph with a person's speaker choice is never one: the audit may not
     change it, so it is sent only as context around the others.
     """
-    record = document["provenance"].get("attribution_checks")
-    checked = record.get("blocks", {}) if isinstance(record, dict) and record.get("version") == VERSION else {}
+    checked = _record(document).get("blocks", {})
+    near = near_new_characters(document)
     chosen = {row["block_id"] for row in document["segments"] if row["attribution"]["basis"] == "user"}
     return [block_id for block_id, state in block_states(document).items()
-            if block_id not in chosen and checked.get(block_id) != state]
+            if block_id not in chosen and (checked.get(block_id) != state or block_id in near)]
 
 
 def record_checks(document, block_ids):
-    """Remember that ``block_ids`` were checked in the state ``document`` now has."""
-    record = document["provenance"].get("attribution_checks")
-    blocks = dict(record.get("blocks", {})) if isinstance(record, dict) and record.get("version") == VERSION else {}
+    """Remember that ``block_ids`` were checked in the state ``document`` now has, with its current cast."""
+    blocks = dict(_record(document).get("blocks", {}))
     states = block_states(document)
     blocks.update({block_id: states[block_id] for block_id in block_ids})
-    document["provenance"]["attribution_checks"] = {"version": VERSION, "blocks": dict(sorted(blocks.items()))}
+    document["provenance"]["attribution_checks"] = {
+        "version": VERSION, "characters": sorted(row["id"] for row in document["cast"]["characters"]),
+        "blocks": dict(sorted(blocks.items()))}
 
 
 def recheck_attributions(directory, config, client_factory, progress):
@@ -88,9 +134,13 @@ def recheck_attributions(directory, config, client_factory, progress):
     if not config["provider"]["model"]:
         raise ValueError("Rerunning analyze checks every paragraph's speakers; set provider.model in "
                          "epub-tts-narrator.toml, or select a TOML file with --config")
-    print(f"Checking speakers and speech splits in {len(targets)}/{total} paragraph(s) not checked since they "
-          "last changed; only corrections three reviewers agree on are applied, and your own speaker "
-          "choices are kept.")
+    added = new_characters(document)
+    if added:
+        print("New in the cast since the last check: " + ", ".join(row["name"] for row in added)
+              + "; the paragraphs that mention them and those around their lines are checked again with them "
+                "among the choices.")
+    print(f"Checking speakers and speech splits in {len(targets)}/{total} paragraph(s); only corrections three "
+          "reviewers agree on are applied, and your own speaker choices are kept.")
     with ExitStack() as stack:
         reserved = stack.enter_context(reserve_revision_scope([directory]))
         run_id = hashlib.sha256(f"analyze-attribution:{VERSION}:{original_manifest_hash}".encode()).hexdigest()[:32]
