@@ -254,6 +254,25 @@ def validate_chapter_settings(config):
 WORKER_ROLES = ("tts", "recognition")
 
 
+def without_local_renderer(config):
+    """``render --no-local``: speech is made only by the remote TTS workers; this Mac loads no TTS engine.
+
+    The local worker leaves ``[render_pool].workers`` for this run only (the
+    file is unchanged). Recognition and verification still run where they
+    are configured. A configured chapter service (``[remote_chapters].url``)
+    is already remote and is left as it is.
+    """
+    if (config.get("remote_chapters") or {}).get("url"):
+        return config
+    workers = config["render_pool"]["workers"]
+    if not any(worker["type"] != "local" and "tts" in worker.get("roles", ["tts"]) for worker in workers):
+        raise ValueError("--no-local needs a remote TTS worker: add a [[render_pool.workers]] entry with "
+                         "type = \"fish_http\" (or use --remote for the chapter service)")
+    config["render_pool"]["workers"] = [worker for worker in workers if worker["type"] != "local"]
+    validate_distributed_settings(config)
+    return config
+
+
 def validate_distributed_settings(config):
     """Validate file-only worker/server settings without importing model packages."""
     pool = config["render_pool"]

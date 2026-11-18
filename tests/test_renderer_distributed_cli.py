@@ -262,6 +262,39 @@ class DistributedCLITests(unittest.TestCase):
         engine.close.assert_called_once()
         verifier.close.assert_called_once()
 
+    def test_no_local_renders_only_on_remote_workers_without_loading_the_local_engine(self):
+        self.configure(worker_table("this-mac", "local") + worker_table("other-mac"))
+        before = self.config.read_bytes()
+        engine, verifier, store = Mock(), Mock(), Mock()
+        engine.wrap_verifier.return_value = verifier
+        store.load.return_value = {"kind": "reference"}
+        with (patch("epub_tts_narrator.renderer.cli.voice_store", return_value=store),
+              patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure") as setup,
+              patch("epub_tts_narrator.renderer.engines.create_engine") as local,
+              patch("epub_tts_narrator.renderer.pool.create_render_engine", return_value=engine) as factory,
+              patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=verifier),
+              patch("epub_tts_narrator.renderer.workflow.render", return_value={}) as render):
+            status, output, error = self.run_cli("render", "--no-local", "--chapters-only")
+        self.assertEqual(status, 0, error)
+        setup.assert_called_once_with("verification")
+        local.assert_not_called()
+        workers = factory.call_args.args[0]["render_pool"]["workers"]
+        self.assertEqual([worker["name"] for worker in workers], ["other-mac"])
+        self.assertIs(render.call_args.args[2], engine)
+        self.assertIn("other-mac (1 slot(s))", output)
+        self.assertNotIn("this-mac", output)
+        self.assertEqual(self.config.read_bytes(), before)
+
+    def test_no_local_without_a_remote_worker_is_refused_before_any_model_setup(self):
+        self.configure(worker_table("this-mac", "local"))
+        with (patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure") as setup,
+              patch("epub_tts_narrator.renderer.workflow.render") as render):
+            status, _, error = self.run_cli("render", "--no-local")
+        self.assertEqual(status, 2)
+        self.assertIn("--no-local needs a remote TTS worker", error)
+        setup.assert_not_called()
+        render.assert_not_called()
+
     def test_mixed_renderers_prepare_engine_and_verifier_and_close_both_on_failure(self):
         self.configure(worker_table("this-mac", "local") + worker_table("other-mac"))
         engine, verifier, store = Mock(), Mock(), Mock()

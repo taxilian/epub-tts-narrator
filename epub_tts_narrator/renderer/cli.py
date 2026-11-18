@@ -80,6 +80,10 @@ def parser():
             command.add_argument("--remote", action="store_true",
                                  help="Render through the managed Runpod chapter service: reuse the running "
                                       "service or bootstrap one; its idle monitor stops the compute later")
+            command.add_argument("--no-local", action="store_true",
+                                 help="Make speech only on the remote render-pool workers ([render_pool].workers "
+                                      "with type = \"fish_http\"); this Mac loads no TTS engine for this run. "
+                                      "Recognition and verification still run where configured")
         if name == "cache-report":
             command.add_argument("--max-examples", type=int, default=10,
                                  help="Maximum cache-miss examples in the read-only JSON report (default: 10)")
@@ -521,6 +525,9 @@ def _main(argv=None, *, in_shell=False):
             # dict alone does not carry its own path.
             from epub_tts_narrator.config import resolve_config_path
             config["_config_path"] = str(resolve_config_path(config_path).resolve())
+        if args.command == "render" and args.no_local:
+            from .config import without_local_renderer
+            without_local_renderer(config)
         if args.command == "compare-performance" and args.local:
             config["render_pool"]["workers"] = []
             config["remote_chapters"]["url"] = ""

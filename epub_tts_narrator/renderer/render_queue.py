@@ -327,6 +327,9 @@ def _prepare_book(book, args, *, notify=print):
     from .book_context import resolve_book_config
     from .config import load_config
     config = load_config(args.config)
+    if getattr(args, "no_local", False):
+        from .config import without_local_renderer
+        without_local_renderer(config)
     from epub_tts_narrator.config import resolve_config_path
     config["_config_path"] = str(resolve_config_path(args.config).resolve())
     bundle = load_bundle(book)
@@ -787,6 +790,9 @@ def _render_queue_command(args, config_path, *, notify,
     books = [Path(book) for book in args.bundle]
     _validate_queue_invocation(books, args)
     config = load_config(config_path)
+    if getattr(args, "no_local", False):
+        from .config import without_local_renderer
+        without_local_renderer(config)
     remote = bool(getattr(args, "remote", False)) or bool((config.get("remote_chapters") or {}).get("url"))
     if remote:
         return _run_remote_queue(books, args, config, notify=notify,
