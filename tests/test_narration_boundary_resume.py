@@ -17,7 +17,7 @@ from epub_tts_narrator.cli import export_bundle, main
 from epub_tts_narrator.contracts import readiness, validate_document
 from epub_tts_narrator.pipeline import CachedRequests, analyze, fingerprint, write_json
 from epub_tts_narrator.series import link_analysis
-from shared_fixtures import snapshot
+from shared_fixtures import snapshot, skip_attribution_check
 from test_contracts import valid_document
 from test_pipeline import FakeClient
 
@@ -67,6 +67,7 @@ class WholeParagraphClient(FakeClient):
 
 class NarrationBoundaryResumeTests(unittest.TestCase):
     def setUp(self):
+        skip_attribution_check(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()

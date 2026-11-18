@@ -11,6 +11,7 @@ from threading import Lock
 import unittest
 from unittest.mock import patch
 
+from shared_fixtures import skip_attribution_check
 from epub_tts_narrator.analysis_directory import _completed_directory, fresh_registry, publish_directory
 from epub_tts_narrator.cli import export_bundle, main
 from epub_tts_narrator.config import DEFAULTS
@@ -305,6 +306,9 @@ class DirectionRefreshCLITests(unittest.TestCase):
 
 class AnalyzeRefreshesOutdatedDirectionsTests(unittest.TestCase):
     """Rerunning analyze on a saved book directs its lines again when older rules made them."""
+
+    def setUp(self):
+        skip_attribution_check(self)
 
     def publish(self, *, refreshed):
         temporary = tempfile.TemporaryDirectory()

@@ -23,7 +23,7 @@ from epub_tts_narrator.renderer.config import load_config as renderer_config
 from epub_tts_narrator.renderer.workflow import render
 from epub_tts_narrator.series import link_analysis
 from audition_fixtures import prepare_bundle, prepare_document
-from shared_fixtures import make_epub, repack_epub
+from shared_fixtures import make_epub, repack_epub, skip_attribution_check
 from test_contracts import valid_document
 from test_epub import xhtml
 from test_renderer_workflow import FFMPEG, FFPROBE, FixtureEngine, FixtureVerifier
@@ -31,6 +31,7 @@ from test_renderer_workflow import FFMPEG, FFPROBE, FixtureEngine, FixtureVerifi
 
 class NarratorChapterTitleRefreshTests(unittest.TestCase):
     def setUp(self):
+        skip_attribution_check(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()

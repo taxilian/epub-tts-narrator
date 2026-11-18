@@ -15,7 +15,7 @@ from epub_tts_narrator.cli import main, read_json
 from epub_tts_narrator.pipeline import analyze
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.series import validate_registry
-from shared_fixtures import make_epub, snapshot
+from shared_fixtures import make_epub, snapshot, skip_attribution_check
 from test_pipeline import FakeClient
 
 
@@ -56,6 +56,7 @@ class ContinuityClient(FakeClient):
 
 class DirectoryCLITests(unittest.TestCase):
     def setUp(self):
+        skip_attribution_check(self)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)

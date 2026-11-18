@@ -21,12 +21,13 @@ from epub_tts_narrator.contracts import readiness
 from epub_tts_narrator.pipeline import write_json
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.series import link_analysis
-from shared_fixtures import Terminal
+from shared_fixtures import Terminal, skip_attribution_check
 from test_series import fixture, propose
 
 
 class AnalysisRevisionTests(unittest.TestCase):
     def setUp(self):
+        skip_attribution_check(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()

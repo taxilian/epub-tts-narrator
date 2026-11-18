@@ -32,7 +32,7 @@ from epub_tts_narrator.renderer.engines import EngineError, prepare_synthesis
 from epub_tts_narrator.renderer.name_pronunciation_tool import (book_sentences, run_pronounce_name, sentence_controls,
                                                                 test_sentence, with_plural_audition)
 from epub_tts_narrator.series import link_analysis
-from shared_fixtures import renderer_config
+from shared_fixtures import renderer_config, skip_attribution_check
 from test_contracts import valid_document
 from test_renderer_pronunciation_review import EXAMPLE, HAS_FFMPEG, PreviewEngine
 from test_renderer_workflow import write_tone
@@ -462,6 +462,7 @@ class StorageTaggingAndRenderTests(unittest.TestCase):
 
 class SeriesInheritanceTests(unittest.TestCase):
     def setUp(self):
+        skip_attribution_check(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()

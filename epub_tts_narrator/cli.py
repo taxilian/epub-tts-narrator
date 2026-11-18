@@ -495,10 +495,17 @@ def main(argv=None, *, in_shell=False):
             # A saved split made before quotation marks were read the current way
             # (mixed curly and straight marks, a paragraph opening inside speech)
             # is read again; the model-free tag repair goes first.
-            from .book_update import reread_misread_splits
-            if reread_misread_splits(directory, config, client_factory=provider_client,
-                                     speaker_judge=_speaker_judge(config), announce_cache=announce_cache,
-                                     progress=progress, strategy=args.strategy):
+            from .book_update import misread_splits, reread_misread_splits
+            repaired, misread = misread_splits(directory)
+            if misread and reread_misread_splits(directory, config, client_factory=provider_client,
+                                                 speaker_judge=_speaker_judge(config), announce_cache=announce_cache,
+                                                 progress=progress, strategy=args.strategy,
+                                                 document=repaired, misread=misread):
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # Every paragraph's speakers and split are checked once, and again after it changes.
+            from .attribution_recheck import recheck_attributions
+            if recheck_attributions(directory, config, provider_client, progress):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Directions made with older rules are directed again; typed ones stay.

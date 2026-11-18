@@ -18,7 +18,7 @@ from epub_tts_narrator.cli import main, read_json, source_from
 from epub_tts_narrator.pipeline import fingerprint
 from epub_tts_narrator.renderer.bundle import chunk_identity_fingerprint, load_bundle
 from epub_tts_narrator.series import validate_registry
-from shared_fixtures import make_serial_epub, snapshot
+from shared_fixtures import make_serial_epub, snapshot, skip_attribution_check
 from test_pipeline import FakeClient
 
 CHAPTER_ONE = ("One", ["Mara, the lighthouse keeper, said softly, “Hello.”", "They left."])
@@ -184,6 +184,7 @@ class SerialClient(FakeClient):
 
 class BookUpdateTests(unittest.TestCase):
     def setUp(self):
+        skip_attribution_check(self)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)

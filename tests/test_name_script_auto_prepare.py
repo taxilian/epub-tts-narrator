@@ -17,7 +17,7 @@ from epub_tts_narrator.pronunciations import preparation_pending, save_candidate
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.scoped_pronunciations import scope_for
 from name_script_fixtures import PHONES, book, requests
-from shared_fixtures import snapshot
+from shared_fixtures import snapshot, skip_attribution_check
 from test_cli import NarrativeClient
 
 
@@ -39,6 +39,7 @@ class AutoNameClient(NarrativeClient):
 
 class AnalysisWithoutPronunciationTests(unittest.TestCase):
     def setUp(self):
+        skip_attribution_check(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)

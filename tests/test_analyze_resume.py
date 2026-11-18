@@ -22,7 +22,7 @@ from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.series import link_analysis
 from epub_tts_narrator.speaker_completion import complete_speakers, unassigned_segments
 import test_directory_cli as directory_fixtures
-from shared_fixtures import make_epub, snapshot
+from shared_fixtures import make_epub, snapshot, skip_attribution_check
 from test_pipeline import FakeClient
 
 
@@ -97,6 +97,7 @@ class SpeakerJudge:
 
 class AnalyzeResumeTests(unittest.TestCase):
     def setUp(self):
+        skip_attribution_check(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
