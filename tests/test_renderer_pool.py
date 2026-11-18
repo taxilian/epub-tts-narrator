@@ -341,6 +341,52 @@ class PoolUnitTests(unittest.TestCase):
                         pool.check_continuity()
 
 
+    def _health_by_host(self, answers):
+        """An opener answering /health per host: a dict body, an HTTP status, or no answer at all."""
+        from urllib.error import HTTPError, URLError
+        def open_request(request, timeout):
+            if request.get_method() != "GET" or not request.full_url.endswith("/health"):
+                raise AssertionError("contacted a worker for synthesis")
+            answer = answers[request.full_url.split("//", 1)[1].split(".local", 1)[0]]
+            if answer is None:
+                raise URLError("timed out")
+            if isinstance(answer, int):
+                raise HTTPError(request.full_url, answer, "refused", {}, io.BytesIO(b""))
+            return io.BytesIO(json.dumps(answer).encode())
+        opener = Mock()
+        opener.open.side_effect = open_request
+        return patch("epub_tts_narrator.renderer.fish_http.build_opener", return_value=opener)
+
+    def test_a_worker_that_does_not_answer_is_set_aside_and_the_render_goes_on(self):
+        pool = RenderPool(pool_config(worker("near", concurrency=2), worker("far", concurrency=3)))
+        self.addCleanup(pool.close)
+        said = []
+        with self._health_by_host({"near": {"status": "ready", "protocol": PROTOCOL}, "far": None}):
+            pool.check_continuity(notify=said.append)
+            pool.check_continuity(notify=said.append)  # checked once
+        self.assertEqual(pool.set_aside_workers, ["far"])
+        self.assertEqual(len(said), 1)
+        self.assertIn("far does not answer", said[0])
+        self.assertNotIn("private-token", said[0])
+        self.assertEqual(pool.max_parallel, 2)
+        claimed = [pool._slots.try_acquire() for _ in range(3)]
+        self.assertEqual([slot.settings["name"] if slot else None for slot in claimed], ["near", "near", None])
+        pool._slots.release(claimed[0])
+        self.assertEqual(pool._slots.try_acquire().settings["name"], "near")
+
+    def test_no_answering_worker_or_a_wrong_answer_still_stops_the_render(self):
+        for answers, message in (({"near": None, "far": None}, "health check failed"),
+                                 ({"near": {"status": "ready", "protocol": PROTOCOL}, "far": 401}, "401"),
+                                 ({"near": {"status": "ready", "protocol": "old"}, "far": None},
+                                  "does not support chapter history")):
+            with self.subTest(answers=answers):
+                pool = RenderPool(pool_config(worker("near"), worker("far")))
+                self.addCleanup(pool.close)
+                with self._health_by_host(answers), self.assertRaisesRegex(EngineError, message):
+                    pool.check_continuity(notify=lambda message: None)
+                self.assertEqual(pool.set_aside_workers, [])
+
+
 class TransportFailure(RuntimeError):
     transport_error = True
     def __init__(self, *, retryable=True):

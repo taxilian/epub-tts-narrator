@@ -319,6 +319,8 @@ roles = ["tts", "recognition"]  # optional; default ["tts"]
 recognition_concurrency = 1     # recognition slots on this worker
 ```
 
+When rendering starts, each TTS worker is asked once over `/health` whether it carries chapter history. A worker that gives no answer at all (switched off, asleep, or off the network) is set aside for that render: the log says so, it is sent no speech, and the render goes on with the other workers; start it and run the render again to use it. A worker that answers wrongly (an older protocol, a refused key) still stops the render, and so does having no worker that answers.
+
 ### Recognition workers
 
 Speech recognition (Whisper, plus the reference recognizer used for second opinions) can also run on `serve` machines. The controlling machine always recognizes on its own recognition thread; each worker whose `roles` include `"recognition"` adds `recognition_concurrency` more slots, and every take's recognition call joins one FIFO queue and claims the first free slot, so several clips are recognized at once across machines. A worker with `roles = ["recognition"]` only recognizes and adds no TTS slots. Everything else in verification (acoustic checks, word comparison, JEV and phonetic review, acceptance) stays on the controller, and censorship alignment and casting always use the local recognizer.

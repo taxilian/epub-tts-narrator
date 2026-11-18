@@ -79,7 +79,16 @@ class _Slots:
 
     def release(self, worker):
         with self._ready:
-            self._free[id(worker)] += 1
+            if worker in self._workers:  # a set-aside worker's slot is not offered again
+                self._free[id(worker)] += 1
+            self._ready.notify_all()
+
+    def set_aside(self, worker):
+        """Offer no more of ``worker``'s slots (one already claimed is simply not returned)."""
+        with self._ready:
+            if worker in self._workers:
+                self._workers.remove(worker)
+                self._free[id(worker)] = 0
             self._ready.notify_all()
 
 
@@ -452,21 +461,51 @@ class RenderPool:
             "chapter_continuity": True,
         }
         self._continuity_checked = False
+        self.set_aside_workers = []  # names of remote workers this render goes on without
 
-    def check_continuity(self):
-        """Every worker must carry chapter history; checked once per pool."""
+    def check_continuity(self, notify=None):
+        """Every worker must carry chapter history; checked once per pool.
+
+        A remote worker that gives no answer at all (switched off, asleep,
+        or off the network) is set aside for this render, which carries on
+        with the others; it is never sent a request. A worker that answers
+        wrongly (an old protocol, a refused key) still stops the render, and
+        so does finding no worker left.
+        """
         if self._continuity_checked:
             return
         from .continuity import require_support
+        from .fish_http import FishHTTPError
         def check():
             for worker in self._workers:
                 if worker.local:
                     require_support(worker.engine())
         self._local_runtime.run(check)
-        for worker in self._workers:
-            if not worker.local:
+        unreachable = []
+        for worker in list(self._workers):
+            if worker.local:
+                continue
+            try:
                 require_support(worker.engine())
+            except FishHTTPError as error:
+                if error.status is not None:
+                    raise
+                unreachable.append((worker, error))
+        if unreachable and len(unreachable) == len(self._workers):
+            raise unreachable[0][1]
+        for worker, error in unreachable:
+            self.set_aside(worker, error, notify)
         self._continuity_checked = True
+
+    def set_aside(self, worker, error, notify=None):
+        """Render without ``worker`` from now on, saying so."""
+        self._slots.set_aside(worker)
+        self._workers.remove(worker)
+        self.max_parallel = self._slots.qsize()
+        self.set_aside_workers.append(worker.settings["name"])
+        say = notify or generation_notifier() or (lambda message: None)
+        say(f"Render worker {worker.settings['name']} does not answer ({error}); rendering without it. "
+            "Start it, or check its network, then run the render again to use it.")
 
     @property
     def identity(self):

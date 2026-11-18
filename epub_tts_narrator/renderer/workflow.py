@@ -3246,7 +3246,7 @@ def render(bundle, config, engine, verifier, *, notify=print, chapters_only=Fals
 def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_store_override,
             on_synthesis_ready=None, chapter_coordinators=None, queue_position=0):
     from .continuity import require_support
-    require_support(engine)
+    require_support(engine, notify=notify)
     run_started = monotonic()
     retry_budget = SpeechRetryBudget()
     from .pool import bind_engine_verifier

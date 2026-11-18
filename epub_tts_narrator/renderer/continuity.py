@@ -92,14 +92,18 @@ def continuation_turn(turn):
         _CONTINUATION.reset(token)
 
 
-def require_support(engine):
-    """Every renderer engine must carry chapter history; there is no fallback."""
+def require_support(engine, notify=None):
+    """Every renderer engine must carry chapter history; there is no fallback.
+
+    ``notify`` hears about a render pool's workers set aside because they do not answer.
+    """
     if getattr(engine, "capabilities", {}).get("chapter_continuity") is not True:
         raise ValueError("The configured speech engine does not support chapter continuity; "
                          "every renderer engine must accept history turns and return generated codes")
     check = getattr(engine, "check_continuity", None)
     if callable(check):
-        check()
+        # Only a render pool has workers to set aside.
+        check(notify=notify) if hasattr(engine, "set_aside_workers") else check()
 
 
 def _segments(chunk):
