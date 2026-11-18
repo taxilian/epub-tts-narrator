@@ -102,6 +102,16 @@ class SplitCheckTests(unittest.TestCase):
         self.assertEqual(misread_blocks(document), {})
 
 
+class ReadingClient(NarratorClient):
+    """The narrator fixture, also answering ``verify-attribution``'s speaker scan with no corrections."""
+
+    def complete(self, system, payload):
+        if payload.get("mode") == "attribution_review_scan":
+            self.calls.append(deepcopy(payload))
+            return {"corrections": []}
+        return super().complete(system, payload)
+
+
 class ReReadTests(unittest.TestCase):
     PARAGRAPHS = ['"Jon, the tide is turning," Mara said. "We should go',
                   'before the light fails." Mara looked at the sea. "Come," she said.',
@@ -118,7 +128,7 @@ class ReReadTests(unittest.TestCase):
         self.book = self.root / "book"
 
     def client(self, *args, **kwargs):
-        client = NarratorClient(*args, **kwargs)
+        client = ReadingClient(*args, **kwargs)
         self.clients.append(client)
         return client
 
@@ -183,6 +193,54 @@ class ReReadTests(unittest.TestCase):
         # Only the fixture's still-missing auditions are retried; nothing is read again.
         self.assertEqual({call.get("mode") for client in self.clients[clients:] for call in client.calls} - {"audition_script"},
                          set())
+        self.assertEqual((self.book / "manifest.json").read_bytes(), published)
+
+    def misread_book(self):
+        epub = make_serial_epub(self.root / "book.epub", "Tide", "book-tide", [("One", self.PARAGRAPHS)])
+        with patch.dict(quote_spans._FINDERS, {"double": old_double_quotes}):
+            status, stdout, stderr = self.run_cli("analyze", epub, "-o", self.book, "--strategy", "narrator")
+        self.assertIn(status, (0, 2), stderr + stdout)
+        before = self.analysis()
+        self.assertEqual(len(misread_blocks(before)), 1)
+        return before
+
+    def test_verify_attribution_reads_a_misread_paragraph_again_before_checking_speakers(self):
+        before = self.misread_book()
+        status, stdout, stderr = self.run_cli("verify-attribution", self.book, "--apply")
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("1 paragraph(s) are split differently from their quotation marks", stdout)
+        self.assertIn("reading them again", stdout)
+        after = self.analysis()
+        self.assertEqual(misread_blocks(after), {})
+        self.assertEqual(after["source"], before["source"])
+        self.assertEqual(len(after["provenance"]["book_updates"]), len(before["provenance"].get("book_updates") or []) + 1)
+
+        published = (self.book / "manifest.json").read_bytes()
+        status, stdout, stderr = self.run_cli("verify-attribution", self.book, "--apply")
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("every paragraph's speech and narration match its quotation marks", stdout)
+        self.assertEqual((self.book / "manifest.json").read_bytes(), published)
+
+    def test_a_report_only_verify_lists_misread_paragraphs_and_changes_nothing(self):
+        before = self.misread_book()
+        published = (self.book / "manifest.json").read_bytes()
+        status, stdout, stderr = self.run_cli("verify-attribution", self.book)
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("1 paragraph(s) are split differently", stdout)
+        self.assertIn(next(iter(misread_blocks(before))), stdout)
+        self.assertIn("Report only: these paragraphs are unchanged", stdout)
+        self.assertEqual((self.book / "manifest.json").read_bytes(), published)
+
+    def test_verify_attribution_limited_to_other_chapters_leaves_the_split_alone(self):
+        epub = make_serial_epub(self.root / "book.epub", "Tide", "book-tide",
+                                [("One", self.PARAGRAPHS), ("Two", ["Jon walked home alone."])])
+        with patch.dict(quote_spans._FINDERS, {"double": old_double_quotes}):
+            status, stdout, stderr = self.run_cli("analyze", epub, "-o", self.book, "--strategy", "narrator")
+        self.assertIn(status, (0, 2), stderr + stdout)
+        published = (self.book / "manifest.json").read_bytes()
+        status, stdout, stderr = self.run_cli("verify-attribution", self.book, "--chapter", "2", "--apply")
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("every paragraph's speech and narration match", stdout)
         self.assertEqual((self.book / "manifest.json").read_bytes(), published)
 
 

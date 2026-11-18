@@ -1082,3 +1082,42 @@ def clear_workspace(directory):
     if workspace.is_dir() and not workspace.is_symlink():
         discard_pending(workspace)
         os.rmdir(workspace)
+
+
+def misread_splits(directory, *, chapter_ids=None):
+    """``(document, {block_id: reason})``: the saved book after the model-free tag repair, and its misread paragraphs.
+
+    ``chapter_ids`` limits the paragraphs to those chapters (the repair is book-wide and model-free).
+    """
+    from .narration_boundaries import repair_narration_boundaries
+    from .split_check import misread_blocks
+    original, _, _ = _completed_directory(Path(directory).resolve())
+    repaired = repair_narration_boundaries(original)
+    misread = misread_blocks(repaired)
+    if chapter_ids is not None:
+        chapters = {block["id"]: block["chapter_id"] for block in repaired["source"]["blocks"]}
+        wanted = set(chapter_ids)
+        misread = {block_id: reason for block_id, reason in misread.items() if chapters[block_id] in wanted}
+    return repaired, misread
+
+
+def reread_misread_splits(directory, config, *, client_factory, speaker_judge=None,
+                          announce_cache=lambda path: Path(path).resolve(), progress=print,
+                          strategy=None, document=None, misread=None):
+    """Read again, with their neighbours, the paragraphs whose saved split contradicts their quotation marks.
+
+    ``document`` and ``misread`` come from ``misread_splits`` (found here when
+    omitted). Publishes through ``update_book(reread=...)`` with backups and
+    returns how many paragraphs were read again (0 when none needed it).
+    """
+    if misread is None:
+        document, misread = misread_splits(directory)
+    if not misread:
+        return 0
+    print(f"{len(misread)} paragraph(s) are split differently from their quotation marks (speech "
+          "read by the narrator, or narration read in a character's voice); reading them again.")
+    update_book(directory, document["source"], config=config, strategy=strategy,
+                client_factory=client_factory, speaker_judge=speaker_judge,
+                announce_cache=announce_cache, progress=progress, reread=misread,
+                base_document=document)
+    return len(misread)

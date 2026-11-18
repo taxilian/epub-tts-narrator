@@ -21,6 +21,50 @@ from .pipeline import CachedRequests
 VerificationAction: TypeAlias = Literal["apply", "edit", "leave"]
 
 
+def check_splits(directory, config, client_factory, progress, *, chapter_ids=None, fix, ask):
+    """Find paragraphs whose saved split contradicts their quotation marks; read them again when ``fix``.
+
+    Runs before the speaker audit, so the audit sees the corrected split. A
+    terminal asks first unless ``ask`` is false (``--apply``/``--interactive``);
+    a report-only run lists them and changes nothing.
+    """
+    from .book_update import misread_splits, reread_misread_splits
+    document, misread = misread_splits(directory, chapter_ids=chapter_ids)
+    if not misread:
+        print("Speech splits: every paragraph's speech and narration match its quotation marks.")
+        return 0
+    numbers = {chapter["id"]: number for number, chapter in enumerate(document["source"]["chapters"], 1)}
+    chapters = {block["id"]: block["chapter_id"] for block in document["source"]["blocks"]}
+    print(f"Speech splits: {len(misread)} paragraph(s) are split differently from their quotation marks.")
+    for block_id, reason in misread.items():
+        print(f"  chapter {numbers[chapters[block_id]]}, {block_id}: {reason}")
+    if not fix:
+        print("Report only: these paragraphs are unchanged. Rerun with --apply, or run `analyze BOOK`, "
+              "to read them again.")
+        return 0
+    if ask:
+        while True:
+            print("[R] read them again now / [L] leave them unchanged: ", end="", flush=True)
+            try:
+                answer = sys.stdin.readline()
+            except (EOFError, KeyboardInterrupt, OSError):
+                answer = ""
+            if answer == "":
+                print("\nInput ended; leaving their splits unchanged.")
+                return 0
+            answer = answer.strip().casefold()
+            if answer in {"l", "q"}:
+                print("Leaving their splits unchanged.")
+                return 0
+            if answer == "r":
+                break
+            print("Please enter R or L.")
+    from .cli import _speaker_judge
+    return reread_misread_splits(directory, config, client_factory=client_factory,
+                                 speaker_judge=_speaker_judge(config), progress=progress,
+                                 document=document, misread=misread)
+
+
 def run_attribution_verification(args, config, client_factory, progress):
     """Run one audit; parsed CLI input, configuration, and I/O factories stay at the boundary."""
     settings = config["analysis"]
@@ -32,16 +76,10 @@ def run_attribution_verification(args, config, client_factory, progress):
     if args.instructions is not None and not 1 <= len(instructions) <= 2000:
         raise ValueError("--instructions must contain from 1 to 2000 characters")
     directory = args.directory.resolve()
-    original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+    write_capable = bool(args.interactive or args.apply
+                         or (sys.stdin.isatty() and sys.stdout.isatty()))
     document, _, _ = _completed_directory(directory)
-    if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
-        raise ValueError(f"Analysis changed while loading the saved book: {directory}")
-    risk = risk_blocks(document)
-    if not risk:
-        print("No context-basis or flagged dialogue lines to verify.")
-        print("No changes applied.")
-        return 0
-    selected = risk
+    chapter_ids = None
     if args.chapter is not None or args.chapters is not None:
         try:
             numbers = ([args.chapter] if args.chapter is not None else
@@ -55,6 +93,19 @@ def run_attribution_verification(args, config, client_factory, progress):
         if unknown:
             raise ValueError("Unknown chapter number(s): " + ", ".join(str(number) for number in unknown))
         chapter_ids = [chapters[number - 1]["id"] for number in dict.fromkeys(numbers)]
+    check_splits(directory, config, client_factory, progress, chapter_ids=chapter_ids,
+                 fix=write_capable, ask=not (args.apply or args.interactive))
+    original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+    document, _, _ = _completed_directory(directory)
+    if hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest() != original_manifest_hash:
+        raise ValueError(f"Analysis changed while loading the saved book: {directory}")
+    risk = risk_blocks(document)
+    if not risk:
+        print("No context-basis or flagged dialogue lines to verify.")
+        print("No changes applied.")
+        return 0
+    selected = risk
+    if chapter_ids is not None:
         scoped = chapter_block_ids(document, chapter_ids)
         in_chapters = {block_id for block_ids in scoped.values() for block_id in block_ids}
         selected = [block_id for block_id in risk if block_id in in_chapters]
@@ -76,8 +127,6 @@ def run_attribution_verification(args, config, client_factory, progress):
     # themselves through the .analysis-update.lock handshake, so Accept/Edit can
     # never hit a late lock. Live renderers are never a blocker for an
     # attribution save; the running render keeps its loaded snapshot.
-    write_capable = bool(args.interactive or args.apply
-                         or (sys.stdin.isatty() and sys.stdout.isatty()))
     with ExitStack() as stack:
         # Its own stack: a save that adds characters releases it first, because a
         # speaker-decisions publication takes its own locks.

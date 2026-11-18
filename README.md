@@ -88,7 +88,9 @@ epub-tts-narrator refresh-voice-profiles runs/book-01 --workers 1
 New analyses use narrator read by default. Pass `--strategy consensus` to select the consensus pipeline instead. A completed book keeps its saved strategy when resumed or updated from a new EPUB.
 
 Re-check a finished book's riskiest speaker assignments (context-based dialogue in
-multi-speaker scenes) with the semantic review engine, then decide what to save:
+multi-speaker scenes) with the semantic review engine, then decide what to save. It first
+checks every paragraph's speech/narration split against its quotation marks and, unless the
+run is report-only, offers to read misread paragraphs again (`--apply` does it without asking):
 
 ```sh
 # Fresh audit; a terminal offers Accept all, Edit-review, or Leave unchanged.
