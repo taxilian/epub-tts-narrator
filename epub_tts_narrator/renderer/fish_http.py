@@ -57,6 +57,7 @@ MAX_REQUEST_SECONDS = 3600.0
 # A take that ran out of time is sent once more with twice the limit. The same
 # seed asks for the same take, so this is not a new attempt.
 TIMEOUT_RETRIES = 1
+PROBE_SECONDS = 10.0  # how long a quick /health check waits for any answer
 
 
 class FishHTTPError(EngineError):
@@ -274,11 +275,11 @@ class FishHTTPEngine(HistorySynthesis):
                 "structured_performance": True, "single_speaker_paragraph": self.multi_speaker,
                 "unconditioned_voice_creation": False, "chapter_continuity": True}
 
-    def check_continuity(self) -> None:
+    def check_continuity(self, timeout=None) -> None:
         """Confirm once that the worker is a history-capable ``serve`` process."""
         if self._history_checked:
             return
-        health = self._get_json(self.url.rsplit("/v1/", 1)[0] + "/health")
+        health = self._get_json(self.url.rsplit("/v1/", 1)[0] + "/health", timeout=timeout)
         if health.get("protocol") != PROTOCOL:
             raise EngineError(f"Render worker {self.name} does not support chapter history; update and "
                               "restart audiobook-render serve on that machine")
@@ -286,6 +287,23 @@ class FishHTTPEngine(HistorySynthesis):
         if isinstance(layouts, list) and all(isinstance(layout, str) for layout in layouts):
             self._history_layouts = frozenset({"directing"} | ({"streaming"} & set(layouts)))
         self._history_checked = True
+
+    def recheck_continuity(self, timeout=PROBE_SECONDS) -> None:
+        """Check again, as for a worker that was away and may have been restarted or updated."""
+        self._history_checked = False
+        self.check_continuity(timeout=timeout)
+
+    def reachable(self, timeout=PROBE_SECONDS) -> bool:
+        """Whether the worker gives any answer at all to a short ``/health`` request.
+
+        An HTTP error is an answer (the worker is there, busy or refusing);
+        only no answer (refused connection, no route, timed out) is "not there".
+        """
+        try:
+            self._get_json(self.url.rsplit("/v1/", 1)[0] + "/health", timeout=timeout)
+        except FishHTTPError as exc:
+            return exc.status is not None
+        return True
 
     def work_status(self, timeout=2.0):
         """The worker's own report of its work (``/health`` ``work``), or None when it does not say.
@@ -376,6 +394,8 @@ class FishHTTPEngine(HistorySynthesis):
                 return self._request_once(text, references, history, output, seed, layout, limit)
             except FishHTTPError as exc:
                 if exc.timed_out and timeouts < TIMEOUT_RETRIES and limit < MAX_REQUEST_SECONDS:
+                    if not self.reachable():
+                        raise  # the worker has gone (no answer at all), not merely slow
                     timeouts += 1
                     limit = min(MAX_REQUEST_SECONDS, 2 * limit)
                     stop_if_requested()

@@ -1,5 +1,7 @@
 """A long passage gets time in proportion to its length, and a take that runs out of time is sent once more."""
 
+import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,7 +9,7 @@ from unittest.mock import Mock, patch
 from urllib.error import URLError
 
 from epub_tts_narrator.renderer.fish_http import (
-    MAX_REQUEST_SECONDS, TIMEOUT_SECONDS_PER_CHARACTER, FishHTTPEngine, FishHTTPError)
+    MAX_REQUEST_SECONDS, PROTOCOL, TIMEOUT_SECONDS_PER_CHARACTER, FishHTTPEngine, FishHTTPError)
 from test_fish_http import wav_bytes, wire_response
 
 
@@ -24,7 +26,15 @@ class RequestTimeLimitTests(unittest.TestCase):
         self.limits, self.seeds = [], []
         opener = Mock()
 
+        self.health = None  # the answer to a /health check: None answers ready, an exception fails it
+        self.health_checks = 0
+
         def respond(request, timeout=None):
+            if request.get_method() == "GET":
+                self.health_checks += 1
+                if self.health is not None:
+                    raise self.health
+                return io.BytesIO(json.dumps({"status": "ready", "protocol": PROTOCOL}).encode())
             self.limits.append(timeout)
             self.seeds.append(request.get_header("X-audiobook-seed"))
             failure = self.answers.pop(0) if self.answers else None
@@ -61,6 +71,16 @@ class RequestTimeLimitTests(unittest.TestCase):
         self.assertEqual(self.limits[1], 2 * self.limits[0])
         self.assertEqual(self.seeds, ["7", "7"])
         self.assertEqual(result["seed"], 7)
+
+    def test_a_take_that_runs_out_of_time_on_a_worker_that_has_gone_is_not_sent_again(self):
+        self.answers = [TimeoutError("timed out")]
+        self.health = URLError(OSError(65, "No route to host"))
+        with self.assertRaises(FishHTTPError) as raised:
+            self.synthesize("The worker went away during this passage.")
+        self.assertTrue(raised.exception.timed_out)
+        self.assertIsNone(raised.exception.status)
+        self.assertEqual(len(self.limits), 1)
+        self.assertEqual(self.health_checks, 1)
 
     def test_running_out_of_time_twice_fails_the_attempt_and_says_how_long_it_waited(self):
         self.answers = [URLError(TimeoutError("timed out")), TimeoutError("timed out")]

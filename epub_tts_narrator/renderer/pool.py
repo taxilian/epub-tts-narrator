@@ -6,7 +6,7 @@ from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import wraps
-from threading import Condition, RLock, get_ident
+from threading import Condition, Event, RLock, Thread, get_ident
 from time import monotonic
 
 from .config import SAMPLING_DEFAULTS, default_multi_speaker
@@ -32,22 +32,31 @@ def _audio_seconds(metadata):
     return None
 
 class _Slots:
-    """Endpoint slots with FIFO waiters and first-free claims."""
+    """Endpoint slots with FIFO waiters and first-free claims.
+
+    A worker can be set aside (its free slots are no longer offered; ones
+    already claimed are returned as usual) and later restored in its place.
+    """
 
     def __init__(self, workers):
-        self._free = {id(worker): worker.settings.get("concurrency", 1) for worker in workers}
-        self._workers = list(workers)
+        self._capacity = {id(worker): worker.settings.get("concurrency", 1) for worker in workers}
+        self._claimed = {id(worker): 0 for worker in workers}
+        self._order = list(workers)
+        self._workers = list(workers)  # the workers offered now, in configured order
         self._waiting = deque()
         self._ready = Condition()
 
+    def _free(self, worker):
+        return self._capacity[id(worker)] - self._claimed[id(worker)]
+
     def qsize(self):
         with self._ready:
-            return sum(self._free.values())
+            return sum(self._free(worker) for worker in self._workers)
 
     def _claim(self):
-        worker = next((worker for worker in self._workers if self._free[id(worker)]), None)
+        worker = next((worker for worker in self._workers if self._free(worker) > 0), None)
         if worker is not None:
-            self._free[id(worker)] -= 1
+            self._claimed[id(worker)] += 1
         return worker
 
     def try_acquire(self):
@@ -79,17 +88,29 @@ class _Slots:
 
     def release(self, worker):
         with self._ready:
-            if worker in self._workers:  # a set-aside worker's slot is not offered again
-                self._free[id(worker)] += 1
+            self._claimed[id(worker)] -= 1
             self._ready.notify_all()
 
+    def offered(self):
+        with self._ready:
+            return list(self._workers)
+
     def set_aside(self, worker):
-        """Offer no more of ``worker``'s slots (one already claimed is simply not returned)."""
+        """Offer none of ``worker``'s slots until it is restored."""
         with self._ready:
             if worker in self._workers:
                 self._workers.remove(worker)
-                self._free[id(worker)] = 0
             self._ready.notify_all()
+
+    def restore(self, worker):
+        with self._ready:
+            if worker not in self._workers:
+                self._workers = [known for known in self._order if known in self._workers or known is worker]
+            self._ready.notify_all()
+
+
+class _WorkerGone(Exception):
+    """A take's remote worker has gone and was set aside; the pool sends the take to another worker."""
 
 
 class _FifoAdmission:
@@ -365,6 +386,7 @@ class _Recognizer:
 
 
 MAX_SERVER_RESTARTS = 3  # starts of the auto-started local server per render before the render stops
+REPROBE_SECONDS = 30.0  # how often a set-aside worker is asked whether it is back
 
 
 class RenderPool:
@@ -461,16 +483,20 @@ class RenderPool:
             "chapter_continuity": True,
         }
         self._continuity_checked = False
-        self.set_aside_workers = []  # names of remote workers this render goes on without
+        # Remote workers that gave no answer, rendering without them until they answer again.
+        self._away = {}  # id(worker) -> (worker, notify)
+        self._away_lock = RLock()
+        self._probe_stop = Event()
+        self._prober = None
 
     def check_continuity(self, notify=None):
         """Every worker must carry chapter history; checked once per pool.
 
         A remote worker that gives no answer at all (switched off, asleep,
-        or off the network) is set aside for this render, which carries on
-        with the others; it is never sent a request. A worker that answers
-        wrongly (an old protocol, a refused key) still stops the render, and
-        so does finding no worker left.
+        or off the network) is set aside, and the render carries on with the
+        others; it is asked every ``REPROBE_SECONDS`` whether it is back. A
+        worker that answers wrongly (an old protocol, a refused key) still
+        stops the render, and so does finding no worker that answers.
         """
         if self._continuity_checked:
             return
@@ -482,8 +508,8 @@ class RenderPool:
                     require_support(worker.engine())
         self._local_runtime.run(check)
         unreachable = []
-        for worker in list(self._workers):
-            if worker.local:
+        for worker in self._workers:
+            if worker.local or worker in self._away_workers():
                 continue
             try:
                 require_support(worker.engine())
@@ -494,18 +520,84 @@ class RenderPool:
         if unreachable and len(unreachable) == len(self._workers):
             raise unreachable[0][1]
         for worker, error in unreachable:
-            self.set_aside(worker, error, notify)
+            self._set_aside(worker, f"does not answer ({error})", notify)
         self._continuity_checked = True
 
-    def set_aside(self, worker, error, notify=None):
-        """Render without ``worker`` from now on, saying so."""
-        self._slots.set_aside(worker)
-        self._workers.remove(worker)
-        self.max_parallel = self._slots.qsize()
-        self.set_aside_workers.append(worker.settings["name"])
+    @property
+    def set_aside_workers(self):
+        """Names of the remote workers this render is going on without, in configured order."""
+        away = self._away_workers()
+        return [worker.settings["name"] for worker in self._workers if worker in away]
+
+    def _away_workers(self):
+        with self._away_lock:
+            return [worker for worker, _ in self._away.values()]
+
+    def _set_aside(self, worker, reason, notify=None):
         say = notify or generation_notifier() or (lambda message: None)
-        say(f"Render worker {worker.settings['name']} does not answer ({error}); rendering without it. "
-            "Start it, or check its network, then run the render again to use it.")
+        with self._away_lock:
+            if id(worker) in self._away:
+                return
+            self._slots.set_aside(worker)
+            self._away[id(worker)] = (worker, say)
+            if self._prober is None or not self._prober.is_alive():
+                self._prober = Thread(target=self._probe_away, name="render-pool-worker-probe", daemon=True)
+                self._prober.start()
+        say(f"Render worker {worker.settings['name']} {reason}; rendering without it, and checking every "
+            f"{REPROBE_SECONDS:g}s whether it is back.")
+
+    def _worker_gone(self, worker, error, notify):
+        """Whether ``error`` means ``worker`` has gone; if so it is set aside and the take goes elsewhere.
+
+        Only a remote worker's transport failure with no HTTP answer counts,
+        and only when a short ``/health`` request gets no answer either: a
+        worker that answers is slow or refusing, an ordinary failed attempt.
+        The last offered worker is never set aside (its failures stay
+        ordinary), so a render never waits on nobody.
+        """
+        if (worker.local or worker.settings.get("auto_serve") or not getattr(error, "transport_error", False)
+                or getattr(error, "status", None) is not None):
+            return False
+        with self._away_lock:
+            if id(worker) in self._away:
+                return True  # another take found it gone already
+        if worker not in self._slots.offered() or len(self._slots.offered()) <= 1:
+            return False
+        reachable = getattr(worker.engine(), "reachable", None)
+        if not callable(reachable) or reachable():
+            return False
+        with self._away_lock:
+            if id(worker) in self._away:
+                return True
+            if len(self._slots.offered()) <= 1:
+                return False
+            self._set_aside(worker, f"stopped answering ({error})", notify)
+        return True
+
+    def _probe_away(self):
+        """Ask each set-aside worker every ``REPROBE_SECONDS`` whether it is back; restore those that are."""
+        from .continuity import require_support
+        while not self._probe_stop.wait(REPROBE_SECONDS):
+            with self._away_lock:
+                away = list(self._away.values())
+                if not away:
+                    self._prober = None
+                    return
+            for worker, say in away:
+                if self._probe_stop.is_set():
+                    return
+                engine = worker.engine()
+                try:
+                    recheck = getattr(engine, "recheck_continuity", None)
+                    recheck() if callable(recheck) else require_support(engine)
+                except Exception:
+                    continue  # still away (or not yet right): ask again later
+                with self._away_lock:
+                    self._away.pop(id(worker), None)
+                    self._slots.restore(worker)
+                if self._resources is not None:
+                    self._resources.tts.wake()
+                say(f"Render worker {worker.settings['name']} answers again; sending it speech again.")
 
     @property
     def identity(self):
@@ -714,6 +806,14 @@ class RenderPool:
             self._server_epoch += 1
 
     def _execute(self, method, *args, **kwargs):
+        """Run one take on the first free worker; a take whose worker has gone is sent to another."""
+        while True:
+            try:
+                return self._execute_once(method, args, kwargs)
+            except _WorkerGone:
+                continue  # that worker is set aside now; nothing was generated
+
+    def _execute_once(self, method, args, kwargs):
         from .interrupts import stop_if_requested
         stop_if_requested()
         if self._closed:
@@ -744,8 +844,10 @@ class RenderPool:
                         if not isinstance(metadata, dict):
                             raise EngineError("TTS worker returned invalid generation metadata")
                         result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
-                    except BaseException:
+                    except BaseException as error:
                         report_worker_activity(notify, "failed", name, monotonic() - started)
+                        if self._worker_gone(worker, error, notify):
+                            raise _WorkerGone() from error
                         raise
                     report_worker_activity(notify, "completed", name, monotonic() - started)
                     ACTIVITY.made(name, _audio_seconds(result))
@@ -819,8 +921,10 @@ class RenderPool:
                     if not isinstance(metadata, dict):
                         raise EngineError("TTS worker returned invalid generation metadata")
                     result = {**metadata, "render_worker": name, "worker_engine": engine.identity}
-                except BaseException:
+                except BaseException as error:
                     report_worker_activity(notify, "failed", name, monotonic() - started)
+                    if self._worker_gone(worker, error, notify):
+                        raise _WorkerGone() from error
                     raise
                 report_worker_activity(notify, "completed", name, monotonic() - started)
                 ACTIVITY.made(name, _audio_seconds(result))
@@ -874,6 +978,7 @@ class RenderPool:
         if self._closed:
             return
         self._closed = True
+        self._probe_stop.set()
         from .node_activity import ACTIVITY
         ACTIVITY.unregister(self)
         try:

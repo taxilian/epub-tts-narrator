@@ -126,6 +126,11 @@ class ResourceLane:
             self._threads.append(thread)
             thread.start()
 
+    def wake(self):
+        """Ask queued jobs' ``reserve`` again, as when an external resource became available."""
+        with self._cond:
+            self._cond.notify_all()
+
     def _enqueue(self, function, args, kwargs, reserve):
         """Append one job while holding the lane condition."""
         operation = METRICS.operation(self._stage)

@@ -368,7 +368,7 @@ class PoolUnitTests(unittest.TestCase):
         self.assertEqual(len(said), 1)
         self.assertIn("far does not answer", said[0])
         self.assertNotIn("private-token", said[0])
-        self.assertEqual(pool.max_parallel, 2)
+        self.assertEqual(pool._slots.qsize(), 2)
         claimed = [pool._slots.try_acquire() for _ in range(3)]
         self.assertEqual([slot.settings["name"] if slot else None for slot in claimed], ["near", "near", None])
         pool._slots.release(claimed[0])
@@ -385,6 +385,103 @@ class PoolUnitTests(unittest.TestCase):
                 with self._health_by_host(answers), self.assertRaisesRegex(EngineError, message):
                     pool.check_continuity(notify=lambda message: None)
                 self.assertEqual(pool.set_aside_workers, [])
+
+
+class GoneFixture:
+    """A remote worker's engine: answers takes, or has gone (no answer to takes or /health)."""
+
+    identity = {"engine": "fish_http", "model": "drama-3"}
+    capabilities = {"chapter_continuity": True}
+
+    def __init__(self, name):
+        self.name, self.gone, self.takes, self.rechecks = name, False, 0, 0
+
+    def _no_answer(self):
+        from epub_tts_narrator.renderer.fish_http import FishHTTPError
+        return FishHTTPError(f"Fish HTTP request failed ({self.name}): No route to host")
+
+    def synthesize(self, text, voice, output_path, *, seed, direction=""):
+        self.takes += 1
+        if self.gone:
+            raise self._no_answer()
+        return {"duration_seconds": 1.0}
+
+    def reachable(self):
+        return not self.gone
+
+    def recheck_continuity(self):
+        self.rechecks += 1
+        if self.gone:
+            raise self._no_answer()
+
+    def close(self):
+        pass
+
+
+class WorkerDropTests(unittest.TestCase):
+    """A remote worker that stops answering partway through is set aside, and brought back when it answers."""
+
+    def pool(self, scheduler, *names):
+        config = pool_config(*[worker(name) for name in names])
+        config["render_pool"]["scheduler"] = scheduler
+        pool = RenderPool(config)
+        self.addCleanup(pool.close)
+        engines = {}
+        for slot in pool._workers:
+            engines[slot.settings["name"]] = slot._engine = GoneFixture(slot.settings["name"])
+        return pool, engines
+
+    def take(self, pool, said):
+        from epub_tts_narrator.renderer.progress import _GENERATION_NOTIFY
+        token = _GENERATION_NOTIFY.set(said.append)
+        try:
+            return pool.synthesize("Words.", {}, "/does/not/matter.wav", seed=1)
+        finally:
+            _GENERATION_NOTIFY.reset(token)
+
+    def test_a_take_on_a_worker_that_has_gone_is_made_on_another_and_the_worker_is_set_aside(self):
+        for scheduler in ("pipeline", "legacy"):
+            with self.subTest(scheduler=scheduler):
+                pool, engines = self.pool(scheduler, "near", "far")
+                said = []
+                engines["near"].gone = True
+                result = self.take(pool, said)
+                self.assertEqual(result["render_worker"], "far")
+                self.assertEqual(pool.set_aside_workers, ["near"])
+                self.assertTrue(any("near stopped answering" in line for line in said))
+                self.assertEqual(self.take(pool, said)["render_worker"], "far")
+                self.assertEqual(engines["near"].takes, 1)  # never sent another take
+
+    def test_a_worker_that_still_answers_or_is_the_last_one_keeps_its_failure_ordinary(self):
+        from epub_tts_narrator.renderer.fish_http import FishHTTPError
+        pool, engines = self.pool("pipeline", "near", "far")
+        engines["near"].gone = True
+        engines["near"].reachable = lambda: True  # answers /health: slow or refusing, not gone
+        with self.assertRaises(FishHTTPError):
+            self.take(pool, [])
+        self.assertEqual(pool.set_aside_workers, [])
+        pool, engines = self.pool("pipeline", "only")
+        engines["only"].gone = True
+        with self.assertRaises(FishHTTPError):
+            self.take(pool, [])
+        self.assertEqual(pool.set_aside_workers, [])
+
+    def test_a_set_aside_worker_is_brought_back_when_it_answers_again(self):
+        with patch("epub_tts_narrator.renderer.pool.REPROBE_SECONDS", 0.02):
+            pool, engines = self.pool("pipeline", "near", "far")
+            said = []
+            engines["near"].gone = True
+            self.take(pool, said)
+            deadline = time.monotonic() + 5
+            while engines["near"].rechecks < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(pool.set_aside_workers, ["near"])  # still gone: still set aside
+            engines["near"].gone = False
+            while pool.set_aside_workers and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(pool.set_aside_workers, [])
+            self.assertTrue(any("near answers again" in line for line in said))
+            self.assertEqual(self.take(pool, said)["render_worker"], "near")  # first in configured order again
 
 
 class TransportFailure(RuntimeError):
