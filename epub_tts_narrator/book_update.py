@@ -881,7 +881,8 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
             "The saved analysis is unchanged.")
         return None
     from .analysis_progress import (STAGES, analysis_cache_directory, analysis_options_fingerprint,
-                                    create_pending, pending_identity, resume_document)
+                                    create_pending, equivalent_options_fingerprints, pending_identity,
+                                    resume_document)
     from .audition_scripts import prepare_document_samples
     from .pipeline import CachedRequests, analyze
     from .speaker_decisions import prompt_speaker_decisions
@@ -908,23 +909,24 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
     else:
         log(f"Updating {directory} with {changes}; only paragraphs were removed, so no model is needed.")
     model_cache = announce_cache(cache)
+    # A narrator-read update never resumes a consensus update's checkpoints.
+    update_fingerprint = fingerprint({"book_update": UPDATE_VERSION, "base_manifest_sha256": manifest_hash,
+                                      **({"strategy": strategy} if strategy != "consensus" else {}),
+                                      **({"reread": comparison["reread_reasons"],
+                                          "base": fingerprint(original)} if reread else {})})
     identity = pending_identity(merged, client.identity if client is not None else {"model": None},
-                                analysis_options_fingerprint(
-        settings, config["performance_policy"],
-        # A narrator-read update never resumes a consensus update's checkpoints.
-        fingerprint({"book_update": UPDATE_VERSION, "base_manifest_sha256": manifest_hash,
-                     **({"strategy": strategy} if strategy != "consensus" else {}),
-                     **({"reread": comparison["reread_reasons"],
-                         "base": fingerprint(original)} if reread else {})})))
+                                analysis_options_fingerprint(settings, config["performance_policy"],
+                                                             update_fingerprint))
+    equivalent = equivalent_options_fingerprints(settings, config["performance_policy"], update_fingerprint)
     workspace = update_workspace(directory)
-    resumed = resume_document(workspace, identity)
+    resumed = resume_document(workspace, identity, equivalent)
     document, resume_index = None, 0
     if resumed is not None:
         document, next_stage = resumed
         resume_index = len(STAGES) if next_stage is None else STAGES.index(next_stage)
         if resume_index:
             log("Resuming the interrupted book update from its last completed stage.")
-    pending = create_pending(workspace, identity)
+    pending = create_pending(workspace, identity, equivalent)
     requests = (CachedRequests(client, model_cache, repair_attempts=settings["repair_attempts"],
                                max_request_chars=settings["max_request_chars"], progress=progress)
                 if client is not None else None)

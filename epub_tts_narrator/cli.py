@@ -32,6 +32,7 @@ from .analysis_directory import (
 )
 from .analysis_progress import (
     STAGES, analysis_cache_directory, analysis_options_fingerprint, create_pending,
+    equivalent_options_fingerprints,
     is_pending_directory, pending_identity, resume_document,
 )
 
@@ -751,18 +752,20 @@ def main(argv=None, *, in_shell=False):
             document = None
             resume_index = 0
             if directory_mode:
-                options_fingerprint = analysis_options_fingerprint(
-                    settings, config["performance_policy"],
-                    fingerprint(edits) if edits is not None else None)
+                edits_fingerprint = fingerprint(edits) if edits is not None else None
+                fingerprints = [analysis_options_fingerprint(settings, config["performance_policy"], edits_fingerprint),
+                                *equivalent_options_fingerprints(settings, config["performance_policy"],
+                                                                 edits_fingerprint)]
                 if args.strategy not in (None, "consensus"):
                     # A different strategy must never resume another's checkpoints.
-                    options_fingerprint = fingerprint([options_fingerprint, args.strategy])
+                    fingerprints = [fingerprint([value, args.strategy]) for value in fingerprints]
+                options_fingerprint, equivalent = fingerprints[0], fingerprints[1:]
                 identity = pending_identity(source, client.identity, options_fingerprint)
-                resumed = resume_document(args.output, identity)
+                resumed = resume_document(args.output, identity, equivalent)
                 if resumed is not None:
                     document, next_stage = resumed
                     resume_index = len(STAGES) if next_stage is None else STAGES.index(next_stage)
-                pending = create_pending(args.output, identity)
+                pending = create_pending(args.output, identity, equivalent)
 
             def begin(stage):
                 if pending is not None:

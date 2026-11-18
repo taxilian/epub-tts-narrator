@@ -46,13 +46,44 @@ _OPTIONS_FIELDS = ("chunk_chars", "repair_attempts", "max_request_chars",
                    "cast_reconciliation_notes")
 
 
-def analysis_options_fingerprint(settings, performance_policy, edits_fingerprint=None):
-    """Fingerprint every analyze-affecting input so a resume cannot mix configurations."""
+MAX_ATTRIBUTION_WORKERS = 8
+
+
+def _worker_mode(workers):
+    """What the worker count decides about results: one at a time (each batch hears the
+    batches before it) or in parallel (independent batches). How many run at once does not."""
+    if type(workers) is int and workers >= 1:
+        return "one_at_a_time" if workers == 1 else "parallel"
+    return workers
+
+
+def _options_fingerprint(settings, performance_policy, edits_fingerprint, workers):
     options = {field: settings.get(field) for field in _OPTIONS_FIELDS}
+    options["attribution_workers"] = workers
     options["performance_policy"] = performance_policy
     options["edits"] = edits_fingerprint
     options["casting_policy"] = "adaptive_evidence_first_v1"
     return fingerprint(options)
+
+
+def analysis_options_fingerprint(settings, performance_policy, edits_fingerprint=None):
+    """Fingerprint every analyze-affecting input so a resume cannot mix configurations.
+
+    The attribution worker count enters only as one-at-a-time versus parallel,
+    so running more or fewer requests at once resumes the same run.
+    """
+    return _options_fingerprint(settings, performance_policy, edits_fingerprint,
+                                _worker_mode(settings.get("attribution_workers")))
+
+
+def equivalent_options_fingerprints(settings, performance_policy, edits_fingerprint=None):
+    """Older fingerprints (which held the exact worker count) of runs this configuration may resume."""
+    workers = settings.get("attribution_workers")
+    mode = _worker_mode(workers)
+    if mode == workers:
+        return []
+    counts = [1] if mode == "one_at_a_time" else range(2, MAX_ATTRIBUTION_WORKERS + 1)
+    return [_options_fingerprint(settings, performance_policy, edits_fingerprint, count) for count in counts]
 
 
 def _read_json(path):
@@ -142,9 +173,11 @@ def _validate_identity(identity):
     return deepcopy(identity)
 
 
-def _identity_differences(record, wanted):
+def _identity_differences(record, wanted, equivalent=()):
+    """Identity fields that differ; a recorded options fingerprint in ``equivalent`` matches."""
     return [field for field in _IDENTITY_FIELDS if field != "provider"
-            and record["identity"].get(field) != wanted[field]]
+            and record["identity"].get(field) != wanted[field]
+            and not (field == "options_fingerprint" and record["identity"].get(field) in equivalent)]
 
 
 def is_pending_directory(output):
@@ -304,12 +337,13 @@ def _require_stage(stage):
                          f"received {stage!r}")
 
 
-def create_pending(output, identity):
+def create_pending(output, identity, equivalent=()):
     """Create the output directory with fresh progress and hold its lease.
 
     An existing pending directory is attached to instead: the flock is released
     when the previous process died, so acquiring it proves no analysis is live.
-    A live run keeps the lease, and the second create is refused.
+    A live run keeps the lease, and the second create is refused. A run recorded
+    under an ``equivalent`` options fingerprint is adopted under the current one.
     """
     output = Path(output)
     identity = _validate_identity(identity)
@@ -321,12 +355,15 @@ def create_pending(output, identity):
         try:
             if (pending / "state.json").exists():
                 record = _load_validated_state(pending)
-                differing = _identity_differences(record, identity)
+                differing = _identity_differences(record, identity, equivalent)
                 if differing:
                     raise ValueError(
                         "Pending analysis progress belongs to a different run configuration "
                         f"({', '.join('identity.' + field for field in differing)}): "
                         f"{pending / 'state.json'}; remove the directory or choose another output")
+                if record["identity"]["options_fingerprint"] != identity["options_fingerprint"]:
+                    record["identity"]["options_fingerprint"] = identity["options_fingerprint"]
+                    _save_state(pending, record)
             else:
                 # Crash between directory creation and the first state write; no
                 # recorded progress exists, so this run starts the record fresh.
@@ -410,7 +447,7 @@ def inspect_pending(output):
     return _load_validated_state(_pending_directory(output))
 
 
-def resume_document(output, identity):
+def resume_document(output, identity, equivalent=()):
     """Return (document, next_stage) to continue from, or None when nothing is pending.
 
     The last completed stage's snapshot is verified against the signed record and
@@ -425,13 +462,13 @@ def resume_document(output, identity):
     # Provider selection is execution policy, not analysis semantics. Completed
     # stages remain reusable across model/fallback changes; each new request is
     # still cache-keyed by the provider that actually serves it.
-    differing = _identity_differences(record, wanted)
+    differing = _identity_differences(record, wanted, equivalent)
     if differing == ["source_fingerprint"]:
         pending = Path(output) / PENDING_DIRNAME
         lease = _acquire_lease(pending / "lease", output)
         try:
             record = _load_validated_state(pending)
-            differing = _identity_differences(record, wanted)
+            differing = _identity_differences(record, wanted, equivalent)
             if differing == ["source_fingerprint"]:
                 archive = pending / "archives" / (
                     f"{record['identity']['source_fingerprint']}-{uuid.uuid4().hex}")

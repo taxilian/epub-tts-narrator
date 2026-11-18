@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 
 from epub_tts_narrator.analysis_progress import (
-    CACHE_DIRNAME, PENDING_DIRNAME, PROGRESS_VERSION, STAGES, analysis_options_fingerprint,
-    create_pending, discard_pending, inspect_pending, is_pending_directory,
+    CACHE_DIRNAME, PENDING_DIRNAME, PROGRESS_VERSION, STAGES, _options_fingerprint,
+    analysis_options_fingerprint, create_pending, discard_pending, equivalent_options_fingerprints, inspect_pending, is_pending_directory,
     pending_identity, resume_document)
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.pipeline import fingerprint, write_json
@@ -405,6 +405,40 @@ class AnalysisProgressTests(unittest.TestCase):
                          analysis_options_fingerprint(settings, policy))
         self.assertEqual(pending_identity(valid_document(), CLIENT_IDENTITY, base)["options_fingerprint"],
                          base)
+
+    def test_how_many_requests_run_at_once_is_not_part_of_the_run(self):
+        settings, policy = {"chunk_chars": 2400, "attribution_workers": 5}, {"kind": "standard"}
+        base = analysis_options_fingerprint(settings, policy)
+        for workers in (2, 3, 8):
+            self.assertEqual(base, analysis_options_fingerprint(dict(settings, attribution_workers=workers), policy))
+        # One at a time is a different run: each batch hears the batches before it.
+        self.assertNotEqual(base, analysis_options_fingerprint(dict(settings, attribution_workers=1), policy))
+
+    def test_a_run_saved_with_another_worker_count_resumes_and_is_adopted(self):
+        policy = {"kind": "standard"}
+        old_settings = {"chunk_chars": 2400, "attribution_workers": 5}
+        # How a run was recorded before the worker count entered only as one-at-a-time or parallel.
+        recorded = _options_fingerprint(old_settings, policy, None, 5)
+        old = pending_identity(valid_document(), CLIENT_IDENTITY, recorded)
+        with create_pending(self.output, old) as handle:
+            handle.begin_stage("analyzed")
+            handle.complete_stage("analyzed", valid_document())
+        now = dict(old_settings, attribution_workers=3)
+        wanted = pending_identity(valid_document(), CLIENT_IDENTITY, analysis_options_fingerprint(now, policy))
+        equivalent = equivalent_options_fingerprints(now, policy)
+        with self.assertRaisesRegex(ValueError, "different run configuration"):
+            resume_document(self.output, wanted)
+        document, next_stage = resume_document(self.output, wanted, equivalent)
+        self.assertEqual(next_stage, "speech-normalized-1")
+        with create_pending(self.output, wanted, equivalent):
+            pass
+        self.assertEqual(inspect_pending(self.output)["identity"]["options_fingerprint"],
+                         wanted["options_fingerprint"])
+        self.assertIsNotNone(resume_document(self.output, wanted))  # adopted: no equivalents needed now
+        # A run recorded one at a time is never resumed in parallel, or the reverse.
+        one = _options_fingerprint(old_settings, policy, None, 1)
+        self.assertNotIn(one, equivalent)
+        self.assertNotIn(recorded, equivalent_options_fingerprints(dict(old_settings, attribution_workers=1), policy))
 
 
 if __name__ == "__main__":
