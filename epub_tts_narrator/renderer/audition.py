@@ -255,9 +255,10 @@ def _menu_lines(rows, width):
 
 def _menu_help_lines(width, speed="1x"):
     commands = (
-        "Number: play", "E [number]: edit", "D [source] [target]: share target's voice",
+        "Number: play", "E [number]: edit", "N [number]: your notes", "W [number]: pronounce a name",
+        "D [source] [target]: share target's voice", "A: accents",
         "G [number]: regenerate locally", "GG [number]: regenerate with Gemini",
-        "G11 [number]: regenerate with ElevenLabs", f">: playback speed (now {speed})", "Q: quit",
+        "G11 [number]: regenerate with ElevenLabs", "B: generate many", f">: playback speed (now {speed})", "Q: quit",
     )
     lines, line = [], ""
     for command in commands:
@@ -334,8 +335,16 @@ def _warn_regenerate_all(rows, *, book_local=False):
     print(display("\n".join(lines)), file=sys.stderr, flush=True)
 
 
-def run_casting(session, player, *, input_fn=None, output=print, playback_fn=None):
-    """One menu for playback, editing, sharing, and choosing a voice designer."""
+def run_casting(session, player, *, input_fn=None, output=print, playback_fn=None, config_path=None,
+                run_external=None, requests_factory=None):
+    """One menu for playback, editing, notes, accents, pronunciations, sharing, and generating voices.
+
+    Opening it generates nothing: voices are designed with their accents, so
+    a person settles accents (``A``) first, then generates one voice (``G``)
+    or many (``B``). ``run_external(argv)`` runs ``pronounce`` for ``W``
+    (default: a subprocess on this terminal); ``requests_factory()`` is the
+    text model for revising a description after notes (default: the book's).
+    """
     if input_fn is None:
         from .terminal import enable_line_editing
         enable_line_editing()
@@ -425,26 +434,185 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             session.update_prompt(row["voice_id"], **edits)
         return edits
 
+    def voice_numbers(rows, text):
+        """Voice numbers such as "3 5 8-10" (commas allowed) as rows, in cast order."""
+        chosen = set()
+        for part in text.replace(",", " ").split():
+            first, dash, last = part.partition("-")
+            if not first.isdecimal() or (dash and not last.isdecimal()):
+                raise ValueError("Enter voice numbers such as 3 5 8-10")
+            for number in range(int(first), int(last or first) + 1):
+                chosen.add(choose(rows, str(number))["voice_id"])
+        return [row for row in rows if row["voice_id"] in chosen]
+
+    def designer():
+        default = (getattr(session, "config", {}).get("voice_design") or {}).get("type")
+        default = default if default in {"local", "gemini", "elevenlabs"} else "local"
+        value = ask(f"Designer: L local / G Gemini / E ElevenLabs (Enter: {default}; B cancels): ").lower()
+        if value in {"b", "/cancel"}:
+            return None
+        return {"": default, "l": "local", "g": "gemini", "e": "elevenlabs"}.get(value) or designer()
+
+    def prepare_untaken(rows):
+        try:
+            prepared = session.ensure_ready_many([row["voice_id"] for row in rows])
+        except (ModelSetupError, VerificationUnavailable) as exc:
+            say(f"Voice preparation paused: {exc}")
+            return
+        by_id = {row["voice_id"]: row for row in rows}
+        for result in prepared:
+            if result["error"] is not None:
+                say(f"Could not prepare {_label(by_id[result['voice_id']])}: {result['error']}")
+
+    def bulk(rows):
+        from .cast_tui_model import bulk_rows, require_accents
+        missing, untaken = bulk_rows(rows, "missing"), bulk_rows(rows, "untaken")
+        value = ask(f"Generate: M every voice with no voice yet ({len(missing)}) / U every voice without an accepted "
+                    f"take ({len(untaken)}; saved verified takes first) / voice numbers such as 3 5 8-10 "
+                    "(empty cancels): ").strip()
+        if not value:
+            return
+        scope = {"m": "missing", "u": "untaken"}.get(value.lower(), "chosen")
+        targets = voice_numbers(rows, value) if scope == "chosen" else bulk_rows(rows, scope)
+        if not targets:
+            say("No voice to generate there.")
+            return
+        require_accents(session, targets, how="Use A to review this book's accents first.")
+        if scope == "untaken":
+            if ask(f"Prepare {len(targets)} voice(s)? y confirms: ").lower() != "y":
+                say("Nothing generated.")
+                return
+            say(f"Preparing {len(targets)} voice(s)…")
+            prepare_untaken(targets)
+            return
+        chosen_designer = designer()
+        if chosen_designer is None:
+            return
+        replaced = [_label(row) for row in targets if row["selected"] is not None]
+        say(f"Voices: {'; '.join(_label(row) for row in targets)}")
+        if replaced:
+            say(f"The accepted voice of {len(replaced)} of them is replaced by the new one; old takes stay.")
+        if ask(f"Generate {len(targets)} voice(s) with {chosen_designer}? y confirms: ").lower() != "y":
+            say("Nothing generated.")
+            return
+        for index, row in enumerate(targets, 1):
+            say(f"[{index}/{len(targets)}] Generating and verifying {_label(row)}…")
+            try:
+                session.regenerate(row["voice_id"], voice_designer=chosen_designer)
+            except (ModelSetupError, VerificationUnavailable) as exc:
+                say(f"Generation paused: {exc}")
+                return
+            except (ValueError, RuntimeError, OSError) as exc:
+                say(f"Could not generate {_label(row)}: {exc}")
+        say("Done generating.")
+
+    def notes(row):
+        from .character_notes import summary, validate_notes
+        if row.get("derived_from"):
+            raise ValueError("A changed voice shares its main voice's notes; add notes to the main voice")
+        current = row.get("notes") or {}
+        say("What you know about this character, even beyond what this book has revealed so far. It is used for the "
+            "character's accent and voice description (as a description of the character, never sent to the voice "
+            "designer).")
+        say("Now: " + (summary(current) or "(none)"))
+        record = dict(current)
+        try:
+            for field, prompt in (("names", "Other or later names, comma-separated"), ("gender", "Gender"),
+                                  ("origin", "Where they come from"), ("notes", "Notes")):
+                shown = ", ".join(current.get("names", [])) if field == "names" else current.get(field, "")
+                value = ask(f"{prompt} [{shown}] (Enter keeps; - clears; B cancels): ")
+                if value.lower() in {"b", "/cancel"}:
+                    raise KeyboardInterrupt
+                if value == "-":
+                    record.pop(field, None)
+                elif value and field == "names":
+                    record["names"] = list(dict.fromkeys(" ".join(name.split()) for name in value.split(",")
+                                                         if name.strip()))
+                elif value:
+                    record[field] = " ".join(value.split())
+        except KeyboardInterrupt:
+            say("\nNotes unchanged.")
+            return
+        record = validate_notes({key: value for key, value in record.items() if value})
+        if record == current:
+            say("Notes unchanged.")
+            return
+        session.save_notes(row["voice_id"], record)
+        say("Notes saved: " + (summary(record) or "(none: notes from an earlier book are cleared here)"))
+        if record and row.get("accent_source") != "chosen":
+            say("This character's accent is decided again with your notes: use A (or a render does it for a "
+                "voice that is already recorded).")
+        if record and ask("Ask the analysis model to revise the voice description so it agrees with your notes? "
+                          "y asks: ").lower() == "y":
+            follow_notes(row, record)
+
+    def follow_notes(row, record):
+        from .description_revision import book_requests, revise
+        from .description_revision_prompts import FOLLOW_NOTES
+        requests = (requests_factory or (lambda: book_requests(session.bundle, config_path, progress=say)))()
+        if requests is None:
+            raise ValueError("Set provider.model in the TOML configuration to revise descriptions with a model")
+        description = row.get("prompt") or row.get("description") or ""
+        proposals = revise(requests, [{"voice_id": row["voice_id"], "name": _label(row), "description": description,
+                                       "accent": row.get("accent") or "", "known": record}], FOLLOW_NOTES,
+                           progress=say)
+        if row["voice_id"] not in proposals:
+            say("The model left the description as it is.")
+            return
+        say("Now:     " + description)
+        say("Revised: " + proposals[row["voice_id"]])
+        if ask("Save the revised description? (recordings are unchanged until you regenerate) y saves: ").lower() == "y":
+            session.update_prompt(row["voice_id"], prompt=proposals[row["voice_id"]])
+            say("Description saved; regenerate the voice to hear it.")
+        else:
+            say("Description unchanged.")
+
+    def accents():
+        from .accent_assignment import review_accent_lines
+        from .accent_review import AccentPlanner
+        planner = AccentPlanner(session.bundle, session.config, config_path, progress=say)
+        if not planner.pending:
+            say("Every voice's accent is decided elsewhere (cues chosen in casting, accents in traits you set, or "
+                "earlier books); nothing to assign here. Change one voice's cue with E.")
+            return
+        saved = planner.load_saved()
+        say(f"Accents: {len(planner.pending)} voice(s) in this book's plan"
+            + (f", from the saved plan ({len(planner.groups)} group(s))" if saved else "; asking the model for a plan")
+            + ".")
+        if planner.notes_changed:
+            say("Your notes changed since these accents were assigned: "
+                + ", ".join(planner.label(voice_id) for voice_id in planner.notes_changed[:6])
+                + ". Revise (I) to place them with your notes, or save (A) to keep their accents.")
+        review_accent_lines(planner, saved=saved, write=say, ask=lambda prompt: input_fn(display(prompt)))
+
+    def pronounce(row):
+        from .cast_tui_model import pronounce_command
+        readings = list((row.get("pronunciations") or {}).items())
+        for index, (word, reading) in enumerate(readings, 1):
+            say(f"  {index}. {word} — {reading}")
+        value = ask("Which name? Its number, or type a word (empty cancels): ")
+        if not value:
+            return
+        word = readings[int(value) - 1][0] if value.isdecimal() and 1 <= int(value) <= len(readings) else value
+        argv = pronounce_command(session, row, word, config_path, plain=True)
+        say(f"Opening pronounce for {word}; the cast menu comes back when it closes.")
+        if run_external is not None:
+            code = run_external(argv)
+        else:
+            import subprocess
+            code = subprocess.run(argv, check=False).returncode
+        say(f"Pronounce for {word} closed" + ("." if code in (0, 2) else f" with exit code {code}."))
+
     last_voice_id = None
     try:
         prepare = getattr(session, "prepare_samples", None)
         if callable(prepare):
             prepare()
         rows = session.rows()
-        pending = [row for row in rows if row["selected"] is None and not row.get("regeneration")]
-        missing = sum(not row["candidates"] for row in pending)
-        if pending:
-            say(f"Preparing voices: {len(pending) - missing} saved, {missing} to generate.")
-        if pending:
-            try:
-                prepared = session.ensure_ready_many([row["voice_id"] for row in pending])
-            except (ModelSetupError, VerificationUnavailable) as exc:
-                say(f"Voice preparation paused: {exc}")
-            else:
-                by_id = {row["voice_id"]: row for row in pending}
-                for result in prepared:
-                    if result["error"] is not None:
-                        say(f"Could not prepare {_label(by_id[result['voice_id']])}: {result['error']}")
+        waiting = sum(row["selected"] is None for row in rows)
+        if waiting:
+            say(f"{waiting} voice(s) have no accepted voice. Nothing is generated until you ask: review accents "
+                "first (A), then G generates one voice and B generates many.")
         _prepare_playback_samples(player, session.rows(), say)
         while True:
             rows = session.rows()
@@ -458,7 +626,7 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
             if last_voice_id is not None:
                 last = next((row for row in rows if row["voice_id"] == last_voice_id), None)
                 if last:
-                    say(f"Without a number, E, D, G, GG, and G11 use {_label(last)}.")
+                    say(f"Without a number, E, N, W, D, G, GG, and G11 use {_label(last)}.")
             action = ask("> ").lower()
             try:
                 if action == "q":
@@ -466,6 +634,24 @@ def run_casting(session, player, *, input_fn=None, output=print, playback_fn=Non
                 notice = playback_speed.line_command(action, player)
                 if notice is not None:
                     say(notice)
+                    continue
+                if action == "a":
+                    accents()
+                    continue
+                if action == "b":
+                    bulk(rows)
+                    continue
+                if action.startswith("n") and (action[1:].strip().isdecimal() or not action[1:].strip()):
+                    row = selected_row(rows, action[1:].strip())
+                    if row is not None:
+                        last_voice_id = row["voice_id"]
+                        notes(row)
+                    continue
+                if action.startswith("w") and (action[1:].strip().isdecimal() or not action[1:].strip()):
+                    row = selected_row(rows, action[1:].strip())
+                    if row is not None:
+                        last_voice_id = row["voice_id"]
+                        pronounce(row)
                     continue
                 if action.startswith("d"):
                     numbers = action[1:].split()
@@ -655,7 +841,7 @@ def casting_command(args, bundle, config):
                 from .bundle import load_bundle
                 return casting_command(args, load_bundle(bundle["directory"]), config)
         elif action == "interactive":
-            run_casting(session, player)
+            run_casting(session, player, config_path=getattr(args, "config", None))
         elif action == "list":
             print(json.dumps([row] if row else rows, ensure_ascii=False, indent=2))
         elif action == "generate":

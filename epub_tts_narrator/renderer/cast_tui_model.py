@@ -204,6 +204,64 @@ def detail_sections(row, rows, status, note):
     return sections
 
 
+# Shared with the line menu (``audition.run_casting``) -----------------------------
+
+BULK_SCOPES = ("missing", "untaken", "chosen")
+
+
+def bulk_rows(rows, scope, voice_ids=()):
+    """The rows a bulk generation covers: ``missing`` (no voice and no takes), ``untaken`` (no
+    accepted take), or ``chosen`` (``voice_ids``, in cast order)."""
+    if scope == "missing":
+        return [row for row in rows if row.get("selected") is None and not row.get("candidates")
+                and not row.get("regeneration")]
+    if scope == "untaken":
+        return [row for row in rows if row.get("selected") is None and not row.get("regeneration")]
+    if scope == "chosen":
+        wanted = set(voice_ids)
+        return [row for row in rows if row["voice_id"] in wanted]
+    raise ValueError("Unknown bulk generation scope")
+
+
+def undecided_accents(session, rows):
+    """The labels of ``rows`` whose accent nobody has decided, which cannot be designed yet."""
+    bundle = getattr(session, "bundle", None)
+    if not isinstance(bundle, dict):
+        return []
+    from . import accent_readiness
+    missing = set(accent_readiness.undecided(bundle, session.config,
+                                             [row["voice_id"] for row in rows if not row.get("derived_from")]))
+    return [label(row) for row in rows if row["voice_id"] in missing]
+
+
+def require_accents(session, rows, *, how):
+    """Refuse (``ValueError``) when any of ``rows`` has no accent decided; ``how`` says how to decide them."""
+    names = undecided_accents(session, rows)
+    if names:
+        shown = ", ".join(names[:6]) + (f" and {len(names) - 6} more" if len(names) > 6 else "")
+        raise ValueError(f"Decide accents first: {shown} {'has' if len(names) == 1 else 'have'} no accent yet, "
+                         f"and each voice is designed with its accent. {how}")
+
+
+def pronounce_command(session, row, word, config_path=None, *, plain=False):
+    """The ``pronounce`` command (``argv``) for ``word``, with the test sentence in ``row``'s voice when it has one."""
+    import sys
+    from ..name_pronunciations import name_key
+    word = " ".join(str(word or "").split())
+    if not word:
+        raise ValueError("Type the word to pronounce")
+    name_key(word)  # One word as written, e.g. Zandramas or Ce'Nedra.
+    bundle = getattr(session, "bundle", None) or {}
+    if "directory" not in bundle:
+        raise ValueError("This cast has no book directory to save pronunciations in")
+    argv = [sys.executable, "-m", "epub_tts_narrator.renderer", "pronounce", str(bundle["directory"]), word]
+    if row.get("selected") is not None:
+        argv += ["--voice-id", row["voice_id"]]  # The test sentence in this character's voice.
+    if config_path:
+        argv += ["--config", str(config_path)]
+    return argv + (["--plain"] if plain else [])
+
+
 class CastController:
     """Casting state for a screen: rows, statuses, filtering, and job-backed actions."""
 
@@ -599,34 +657,15 @@ class CastController:
     # Generating many voices at once (only when the person asks) ------------------
 
     def bulk_rows(self, scope, voice_ids=()):
-        """The rows a bulk generation covers: ``missing`` (no voice and no takes), ``untaken`` (no
-        accepted take), or ``chosen`` (``voice_ids``, in cast order)."""
-        if scope == "missing":
-            return [row for row in self._rows if row.get("selected") is None and not row.get("candidates")
-                    and not row.get("regeneration")]
-        if scope == "untaken":
-            return [row for row in self._rows if row.get("selected") is None and not row.get("regeneration")]
-        if scope == "chosen":
-            wanted = set(voice_ids)
-            return [row for row in self._rows if row["voice_id"] in wanted]
-        raise ValueError("Unknown bulk generation scope")
+        """The rows a bulk generation covers (``bulk_rows``)."""
+        return bulk_rows(self._rows, scope, voice_ids)
 
     def undecided_accents(self, rows):
         """The labels of ``rows`` whose accent nobody has decided, which cannot be designed yet."""
-        bundle = getattr(self.session, "bundle", None)
-        if not isinstance(bundle, dict):
-            return []
-        from . import accent_readiness
-        missing = set(accent_readiness.undecided(bundle, self.session.config,
-                                                 [row["voice_id"] for row in rows if not row.get("derived_from")]))
-        return [label(row) for row in rows if row["voice_id"] in missing]
+        return undecided_accents(self.session, rows)
 
     def _require_accents(self, rows):
-        names = self.undecided_accents(rows)
-        if names:
-            shown = ", ".join(names[:6]) + (f" and {len(names) - 6} more" if len(names) > 6 else "")
-            raise ValueError(f"Decide accents first: {shown} {'has' if len(names) == 1 else 'have'} no accent yet, "
-                             "and each voice is designed with its accent. Press v to review the accent plan.")
+        require_accents(self.session, rows, how="Press v to review the accent plan.")
 
     def bulk_generate(self, scope, voice_ids=(), designer="local"):
         """Generate the scope's voices: one queued job per voice (``untaken`` reuses saved takes first)."""
@@ -688,21 +727,7 @@ class CastController:
 
     def pronounce_command(self, row, word):
         """The ``pronounce`` command for ``word`` in this voice (``argv``), run with the cast screen suspended."""
-        import sys
-        from ..name_pronunciations import name_key
-        word = " ".join(str(word or "").split())
-        if not word:
-            raise ValueError("Type the word to pronounce")
-        name_key(word)  # One word as written, e.g. Zandramas or Ce'Nedra.
-        bundle = getattr(self.session, "bundle", None) or {}
-        if "directory" not in bundle:
-            raise ValueError("This cast has no book directory to save pronunciations in")
-        argv = [sys.executable, "-m", "epub_tts_narrator.renderer", "pronounce", str(bundle["directory"]), word]
-        if row.get("selected") is not None:
-            argv += ["--voice-id", row["voice_id"]]  # The test sentence in this character's voice.
-        if self.config_path:
-            argv += ["--config", str(self.config_path)]
-        return argv
+        return pronounce_command(self.session, row, word, self.config_path)
 
     def retry(self, job_id):
         return self.jobs.retry(job_id)

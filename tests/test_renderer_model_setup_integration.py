@@ -156,13 +156,14 @@ class ModelSetupIntegrationTests(unittest.TestCase):
         fail.assert_not_called()
         generate.assert_not_called()
 
-    def test_casting_startup_pauses_after_one_model_setup_failure_and_keeps_menu(self):
+    def test_bulk_casting_pauses_after_one_model_setup_failure_and_keeps_menu(self):
         session, player = Mock(), Mock()
         row = {"voice_id": "v1", "selected": None, "candidates": [], "label": "Mara"}
         session.rows.return_value = [row, {**row, "voice_id": "v2", "label": "Lena"}]
         session.ensure_ready_many.side_effect = ModelSetupError("Download declined")
         lines = []
-        run_casting(session, player, input_fn=lambda _: "q", output=lines.append)
+        answers = iter(["b", "u", "y", "q"])
+        run_casting(session, player, input_fn=lambda _: next(answers), output=lines.append)
         session.ensure_ready_many.assert_called_once_with(["v1", "v2"])
         self.assertTrue(any("Voice preparation paused: Download declined" in line for line in lines))
         self.assertTrue(any("Voice casting — 0/2 ready" in line for line in lines))

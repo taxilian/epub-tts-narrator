@@ -69,8 +69,10 @@ class SamplePlaybackIntegrationTests(unittest.TestCase):
         self.assertIn("/fixtures/v2-1.wav", paths)
         self.assertFalse(any(event[0] == "regenerate" for event in session.events))
 
-    def test_interactive_prepares_after_missing_voices_before_first_menu_and_continues_on_error(self):
+    def test_interactive_prepares_accepted_voices_before_first_menu_and_continues_on_error(self):
         session = SessionDouble()
+        for row in session.rows():
+            session.ensure_ready(row["voice_id"])
         player = PlayerDouble()
         events, output = [], []
 

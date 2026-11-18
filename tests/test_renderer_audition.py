@@ -412,6 +412,7 @@ class CastingTerminalTests(unittest.TestCase):
                          [("regenerate", "v1")])
 
     def test_number_plays_immediately_then_returns_to_menu_without_extra_steps(self):
+        self.ready()
         self.run_ui("1", "2", "Q")
         self.assertEqual(self.player.played, ["/fixtures/v1-1.wav", "/fixtures/vn-1.wav"])
         self.assertEqual(len(self.prompts), 3)
@@ -423,6 +424,7 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertNotIn("needs acceptance", "\n".join(self.output).lower())
 
     def test_generate_edits_both_fields_once_and_automatically_selects_and_plays(self):
+        self.ready()
         self.run_ui("G1", "A warm, older voice.", "The river is quiet.", "", "", "q")
         row = self.session.row("v1")
         self.assertEqual(len(row["candidates"]), 2)
@@ -441,6 +443,7 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertFalse(self.player.playing)
 
     def test_plain_g_asks_for_character_and_blank_edits_keep_current_text(self):
+        self.ready()
         self.run_ui("g", "2", "", "", "", "", "q")
         row = self.session.row("vn")
         self.assertEqual(row["selected"]["candidate_id"], "vn-take-2")
@@ -450,6 +453,7 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertEqual(len(self.prompts), 7)
 
     def test_plain_g_defaults_to_last_played_character(self):
+        self.ready()
         self.run_ui("2", "G", "", "", "", "", "q")
         self.assertEqual(self.player.played, ["/fixtures/vn-1.wav", "/fixtures/vn-2.wav"])
         self.assertEqual([event for event in self.session.events if event[0] == "regenerate"],
@@ -458,6 +462,7 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertEqual(len(self.prompts), 7)
 
     def test_g_with_spaced_number_edits_only_provided_field(self):
+        self.ready()
         self.run_ui("G 1", "", "A new sample.", "", "", "q")
         self.assertEqual([event for event in self.session.events if event[0] == "edit"], [
             ("edit", "v1", {"reference_text": "A new sample."}),
@@ -602,6 +607,7 @@ class CastingTerminalTests(unittest.TestCase):
                              for prompt in self.prompts))
 
     def test_plain_g_without_last_character_can_cancel_with_blank(self):
+        self.ready()
         self.run_ui("g", "", "1", "q")
         self.assertFalse(any(event[0] == "regenerate" for event in self.session.events))
         self.assertEqual(self.player.played, ["/fixtures/v1-1.wav"])
@@ -617,6 +623,7 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertFalse(self.player.playing)
 
     def test_invalid_character_numbers_and_commands_leave_menu_usable(self):
+        self.ready()
         self.run_ui("0", "99", "G 99", "unknown", "1", "q")
         self.assertEqual(self.player.played, ["/fixtures/v1-1.wav"])
         self.assertFalse(any(event[0] == "regenerate" for event in self.session.events))
@@ -625,12 +632,15 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertEqual(len(self.prompts), 6)
 
     def test_eof_stops_playback_and_keeps_generated_selected_voice(self):
+        self.ready()
         self.run_ui("1")
         self.assertFalse(self.player.playing)
         self.assertEqual(self.session.row("v1")["selected"]["candidate_id"], "v1-take-1")
         self.assertTrue(any("Casting closed" in line for line in self.output))
 
     def test_interrupt_stops_playback_and_keeps_current_voice(self):
+        self.ready()
+
         def interrupted(player, path):
             player.start(path)
             raise KeyboardInterrupt
@@ -641,6 +651,7 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertEqual(self.session.row("v1")["selected"]["candidate_id"], "v1-take-1")
 
     def test_failed_playback_returns_to_menu_and_can_play_another_voice(self):
+        self.ready()
         def failing_once(player, path):
             if path.endswith("v1-1.wav"):
                 raise ValueError("Audio playback failed")
@@ -650,44 +661,102 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertTrue(any("Audio playback failed" in line for line in self.output))
         self.assertEqual(self.player.played, ["/fixtures/vn-1.wav"])
 
+    def test_n_saves_your_notes_and_revises_the_description_to_follow_them_only_on_yes(self):
+        from epub_tts_narrator.renderer.description_revision_prompts import FOLLOW_NOTES
+        saved, asked = [], []
+        self.session.save_notes = lambda voice_id, record: saved.append((voice_id, record))
+
+        class Requests:
+            def run(self, system, payload, validate):
+                asked.append(payload)
+                return validate({"d": [["v1", "A cold, hollow female voice."]]})
+
+        answers = iter(["N1", "Zandramas, the Child of Dark", "female", "Mallorea", "Revealed later.", "y", "y",
+                        "q"])
+        run_casting(self.session, self.player, input_fn=lambda prompt: next(answers), output=self.output.append,
+                    playback_fn=self.playback, requests_factory=Requests)
+        self.assertEqual(saved, [("v1", {"names": ["Zandramas", "the Child of Dark"], "gender": "female",
+                                         "origin": "Mallorea", "notes": "Revealed later."})])
+        self.assertEqual(asked[0]["instructions"], FOLLOW_NOTES)
+        self.assertEqual(asked[0]["voices"][0][-1][0], ["Zandramas", "the Child of Dark"])
+        self.assertIn(("edit", "v1", {"prompt": "A cold, hollow female voice."}), self.session.events)
+        # B at a field leaves the notes as they were.
+        saved.clear()
+        self.run_ui("N1", "B", "q")
+        self.assertEqual(saved, [])
+
+    def test_w_opens_pronounce_for_a_name_on_this_terminal(self):
+        self.ready()
+        self.session.data[0]["pronunciations"] = {"Mara": "engine default", "Quill": "K W IH1 L"}
+        self.session.bundle = {"directory": "/books/one"}
+        ran = []
+        answers = iter(["W1", "2", "W1", "Zandramas", "q"])
+        run_casting(self.session, self.player, input_fn=lambda prompt: next(answers), output=self.output.append,
+                    playback_fn=self.playback, run_external=lambda argv: ran.append(argv) or 0)
+        self.assertEqual([argv[4:6] for argv in ran], [["/books/one", "Quill"], ["/books/one", "Zandramas"]])
+        self.assertTrue(all(argv[-1] == "--plain" and "--voice-id" in argv for argv in ran))
+        self.assertTrue(any("Quill — K W IH1 L" in line for line in self.output))
+
     def test_metadata_cannot_write_terminal_escape_sequences(self):
         self.session.row("v1")["characters"] = ["Mara\x1b[2J"]
         self.run_ui("q")
         self.assertNotIn("\x1b", "\n".join(self.output))
 
-    def test_startup_generates_and_selects_all_missing_samples_before_first_input(self):
+    def test_startup_generates_nothing_and_says_how_to(self):
         def first_input(prompt):
-            self.assertEqual([event for event in self.session.events if event[0] == "generate"],
-                             [("generate", "v1"), ("generate", "vn")])
-            self.assertTrue(all(len(row["candidates"]) == 1 for row in self.session.data))
-            self.assertTrue(all(row["selected"] is not None for row in self.session.data))
+            self.assertFalse(any(event[0] in {"generate", "ensure_ready", "regenerate"}
+                                 for event in self.session.events))
             return "q"
 
         run_casting(self.session, self.player, input_fn=first_input, output=self.output.append,
                     playback_fn=self.playback)
+        self.assertTrue(any("Nothing is generated until you ask" in line for line in self.output))
+        self.assertTrue(all(row["selected"] is None for row in self.session.data))
+
+    def test_b_generates_every_voice_without_an_accepted_take_after_confirming(self):
+        self.run_ui("B", "U", "n", "q")
+        self.assertFalse(any(event[0] == "generate" for event in self.session.events))
+        self.run_ui("B", "U", "y", "q")
+        self.assertEqual([event for event in self.session.events if event[0] == "generate"],
+                         [("generate", "v1"), ("generate", "vn")])
+        self.assertTrue(all(row["selected"] is not None for row in self.session.data))
+
+    def test_b_generates_the_numbered_voices_with_the_chosen_designer(self):
+        self.ready()
+        self.run_ui("B", "2", "g", "y", "q")
+        self.assertEqual([event for event in self.session.events if event[0] in {"designer", "regenerate"}],
+                         [("designer", "gemini"), ("regenerate", "vn")])
+        self.assertTrue(any("replaced by the new one" in line for line in self.output))
+
+    def test_b_waits_until_the_voices_accents_are_decided(self):
+        self.session.bundle = {"directory": "/book", "cast": {}, "source": {}}
+        with patch("epub_tts_narrator.renderer.accent_readiness.undecided", return_value=["v1"]):
+            self.run_ui("B", "M", "q")
+        self.assertFalse(any(event[0] in {"generate", "regenerate"} for event in self.session.events))
+        self.assertTrue(any("Decide accents first" in line and "Use A" in line for line in self.output))
 
     def test_external_verification_outage_stops_preparing_more_voices_but_keeps_menu(self):
         from epub_tts_narrator.renderer.workflow import VerificationUnavailable
         self.session.generation_error = VerificationUnavailable("JEV confirmation unavailable; saved audio retained.")
-        self.run_ui("q")
+        self.run_ui("B", "U", "y", "q")
         self.assertEqual([event for event in self.session.events if event[0] == "generate"],
                          [("generate", "v1")])
         self.assertTrue(any("Voice preparation paused" in line for line in self.output))
         self.assertTrue(any("Voice casting" in line for line in self.output))
         self.assertIsNone(self.session.row("vn")["selected"])
 
-    def test_startup_reuses_active_voices_and_selects_saved_pending_sample_without_generation(self):
+    def test_b_reuses_active_voices_and_selects_saved_pending_sample_without_generation(self):
         self.session.generate("v1")
         self.session.accept("v1", "v1-take-1")
         self.session.generate("vn")
         self.session.events.clear()
         with patch.object(self.session, "generate", side_effect=AssertionError("Loaded model")):
-            self.run_ui("q")
+            self.run_ui("B", "U", "y", "q")
         self.assertEqual(self.session.row("v1")["selected"]["candidate_id"], "v1-take-1")
         self.assertEqual(self.session.row("vn")["selected"]["candidate_id"], "vn-take-1")
         self.assertFalse(any(event[0] == "generate" for event in self.session.events))
 
-    def test_all_twenty_six_pending_samples_become_active_on_startup(self):
+    def test_all_twenty_six_pending_samples_become_active_with_b(self):
         template = self.session.data[0]
         self.session.data = [dict(deepcopy(template), voice_id=f"voice-{index}",
                                   characters=[f"Character {index}"])
@@ -696,7 +765,7 @@ class CastingTerminalTests(unittest.TestCase):
             self.session.generate(row["voice_id"])
         self.session.events.clear()
         with patch.object(self.session, "generate", side_effect=AssertionError("Loaded model")):
-            self.run_ui("q")
+            self.run_ui("B", "U", "y", "q")
         self.assertEqual(sum(row["selected"] is not None for row in self.session.data), 26)
         self.assertEqual(sum(event[0] == "accept" for event in self.session.events), 26)
 
@@ -709,16 +778,16 @@ class CastingTerminalTests(unittest.TestCase):
         self.assertFalse(any(event[0] in {"generate", "accept", "regenerate"}
                              for event in self.session.events))
 
-    def test_failed_startup_voice_does_not_prevent_playback_or_regeneration(self):
+    def test_failed_bulk_voice_does_not_prevent_playback_or_regeneration(self):
         self.session.generation_error = RuntimeError("The transcript did not match.")
-        self.run_ui("2", "G1", "", "", "", "q")
+        self.run_ui("B", "U", "y", "2", "G1", "", "", "", "q")
         self.assertTrue(any("The transcript did not match." in line for line in self.output))
         self.assertEqual(self.player.played, ["/fixtures/vn-1.wav", "/fixtures/v1-1.wav"])
         self.assertTrue(all(row["selected"] is not None for row in self.session.data))
 
     def test_number_for_voice_with_no_sample_does_not_start_playback(self):
         self.session.generation_error = RuntimeError("The transcript did not match.")
-        self.run_ui("1", "2", "q")
+        self.run_ui("B", "U", "y", "1", "2", "q")
         self.assertEqual(self.player.played, ["/fixtures/vn-1.wav"])
         self.assertIsNone(self.session.row("v1")["selected"])
         self.assertTrue(any("sample" in line.lower() and "G" in line for line in self.output))

@@ -469,3 +469,22 @@ class CastAccentViewTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIsInstance(self.app.screen, AccentScreen)
             self.assertTrue(self.app.is_running)  # back on the cast, not quit
             self.assertFalse(self.planner.saved)
+
+
+class CastLineMenuAccentTests(PlannerCase):
+    """The cast line menu's A reviews this book's accents as lines, like accents BOOK --plain."""
+
+    def test_a_proposes_a_plan_and_saves_it_on_a(self):
+        from types import SimpleNamespace
+        from epub_tts_narrator.renderer.audition import run_casting
+        replies = Replies(split(("the harbor", "Scottish"), ("inland", "Welsh")))
+        session = SimpleNamespace(bundle=self.bundle, config=self.config, rows=lambda: [])
+        player = SimpleNamespace(stop=lambda: None)
+        answers, output = iter(["A", "A", "q"]), []
+        with patch.object(accent_assignment, "_requests", return_value=replies), \
+                patch.object(accent_assignment, "_book_cache", return_value=self.directory / ".cache"):
+            run_casting(session, player, input_fn=lambda prompt: next(answers), output=output.append,
+                        playback_fn=lambda *args: None)
+        first = next(iter(accent_assignment.voice_entries(self.bundle)))
+        self.assertEqual(assigned_accents(self.bundle, self.config)[first], "Scottish accent")
+        self.assertTrue(any("Saved accents" in line for line in output))

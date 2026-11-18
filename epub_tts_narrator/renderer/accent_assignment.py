@@ -631,7 +631,7 @@ def run_accents_command(bundle, config, args, config_path):
     printed, and a terminal can save it, type instructions for the model to
     revise it, ask for a new plan, or leave it.
     """
-    from .accent_review import AccentPlanner, ask_line, report
+    from .accent_review import AccentPlanner
     planner = AccentPlanner(bundle, config, config_path, instructions=args.instructions,
                             keep=getattr(args, "keep", False), resume=args.resume,
                             progress=lambda message: print(message, file=sys.stderr))
@@ -668,33 +668,47 @@ def run_accents_command(bundle, config, args, config_path):
             controller.close()
         print(f"Saved accents for {len(planner.pending)} voice(s)." if planner.saved else "Nothing saved.")
         return 0
+    review_accent_lines(planner, saved=saved, instructions=args.instructions, apply=args.apply,
+                        interactive=sys.stdin.isatty() and sys.stdout.isatty())
+    return 0
+
+
+def review_accent_lines(planner, *, saved, instructions=None, apply=False, interactive=True, write=print, ask=None):
+    """The accent review as lines (``accents BOOK --plain``, and the cast line menu's ``A``).
+
+    A book without a saved plan gets a proposal; ``instructions`` revise a
+    saved one. A terminal then saves, revises with typed instructions, asks
+    for a new plan, or leaves (``accent_review.ask_line``; ``ask(prompt)``
+    reads one answer, ``EOFError`` ending input). Returns the number of
+    voices saved, or None when nothing was saved.
+    """
+    from .accent_review import ask_line, report
     if not saved:
         planner.propose()
-    elif args.instructions:
-        planner.revise(args.instructions)
-    elif args.apply:
-        report(planner)
-        print("The saved plan is unchanged; nothing to save. Pass --instructions to revise it.")
-        return 0
-    report(planner)
-    interactive = sys.stdin.isatty() and sys.stdout.isatty()
-    while not args.apply:
+    elif instructions:
+        planner.revise(instructions)
+    elif apply:
+        report(planner, write)
+        write("The saved plan is unchanged; nothing to save. Pass --instructions to revise it.")
+        return None
+    report(planner, write)
+    while not apply:
         if not interactive:
-            print("Report only: nothing saved. Run it in a terminal to review it, or pass --apply.")
-            return 0
-        choice, instructions = ask_line()
+            write("Report only: nothing saved. Run it in a terminal to review it, or pass --apply.")
+            return None
+        choice, typed = ask_line(write=write, ask=ask)
         if choice == "leave":
-            print("Nothing saved.")
-            return 0
+            write("Nothing saved.")
+            return None
         if choice == "save":
             break
         if choice == "new":
             planner.propose()
         else:
-            planner.revise(instructions)
-        report(planner)
+            planner.revise(typed)
+        report(planner, write)
     count = planner.save()
-    print(f"Saved accents for {count} voice(s) in {ASSIGNMENTS_FILENAME}, with each group's origin and reason in "
+    write(f"Saved accents for {count} voice(s) in {ASSIGNMENTS_FILENAME}, with each group's origin and reason in "
           f"{GROUPS_FILENAME}" + (f" and the guidance in {GUIDANCE_FILENAME}"
                                   if planner.explicit_guidance is not None or planner.revisions else "") + ".")
-    return 0
+    return count

@@ -429,14 +429,28 @@ def report(planner, write=print):
           "this book.")
 
 
-def ask_line(read=None, write=print):
-    """The line interface's choice: ("save"|"leave"|"new"|"revise", instructions)."""
-    read = read or sys.stdin.readline
+def ask_line(read=None, write=print, *, ask=None):
+    """The line interface's choice: ("save"|"leave"|"new"|"revise", instructions).
+
+    ``ask(prompt)`` (e.g. the cast line menu's input) reads one answer
+    without its newline and raises ``EOFError`` at the end of input; without
+    it, the prompt is printed and ``read`` (default ``sys.stdin.readline``)
+    reads a line.
+    """
+    if ask is not None:
+        def read_answer(prompt):
+            return ask(prompt) + "\n"
+    else:
+        reader = read or sys.stdin.readline
+
+        def read_answer(prompt):
+            print(prompt, end="", flush=True)
+            return reader()
+    read = lambda: read_answer("What should change? ")  # noqa: E731
     while True:
-        print("[A] save these accents / [I] type instructions for the model to revise them / "
-              "[N] ask the model for a new plan / [L] leave the book unchanged: ", end="", flush=True)
         try:
-            answer = read()
+            answer = read_answer("[A] save these accents / [I] type instructions for the model to revise them / "
+                                 "[N] ask the model for a new plan / [L] leave the book unchanged: ")
         except KeyboardInterrupt:
             write("\nInterrupted; leaving the book unchanged.")
             return "leave", None
@@ -453,7 +467,6 @@ def ask_line(read=None, write=print):
         if answer.casefold() == "i" or answer.casefold().startswith("i "):
             text = answer[1:].strip()
             if not text:
-                print("What should change? ", end="", flush=True)
                 try:
                     text = read().strip()
                 except (KeyboardInterrupt, EOFError, OSError):
