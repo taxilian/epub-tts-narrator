@@ -518,6 +518,11 @@ def main(argv=None, *, in_shell=False):
             if refresh_outdated_directions(directory, config, provider_client, progress):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # Every line's direction is reviewed in its scene; only wrong ones are replaced.
+            from .direction_review import review_book_directions
+            if review_book_directions(directory, config, provider_client, progress):
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
         revised = apply_edits(original, read_json(args.edits)) if args.edits else original
         if (revised["source"] != original["source"] or revised["cast"] != original["cast"]
                 or revised["provenance"].get("series") != original["provenance"].get("series")):

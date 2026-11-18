@@ -105,7 +105,7 @@ def _context(document, row, other, numbers):
 
 def nominate(document, requests, notes):
     """The whole-cast request: pairs of entry IDs that may be one person."""
-    from .cast_review_prompts import CAST_REVIEW_VERSION, NOMINATE
+    from .rerun_review_prompts import CAST_REVIEW_VERSION, NOMINATE
     from .character_merge import first_line
     rows = document["cast"]["characters"]
     if len(rows) < 2:
