@@ -91,5 +91,17 @@ class GroupLineEditTests(unittest.TestCase):
         self.assertEqual(chunks["b3:0"]["segment"]["simultaneous_mode"], "layered")
 
 
+class LaneTakeTests(unittest.TestCase):
+    def test_each_voice_of_a_line_said_together_has_its_own_takes(self):
+        from epub_tts_narrator.review_tui_render import _acceptance_clips, _acceptance_lanes
+        acceptance = [{"chunk_id": "c1", "request_hash": "solo"},
+                      {"chunk_id": "c2", "request_hash": "mix", "speaker_lanes": [
+                          {"voice_id": "v-lead", "request_hash": "lane-1"},
+                          {"voice_id": "v-pool", "request_hash": "lane-2"}]}]
+        self.assertEqual(list(_acceptance_lanes(acceptance)),
+                         [("c1", "solo", None), ("c2", "lane-1", "v-lead"), ("c2", "lane-2", "v-pool")])
+        self.assertEqual(list(_acceptance_clips(acceptance)), [("c1", "solo"), ("c2", "lane-1"), ("c2", "lane-2")])
+
+
 if __name__ == "__main__":
     unittest.main()

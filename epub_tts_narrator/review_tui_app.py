@@ -507,12 +507,21 @@ class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
         if len(clips) == 1:
             self._open_takes(chapter, clips[0], "")
             return
-        options = [(index, f"Chunk {index + 1}/{len(clips)}  {clip['chunk_id']}") for index, clip in enumerate(clips)]
+        def name(index, clip):
+            # A line several voices say together lists each voice's own takes.
+            if clip.get("voice_id"):
+                return f"{self.controller.voice_label(clip['voice_id'])}'s takes"
+            return f"Chunk {index + 1}/{len(clips)}  {clip['chunk_id']}"
+        options = [(index, name(index, clip)) for index, clip in enumerate(clips)]
+        voices = all(clip.get("voice_id") for clip in clips)
 
         def chosen(index):
             if index is not None:
-                self._open_takes(chapter, clips[index], f" — chunk {index + 1}/{len(clips)}")
-        self.push_screen(ChoiceScreen("This passage was rendered in several chunks. Which one?", options,
+                part = (f" — {self.controller.voice_label(clips[index]['voice_id'])}" if clips[index].get("voice_id")
+                        else f" — chunk {index + 1}/{len(clips)}")
+                self._open_takes(chapter, clips[index], part)
+        self.push_screen(ChoiceScreen("Several voices say this line. Whose takes?" if voices else
+                                      "This passage was rendered in several chunks. Which one?", options,
                                       filterable=False), chosen)
 
     def _open_takes(self, chapter, clip, part):

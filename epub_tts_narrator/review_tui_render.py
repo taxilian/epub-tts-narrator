@@ -15,6 +15,8 @@ from .speaker_decisions import _display
 class ClipRef(TypedDict):
     chunk_id: str
     request_hash: str
+    # One voice of a line several voices say together (a simultaneous or ensemble lane).
+    voice_id: NotRequired[str]
 
 
 class ChapterIndex(TypedDict):
@@ -143,6 +145,12 @@ def load_failed_chapters(work_directory: str | Path) -> dict[int, ChapterFailure
 
 def _acceptance_clips(acceptance: list[Any] | None):
     """Yield (chunk_id, request_hash) for ordinary and simultaneous clip records."""
+    for chunk_id, request_hash, _ in _acceptance_lanes(acceptance):
+        yield chunk_id, request_hash
+
+
+def _acceptance_lanes(acceptance: list[Any] | None):
+    """Yield (chunk_id, request_hash, lane voice_id or None) for every saved take record."""
     for row in acceptance if isinstance(acceptance, list) else []:
         if not isinstance(row, dict) or not isinstance(row.get("chunk_id"), str):
             continue
@@ -150,7 +158,15 @@ def _acceptance_clips(acceptance: list[Any] | None):
         records = lanes if isinstance(lanes, list) else [row]
         for record in records:
             if isinstance(record, dict) and isinstance(record.get("request_hash"), str):
-                yield row["chunk_id"], record["request_hash"]
+                voice = record.get("voice_id") if isinstance(lanes, list) else None
+                yield row["chunk_id"], record["request_hash"], voice if isinstance(voice, str) else None
+
+
+def _ref(chunk_id: str, request_hash: str, voice_id: str | None) -> ClipRef:
+    ref: ClipRef = {"chunk_id": chunk_id, "request_hash": request_hash}
+    if voice_id is not None:
+        ref["voice_id"] = voice_id
+    return ref
 
 
 def _chunk_segments(chunk: Any) -> list[str]:
@@ -174,14 +190,14 @@ def _add_clip(index: defaultdict[str, list[ClipRef]], segment_ids: list[str], re
 def _fallback_segments(work_directory: str | Path, acceptance: list[Any] | None) -> defaultdict[str, list[ClipRef]]:
     """Recover segment membership only from clips named by this chapter's checkpoint."""
     index: defaultdict[str, list[ClipRef]] = defaultdict(list)
-    for chunk_id, request_hash in _acceptance_clips(acceptance):
+    for chunk_id, request_hash, voice_id in _acceptance_lanes(acceptance):
         try:
             record = _read_json(Path(work_directory) / "clips" / request_hash / "accepted.json")
         except (OSError, ValueError):
             continue
         request = record.get("request")
         chunk = request.get("chunk") if isinstance(request, dict) else None
-        _add_clip(index, _chunk_segments(chunk), {"chunk_id": chunk_id, "request_hash": request_hash})
+        _add_clip(index, _chunk_segments(chunk), _ref(chunk_id, request_hash, voice_id))
     return index
 
 
@@ -231,14 +247,13 @@ class RenderIndex:
         saved_ids = {chunk_id for chunk_id, _ in _acceptance_clips(acceptance)}
         index: defaultdict[str, list[ClipRef]]
         if planned_ids == saved_ids and saved_ids:
-            hashes: defaultdict[str, list[str]] = defaultdict(list)
-            for chunk_id, request_hash in _acceptance_clips(acceptance):
-                hashes[chunk_id].append(request_hash)
+            hashes: defaultdict[str, list[tuple[str, str | None]]] = defaultdict(list)
+            for chunk_id, request_hash, voice_id in _acceptance_lanes(acceptance):
+                hashes[chunk_id].append((request_hash, voice_id))
             index = defaultdict(list)
             for chunk in planned:
-                for request_hash in hashes.get(chunk["chunk_id"], []):
-                    ref: ClipRef = {"chunk_id": chunk["chunk_id"], "request_hash": request_hash}
-                    _add_clip(index, _chunk_segments(chunk), ref)
+                for request_hash, voice_id in hashes.get(chunk["chunk_id"], []):
+                    _add_clip(index, _chunk_segments(chunk), _ref(chunk["chunk_id"], request_hash, voice_id))
         else:
             index = _fallback_segments(work, acceptance)
         return {"status": "indexed", "work_directory": work, "segments": dict(index)}
