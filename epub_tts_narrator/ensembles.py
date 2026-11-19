@@ -170,3 +170,56 @@ def validate_segment(check, segment: dict[str, Any], path: str, voice_index: dic
     check.choice(value.get("basis"), set(LINE_BASES), f"{at}.basis")
     if value.get("basis") != "user" or "evidence" in value:
         check.evidence(value.get("evidence"), f"{at}.evidence", required=value.get("basis") != "user")
+
+
+# Fields a person's ensemble revision may change (``analysis_revision`` scope "ensembles").
+_VOICE_KEYS = frozenset({"ensemble"})
+_CHARACTER_KEYS = frozenset({"group"})
+
+
+def _without(record: dict[str, Any], keys) -> dict[str, Any]:
+    return {key: value for key, value in record.items() if key not in keys}
+
+
+def validate_ensemble_revision(document: dict[str, Any], candidate: dict[str, Any]) -> list[str]:
+    """Check a person's ensemble revision; return the pool voices it adds.
+
+    Allowed: set, change or remove a voice's ``ensemble``; add pool voices
+    (``member_of``) or remove ones no ensemble lists any more; set, change or
+    remove a character's ``group`` with ``basis: "user"``. Everything else
+    (source, segments, roles, other voice fields, characters' other fields,
+    series identity) must be exactly as before.
+    """
+    if (candidate["source"] != document["source"] or candidate["segments"] != document["segments"]
+            or candidate["cast"]["roles"] != document["cast"]["roles"]
+            or candidate["provenance"].get("series") != document["provenance"].get("series")):
+        raise ValueError("Ensemble revisions must preserve the source, lines, roles and series identity")
+    before = {voice["id"]: voice for voice in document["cast"]["voices"]}
+    after = {voice["id"]: voice for voice in candidate["cast"]["voices"]}
+    added = [voice_id for voice_id in after if voice_id not in before]
+    for voice_id, voice in before.items():
+        if voice_id not in after:
+            if "member_of" not in voice:
+                raise ValueError(f"An ensemble revision can remove only pool voices, not {voice_id}")
+            continue
+        if _without(after[voice_id], _VOICE_KEYS | {"member_of"}) != _without(voice, _VOICE_KEYS | {"member_of"}):
+            raise ValueError(f"An ensemble revision changed more than voice {voice_id}'s ensemble")
+        if after[voice_id].get("member_of") != voice.get("member_of") and "member_of" not in voice:
+            raise ValueError(f"An ensemble revision cannot turn voice {voice_id} into a pool voice")
+    for voice_id in added:
+        if "member_of" not in after[voice_id] or "ensemble" in after[voice_id]:
+            raise ValueError(f"An ensemble revision may add only pool voices (member_of), not {voice_id}")
+    kept = [voice_id for voice_id in after if voice_id in before]
+    if [voice_id for voice_id in before if voice_id in after] != kept:
+        raise ValueError("An ensemble revision must keep the cast's voice order")
+    old = {character["id"]: character for character in document["cast"]["characters"]}
+    new = {character["id"]: character for character in candidate["cast"]["characters"]}
+    if list(old) != list(new):
+        raise ValueError("Ensemble revisions must preserve the characters")
+    for character_id, character in old.items():
+        if _without(new[character_id], _CHARACTER_KEYS) != _without(character, _CHARACTER_KEYS):
+            raise ValueError(f"An ensemble revision changed more than {character_id}'s group")
+        changed = new[character_id].get("group") != character.get("group")
+        if changed and "group" in new[character_id] and new[character_id]["group"].get("basis") != "user":
+            raise ValueError("A person's group statement must have basis user")
+    return added

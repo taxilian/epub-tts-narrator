@@ -556,10 +556,15 @@ class CastingSession:
                 cloned = selected.get("creation", {}).get("derived_from", {})
                 base_now = self.store.load(derived.get("voice_id"))
                 clone_stale = bool(base_now and cloned.get("reference_sha256") != base_now.get("reference_sha256"))
+            own = next((character for character in cast["characters"] if character.get("voice_id") == voice_id), None)
             rows.append({
                 "voice_id": voice_id,
                 "canonical_voice_id": self.store.canonical_id(voice_id),
                 "label": label,
+                # Collective voices (COLLECTIVE_VOICES.md): analysis's proposal, a person's ensemble, a pool voice.
+                "group": deepcopy((own or {}).get("group")),
+                "ensemble": deepcopy(profile.get("ensemble")),
+                "member_of": profile.get("member_of"),
                 "derived_from": deepcopy(derived),
                 "clone_stale": clone_stale,
                 "characters": characters,

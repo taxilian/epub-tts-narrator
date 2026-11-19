@@ -198,10 +198,43 @@ def detail_sections(row, rows, status, note):
             and row.get("accent_suggestion") != row.get("accent") else ""), "A"),
         ("Sharing", sharing, "d"),
         ("Reference clips", clip_text, "c"),
+        *([("Several voices", ensemble_text(row, by_id), "C")] if ensemble_text(row, by_id) else []),
     ]
     if derived:
         sections.insert(3, ("Derived from", str(row["derived_from"].get("voice_id")), ""))
     return sections
+
+
+MODE_WORDS = {
+    "single": "one voice (the group's own)",
+    "unison": "all together, the same words at once",
+    "alternate": "taking turns, one voice per line",
+    "pool": "one voice for each unnamed member who speaks",
+    "staggered": "the same words, voices entering one after another",
+    "layered": "one clear voice with the others under it",
+}
+
+
+def ensemble_text(row, rows_by_id):
+    """What the details panel says about a group: a person's ensemble, else analysis's proposal."""
+    chosen, group = row.get("ensemble"), row.get("group")
+    if row.get("member_of"):
+        lead = rows_by_id.get(row["member_of"])
+        return f"One of the voices of {label(lead) if lead else row['member_of']}"
+    if chosen:
+        if chosen["mode"] == "single":
+            return "Kept as one voice (you chose; C changes it)"
+        names = [label(rows_by_id[member]) if member in rows_by_id else member for member in chosen["members"]]
+        mix = f", mixed {chosen['mix']}" if chosen.get("mix") else ""
+        return (f"{1 + len(chosen['members'])} voices, {MODE_WORDS[chosen['mode']]}{mix}: this voice, "
+                + ", ".join(names))
+    if group:
+        quote = next((item["quote"] for item in group.get("evidence", [])), "")
+        count = group.get("proposed_voices")
+        return (f"Proposed as a group{f' of {count} voices' if count else ''}"
+                + (f" ({MODE_WORDS.get(group.get('proposed_mode'), '')})" if group.get("proposed_mode") else "")
+                + (f" from “{quote}”" if quote else "") + "; speaks in one voice until you press C")
+    return ""
 
 
 # Shared with the line menu (``audition.run_casting``) -----------------------------
@@ -615,6 +648,33 @@ class CastController:
             self.log(f"Renamed {plan.character['name']} to {plan.name}; reopening the cast")
         return self.jobs.submit(f"Rename {plan.character['name']} to {plan.name}", run,
                                 scope={"voice": [plan.character["voice_id"]]})
+
+    # Collective voices ---------------------------------------------------------
+
+    def ensemble_view(self, row):
+        """The group's proposal, current ensemble and choosable characters (``ensemble_command.view``)."""
+        from .ensemble_command import view
+        return view(self.session.bundle, row["voice_id"])
+
+    def ensemble_plan(self, row, *, voices, mode, mix=None, named=()):
+        from .ensemble_command import plan_ensemble
+        return plan_ensemble(self.session.bundle, row["voice_id"], voices=voices, mode=mode, mix=mix, named=named)
+
+    def ensemble_decline(self, row):
+        from .ensemble_command import plan_decline
+        return plan_decline(self.session.bundle, row["voice_id"])
+
+    def save_ensemble(self, plan):
+        """Publish a person's ensemble choice; the cast reopens with its voices to cast."""
+        if any(job.active for job in self.jobs.jobs()):
+            raise ValueError("Wait for the running and queued jobs to finish before changing a group's voices")
+
+        def run():
+            from .ensemble_command import apply
+            apply(plan, progress=self.log)
+            self.reopen = True
+            self.log(f"Saved {plan.summary}; reopening the cast")
+        return self.jobs.submit(f"Several voices for {plan.name}", run, scope={"voice": []})
 
     def set_clips(self, row, count):
         voice_id = row["voice_id"]

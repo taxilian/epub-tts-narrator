@@ -196,6 +196,8 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
                 tooltip="Give this character a new name, e.g. to fix a misspelling (later books follow; "
                         "nothing is rendered again)"),
         Binding("c", "clips", "Clips", tooltip="Reference clip count for the next generation"),
+        Binding("C", "ensemble", "Several voices", show=False,
+                tooltip="Hear a group (chorus, twins, crowd) as several voices, or keep it as one"),
         Binding("i", "instruct", "Instruct",
                 tooltip="Type how descriptions should change; the model revises them for you to review"),
         Binding("r", "refresh_prompt", "Rewrite", show=False,
@@ -667,6 +669,78 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         self.push_screen(TextEditScreen(f"New name — {label(row)}", character["name"], single_line=True,
                                         help_text="The name as the book spells it. Ctrl+S saves · Escape cancels",
                                         validate=lambda value: self.controller.rename_plan(row, value)), typed)
+
+    def action_ensemble(self):
+        row = self._require_row()
+        if row is None:
+            return
+        if row.get("member_of"):
+            lead = self.controller.row(row["member_of"])
+            self.notify(f"This is one of {label(lead) if lead else 'a group'}'s voices; choose the group to change them",
+                        severity="warning")
+            return
+        shown = self._attempt(lambda: self.controller.ensemble_view(row))
+        if shown is None:
+            return
+        from .cast_tui_model import MODE_WORDS
+        from ..ensembles import DEFAULT_RECIPES
+        quote = f" The book: “{shown['evidence'][0]}”." if shown["evidence"] else ""
+        start = [("set", "Hear it as several voices"), ("single", "Keep it as one voice")]
+
+        def started(choice):
+            if choice == "single":
+                plan = self._attempt(lambda: self.controller.ensemble_decline(row))
+                if plan is not None:
+                    self._confirm(plan.summary + "\n\nSave?",
+                                  lambda: self._attempt(lambda: self.controller.save_ensemble(plan)),
+                                  title="One voice")
+            elif choice == "set":
+                proposed = (shown["group"] or {}).get("proposed_voices")
+                counts = [(count, f"{count} voices" + (" (proposed from the book)" if count == proposed else "")
+                           + (" (now)" if shown["ensemble"] and count == 1 + len(shown["ensemble"]["members"]) else ""))
+                          for count in range(2, 9)]
+                self.push_screen(ChoiceScreen(f"How many voices for {shown['name']}, this one included?", counts,
+                                              filterable=False, help_text="Enter chooses · Escape cancels"), counted)
+
+        def counted(voices):
+            if voices is None:
+                return
+            modes = [(mode, f"{mode}: {MODE_WORDS[mode]}") for mode in MODE_WORDS if mode != "single"]
+            modes.sort(key=lambda item: item[0] != shown["mode"])
+            self.push_screen(ChoiceScreen(f"How do the {voices} voices speak?", modes, filterable=False),
+                             lambda mode: moded(voices, mode))
+
+        def moded(voices, mode):
+            if mode is None:
+                return
+            recipes = {"unison": ("tight", "loose", "crowd"), "staggered": ("swell", "babble", "echo"),
+                       "layered": ("lead",)}.get(mode)
+            if not recipes:
+                return named(voices, mode, None)
+            options = [("default", f"Default ({DEFAULT_RECIPES[mode]})")] + [(name, name) for name in recipes]
+            self.push_screen(ChoiceScreen("How are they mixed?", options, filterable=False),
+                             lambda mix: mix is not None and named(voices, mode, None if mix == "default" else mix))
+
+        def named(voices, mode, mix):
+            if not shown["choosable"]:
+                return confirm(voices, mode, mix, [])
+            options = [(None, "No named characters: new voices for the group")] + [
+                (voice_id, f"{name} ({voice_id})") for voice_id, name in shown["choosable"]]
+            self.push_screen(MultiChoiceScreen(
+                "Are named characters among the voices (e.g. the twins)? Space marks several", options),
+                lambda chosen: chosen is not None and confirm(voices, mode, mix, chosen))
+
+        def confirm(voices, mode, mix, members):
+            plan = self._attempt(lambda: self.controller.ensemble_plan(row, voices=voices, mode=mode, mix=mix,
+                                                                       named=members))
+            if plan is not None:
+                self._confirm(plan.summary + ". New voices are added to the cast to design and accept before "
+                              "rendering.\n\nSave?",
+                              lambda: self._attempt(lambda: self.controller.save_ensemble(plan)),
+                              title="Several voices")
+
+        self.push_screen(ChoiceScreen(f"{shown['name']}: one voice or several?{quote}", start, filterable=False),
+                         started)
 
     def action_stop_sharing(self):
         row = self._require_row()
