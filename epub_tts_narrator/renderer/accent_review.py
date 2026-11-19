@@ -164,8 +164,18 @@ class AccentPlanner:
             self.progress(assignment.asked_more_line(result))
         return result
 
-    def propose(self):
-        """Ask for a fresh plan (the current one is replaced)."""
+    def propose(self, instructions=None):
+        """Ask for a fresh plan (the current one is replaced), optionally with a person's ``instructions``.
+
+        Instructions join the book's saved guidance for this plan and, once it
+        is saved, for later assignments (``save``)."""
+        instructions = " ".join(str(instructions or "").split())
+        if instructions:
+            notes = "\n".join(dict.fromkeys(note for note in [self.base_notes, instructions] if note))
+            if len(notes) > assignment.MAX_NOTES:
+                raise ValueError(f"Instructions must be at most {assignment.MAX_NOTES} characters with the book's "
+                                 "saved accent guidance")
+            self.base_notes = self.explicit_guidance = notes
         self._take(self._ask())
         return self.groups
 
@@ -365,11 +375,11 @@ class AccentController:
     def busy(self):
         return any(job.active for job in self.jobs.jobs())
 
-    def propose(self):
-        return self.jobs.submit("Ask for an accent plan", self._propose)
+    def propose(self, instructions=None):
+        return self.jobs.submit("Ask for an accent plan", lambda: self._propose(instructions))
 
-    def _propose(self):
-        self.planner.propose()
+    def _propose(self, instructions=None):
+        self.planner.propose(instructions)
         self.log(f"Plan: {len(self.planner.groups)} group(s), {self.planner.changed()} voice(s) would change accent.")
         self._on_change()
 

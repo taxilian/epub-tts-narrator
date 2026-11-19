@@ -225,7 +225,11 @@ class AccentScreen(Screen):
         self.query_one("#log", MessageLog).border_title = "Log"
         self.query_one("#jobs", JobsTable).border_title = "Model requests"
         if not self.controller.planner.groups and self.controller.planner.pending:
-            self.controller.propose()  # no saved plan yet
+            # No saved plan yet: instructions given on the command line, else asked for first.
+            if self.initial_instructions:
+                self.controller.propose()
+            else:
+                self.call_after_refresh(self._ask_then_propose)
         elif self.initial_instructions:
             self.controller.revise(self.initial_instructions)
         else:
@@ -425,7 +429,25 @@ class AccentScreen(Screen):
         if not self._idle():
             return
         self._confirm("Ask the model for a fresh plan? The current plan and your edits are replaced.",
-                      lambda: (self.controller.propose(), self.render_all()))
+                      self._ask_then_propose)
+
+    def _ask_then_propose(self):
+        """Ask for optional instructions, then for a plan; Escape asks for nothing."""
+        saved = self.controller.planner.base_notes
+
+        def submitted(text):
+            if text is None:
+                self.controller.log("No plan was asked for; press n when you want one.")
+            else:
+                self.controller.propose(text.strip() or None)
+            self.render_all()
+        self.app.push_screen(TextEditScreen(
+            "Instructions for the accent plan (optional)", "",
+            help_text="e.g. \"the imperial court should sound Italian\", \"no upper-class English\", "
+                      "\"keep the twins together\". Leave it empty for none"
+                      + (". The book's saved accent guidance is used too" if saved else "")
+                      + ". Ctrl+S asks for the plan · Escape cancels"),
+            submitted)
 
     def action_edit(self, field):
         if not self._idle():

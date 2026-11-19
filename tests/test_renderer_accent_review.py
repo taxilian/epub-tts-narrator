@@ -279,6 +279,18 @@ class LineTests(PlannerCase):
         self.assertIn("Saved accents", output.getvalue())
 
 
+async def answer_first_plan(app, pilot, text=""):
+    """The accent screen asks for optional instructions before its first plan: answer them."""
+    for _ in range(20):
+        if isinstance(app.screen, TextEditScreen):
+            break
+        await pilot.pause()
+    assert isinstance(app.screen, TextEditScreen), app.screen
+    app.screen.query_one("#editor", TextArea).text = text
+    await pilot.press("ctrl+s")
+    await pilot.pause()
+
+
 class AccentAppTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         case = PlannerCase()
@@ -302,6 +314,7 @@ class AccentAppTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_plan_opens_edits_revises_and_saves(self):
         async with self.app.run_test(size=(160, 45)) as pilot:
+            await answer_first_plan(self.app, pilot)
             await self.settle(pilot)
             groups = self.app.query_one("#groups", DataTable)
             self.assertEqual(groups.row_count, 2)
@@ -362,6 +375,7 @@ class AccentAppTests(unittest.IsolatedAsyncioTestCase):
         from epub_tts_narrator.renderer.accent_tui import AccentApp, KEPT, NO_ACCENT
         app = AccentApp(controller, title="Fixture Book")
         async with app.run_test(size=(160, 45)) as pilot:
+            await answer_first_plan(app, pilot)
             controller.jobs.wait_idle(5)
             await pilot.pause()
             await pilot.pause()
@@ -380,6 +394,7 @@ class AccentAppTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_moving_a_character_and_quitting_unsaved_asks_first(self):
         async with self.app.run_test(size=(160, 45)) as pilot:
+            await answer_first_plan(self.app, pilot)
             await self.settle(pilot)
             first = self.planner.pending[0]
             await pilot.press("m")
@@ -395,6 +410,25 @@ class AccentAppTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("n")
             await pilot.pause()
             self.assertFalse(self.planner.saved)
+
+    async def test_instructions_typed_before_the_first_plan_shape_it_and_escape_asks_nothing(self):
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            for _ in range(20):
+                if isinstance(self.app.screen, TextEditScreen):
+                    break
+                await pilot.pause()
+            await pilot.press("escape")
+            await self.settle(pilot)
+            self.assertEqual((self.case.replies.calls, self.planner.groups), ([], []))
+            await pilot.press("n")
+            self.assertIsInstance(self.app.screen, ConfirmScreen)
+            await pilot.press("y")
+            await answer_first_plan(self.app, pilot, "Harbor folk sound Irish")
+            await self.settle(pilot)
+            self.assertIn("Harbor folk sound Irish", self.case.replies.calls[0][1]["notes"])
+            self.assertEqual(len(self.planner.groups), 2)
+            self.planner.save()
+            self.assertIn("Harbor folk sound Irish", guidance(self.case.bundle, self.case.config))
 
 
 if __name__ == "__main__":
@@ -435,6 +469,8 @@ class CastAccentViewTests(unittest.IsolatedAsyncioTestCase):
         async with self.app.run_test(size=(160, 45)) as pilot:
             await pilot.press("v")
             await self.settle(pilot)
+            await answer_first_plan(self.app, pilot)
+            await self.settle(pilot)
             screen = self.app.screen
             self.assertIsInstance(screen, AccentScreen)
             self.assertEqual(screen.query_one("#groups", DataTable).row_count, 2)  # the first plan was proposed
@@ -459,6 +495,8 @@ class CastAccentViewTests(unittest.IsolatedAsyncioTestCase):
         from epub_tts_narrator.renderer.accent_tui import AccentScreen
         async with self.app.run_test(size=(160, 45)) as pilot:
             await pilot.press("v")
+            await self.settle(pilot)
+            await answer_first_plan(self.app, pilot)
             await self.settle(pilot)
             self.assertTrue(self.planner.dirty)
             await pilot.press("ctrl+q")
