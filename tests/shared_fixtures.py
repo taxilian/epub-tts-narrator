@@ -216,7 +216,7 @@ def route_mlx_takes_to_fake_generate(testcase):
 
 
 def skip_rerun_reviews(testcase):
-    """Rerunning ``analyze BOOK`` here skips its reviews of a saved book (cast, genders, speakers and splits, directions).
+    """Rerunning ``analyze BOOK`` here skips its reviews of a saved book (cast, genders, groups, speakers and splits, directions).
 
     For tests of other rerun behaviour whose fake models do not answer those
     reviews; ``test_cast_review``, ``test_gender_review``, ``test_attribution_recheck`` and ``test_direction_review`` test them.
@@ -224,6 +224,7 @@ def skip_rerun_reviews(testcase):
     from unittest.mock import patch
     for target in ("epub_tts_narrator.attribution_recheck.recheck_attributions",
                    "epub_tts_narrator.cast_review.review_cast",
+                   "epub_tts_narrator.group_proposals.review_groups",
                    "epub_tts_narrator.direction_review.review_book_directions",
                    "epub_tts_narrator.gender_review.review_genders"):
         patcher = patch(target, return_value=False)

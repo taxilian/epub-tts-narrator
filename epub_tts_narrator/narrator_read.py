@@ -2265,6 +2265,11 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
         segment_stats = {}
         segments = build_segments(source, cast, spans, labels, extras, ledger, notes, segment_stats,
                                   variant_roles=variant_roles, default_roles=default_roles)
+        # Groups the tags show (a chorus, a crowd, unnamed members) are proposed; nothing renders
+        # differently until a person casts them (COLLECTIVE_VOICES.md §5.2).
+        from .group_proposals import propose_groups
+        proposed, group_changes = propose_groups({"source": source, "cast": cast, "segments": segments})
+        cast, segments = proposed["cast"], proposed["segments"]
         # Plural speakers are guarded by their tags (flags only; COLLECTIVE_VOICES.md §6.1).
         from .group_cues import group_warnings
         group_flags = group_warnings({"source": source, "cast": cast, "segments": segments})
@@ -2287,6 +2292,7 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
                 "new_markup_speakers": new_speakers, "merges": merge_outcomes,
                 "series_checks": series_outcomes, "duplicate_checks": duplicate_outcomes,
                 "alias_checks": alias_outcomes,
+                "group_proposals": sum(1 for change in group_changes if "character_id" in change),
                 "verification": verify_stats, "voices_designed": designed,
                 "self_check": self_check_report(verify_stats, duplicate_outcomes, warnings,
                                                 sum(1 for row in segments if row["role_id"] is None),

@@ -272,9 +272,9 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
                        reserved_update_locks=None):
     """Publish a revision, coordinating manual decisions with profile refreshes."""
     if scope not in {"attribution", "source-edit", "voice-profiles", "speaker-decisions", "character-merge",
-                     "narrators", "character-rename", "ensembles"}:
+                     "narrators", "character-rename", "ensembles", "group-proposals"}:
         raise ValueError("Revision scope must be attribution, source-edit, voice-profiles, speaker-decisions, "
-                         "character-merge, narrators, character-rename, or ensembles")
+                         "character-merge, narrators, character-rename, ensembles, or group-proposals")
     if speaker_decision_inputs is not None and scope != "speaker-decisions":
         raise ValueError("speaker_decision_inputs are accepted only for speaker-decisions revisions")
     if reserved_update_locks is not None and scope == "speaker-decisions":
@@ -419,6 +419,22 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                 _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes)
             elif candidate != document:
                 raise ValueError("Narrator revisions may change only the selected book")
+        elif scope == "group-proposals":
+            if path in revisions:
+                from .ensembles import validate_group_proposal_revision
+                validate_group_proposal_revision(document, candidate)
+                sidecar = path / "audition-scripts.json"
+                if candidate["cast"] != document["cast"] and (sidecar.exists() or sidecar.is_symlink()):
+                    from .voice_profile_refresh import audition_sidecar_rebind
+                    sidecars.setdefault(path, {})[sidecar.name] = audition_sidecar_rebind(
+                        sidecar, source_fingerprint=fingerprint(document["source"]),
+                        cast_fingerprint_before=fingerprint(document["cast"]),
+                        cast_fingerprint_after=fingerprint(candidate["cast"]),
+                        voice_ids=[voice["id"] for voice in candidate["cast"]["voices"]])
+                    names[path].append(sidecar.name)
+                    original_hashes[path][sidecar.name] = _hash(sidecar)
+            elif candidate != document:
+                raise ValueError("Group proposals may change only the selected book")
         elif scope == "ensembles":
             if path in revisions:
                 from .ensembles import validate_ensemble_revision

@@ -522,6 +522,11 @@ def main(argv=None, *, in_shell=False):
             if review_narrators(directory, config, provider_client, progress, instructions=args.instructions):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # Groups the tags show (a chorus, a crowd) are proposed; a person casts them (cast C).
+            from .group_proposals import review_groups
+            if review_groups(directory, progress):
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every paragraph's speakers and split are checked once, and again after it changes.
             from .attribution_recheck import recheck_attributions
             if recheck_attributions(directory, config, provider_client, progress):

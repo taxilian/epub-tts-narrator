@@ -223,3 +223,23 @@ def validate_ensemble_revision(document: dict[str, Any], candidate: dict[str, An
         if changed and "group" in new[character_id] and new[character_id]["group"].get("basis") != "user":
             raise ValueError("A person's group statement must have basis user")
     return added
+
+
+def validate_group_proposal_revision(document: dict[str, Any], candidate: dict[str, Any]) -> None:
+    """Analysis's proposals on a saved book: new ``group``s (basis analysis) and new line cues only."""
+    if (candidate["source"] != document["source"] or candidate["cast"]["roles"] != document["cast"]["roles"]
+            or candidate["cast"]["voices"] != document["cast"]["voices"]
+            or candidate["provenance"].get("series") != document["provenance"].get("series")
+            or len(candidate["segments"]) != len(document["segments"])
+            or len(candidate["cast"]["characters"]) != len(document["cast"]["characters"])):
+        raise ValueError("Group proposals must preserve the source, voices, roles, lines and series identity")
+    for before, after in zip(document["cast"]["characters"], candidate["cast"]["characters"]):
+        if _without(after, _CHARACTER_KEYS) != _without(before, _CHARACTER_KEYS) or (
+                after.get("group") != before.get("group")
+                and ("group" in before or after["group"].get("basis") != "analysis")):
+            raise ValueError(f"A group proposal may only add an analysis group to {before.get('id')}")
+    for before, after in zip(document["segments"], candidate["segments"]):
+        if _without(after, {"ensemble"}) != _without(before, {"ensemble"}) or (
+                after.get("ensemble") != before.get("ensemble")
+                and ("ensemble" in before or after["ensemble"].get("basis") not in {"explicit", "context"})):
+            raise ValueError(f"A group proposal may only add a line cue with source evidence to {before.get('id')}")
