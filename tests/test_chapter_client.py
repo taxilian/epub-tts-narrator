@@ -229,7 +229,8 @@ class ChapterOrchestrationTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.config = deepcopy(DEFAULTS)
         self.config["render"].update(work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
-                                     ffmpeg=FFMPEG, ffprobe=FFPROBE, paragraph_synthesis=False, require_cover=False)
+                                     ffmpeg=FFMPEG, ffprobe=FFPROBE, paragraph_synthesis=False, require_cover=False,
+                                     ending=False)
         self.config["quality"] = validate_policy({})
         self.config["remote_chapters"].update(url="https://worker.example", websocket=False, poll_seconds=.1)
         self.config["voices"].update(directory=str(self.root / "voices"), series_id="fixture-series")
@@ -1342,7 +1343,8 @@ class RemotePublicationReuseTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.config = deepcopy(DEFAULTS)
         self.config["render"].update(work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
-                                     ffmpeg=FFMPEG, ffprobe=FFPROBE, paragraph_synthesis=False, require_cover=False)
+                                     ffmpeg=FFMPEG, ffprobe=FFPROBE, paragraph_synthesis=False, require_cover=False,
+                                     ending=False)
         self.config["quality"] = validate_policy({})
         self.config["remote_chapters"].update(url="https://worker.example", websocket=False, poll_seconds=.1)
         self.config["voices"].update(directory=str(self.root / "voices"), series_id="fixture-series")
@@ -1458,7 +1460,8 @@ class RemoteChapterUpdateReuseTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         self.config = deepcopy(DEFAULTS)
         self.config["render"].update(work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
-                                     ffmpeg=FFMPEG, ffprobe=FFPROBE, paragraph_synthesis=False, require_cover=False)
+                                     ffmpeg=FFMPEG, ffprobe=FFPROBE, paragraph_synthesis=False, require_cover=False,
+                                     ending=False)
         self.config["quality"] = validate_policy({})
         self.config["remote_chapters"].update(url="https://worker.example", websocket=False, poll_seconds=.1)
         self.config["voices"].update(directory=str(self.root / "voices"), series_id="fixture-series")

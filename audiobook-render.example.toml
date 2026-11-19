@@ -204,6 +204,14 @@ keep_intermediate_audio = false
 # takes that heard the old one as chapter history; "strict" regenerates the
 # rest of that voice's chapter so every take follows exactly the history it heard.
 history_reuse = "tolerant"
+# A short narrator line after the last chapter, its own final M4B chapter.
+# {title} and {authors} come from the analyzed EPUB's metadata; a book without
+# authors uses ending_text_without_authors. Books already rendered get it on the
+# next render or assemble, which renders only this line. Set false to leave it out.
+ending = true
+ending_title = "End Credits"
+ending_text = "This has been {title} by {authors}. Thank you for listening!"
+ending_text_without_authors = "This has been {title}. Thank you for listening!"
 allow_review = false
 # Prefer --chapters 3 or --chapters 3-5,7 for per-book selections.
 chapter_numbers = [] # all manifest script entries

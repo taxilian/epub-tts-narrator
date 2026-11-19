@@ -76,6 +76,14 @@ RENDER_CONTRACT = {
                        "chapter": True, "checked": True, "remote_safe": True},
     "ffmpeg": {"default": "ffmpeg", "kind": "text", "chapter": True},
     "ffprobe": {"default": "ffprobe", "kind": "text", "chapter": True},
+    # The spoken ending after the last chapter (spoken_ending.py): local and
+    # worker-pool renders only, so none of these reach a chapter service.
+    "ending": {"default": True, "kind": "bool"},
+    "ending_title": {"default": "End Credits", "kind": "phrase"},
+    "ending_text": {"default": "This has been {title} by {authors}. Thank you for listening!",
+                    "kind": "phrase"},
+    "ending_text_without_authors": {"default": "This has been {title}. Thank you for listening!",
+                                    "kind": "phrase"},
 }
 
 
@@ -551,6 +559,8 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
         raise ValueError("render.performance_mode must be legacy or expressive")
     if render["history_reuse"] not in RENDER_CONTRACT["history_reuse"]["choices"]:
         raise ValueError("render.history_reuse must be tolerant or strict")
+    from .spoken_ending import validate_settings as validate_ending
+    validate_ending(render)
     if result["verification"]["type"] not in {"mlx_whisper", "faster_whisper"}:
         raise ValueError("Unsupported verifier type")
     verification = result["verification"]

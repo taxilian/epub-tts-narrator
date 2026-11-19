@@ -706,6 +706,7 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
         if not isinstance(bitrate, str) or not re.fullmatch(r"[1-9][0-9]{0,2}k", bitrate):
             raise ValueError("Audio bitrate must be a positive value such as 128k")
     filename = validate_audiobook_filename(audiobook_name) if audiobook_name is not None else None
+    from .chapter_cache import chapter_audio_stem
     target = Path(output_dir)
     target.mkdir(parents=True, exist_ok=True)
     for name in ("chapters", "sync.json", "audio-manifest.json"):
@@ -730,7 +731,8 @@ def package_audio(chapters: Sequence[dict], output_dir: str | Path, *,
             "ordinal": ordinal, "number": number, "start_frame": cursor,
             "end_frame": cursor + info["frames"], "frames": info["frames"],
             "skipped": info["frames"] == 0,
-            "path": f"chapters/chapter-{number:04d}.{chapter_format}" if info["frames"] else None,
+            "path": f"chapters/{chapter_audio_stem(dict(chapter, number=number))}.{chapter_format}"
+                    if info["frames"] else None,
         }
         if "normalization" in chapter:
             record["normalization"] = deepcopy(chapter["normalization"])

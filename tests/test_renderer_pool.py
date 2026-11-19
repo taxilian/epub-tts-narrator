@@ -503,7 +503,7 @@ class PoolWorkflowTests(unittest.TestCase):
         self.config["verification"]["model"] = str(self.root / "unused-asr")
         self.config["voices"].update(directory=str(self.root / "voices"), series_id="pool-fixture")
         self.config["render"].update(work_dir=str(self.root / "work"), output_dir=str(self.root / "output"),
-                                     max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE, require_cover=False)
+                                     max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE, require_cover=False, ending=False)
         self.config["quality"] = validate_policy({})
         self.pool = RenderPool(self.config)
         self.fixtures = {}

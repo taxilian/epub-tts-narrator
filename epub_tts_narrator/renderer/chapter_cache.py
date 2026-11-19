@@ -20,6 +20,16 @@ from .interrupts import run_subprocess
 from .stored_audio import StoredAudioError, audio_hash, link_audio, regular_audio, store_quietly, tool_path
 
 
+def chapter_audio_stem(chapter):
+    """A chapter's audio basename: ``chapter-NNNN``, or its own ``audio_stem`` (the spoken ending)."""
+    stem = chapter.get("audio_stem")
+    if stem is not None:
+        if not isinstance(stem, str) or re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)+", stem) is None:
+            raise ValueError("Chapter audio_stem must be a lowercase hyphenated name")
+        return stem
+    return f"chapter-{chapter['number']:04d}"
+
+
 def chapter_settings(render, *, censorship_policy=None):
     """Return only the settings that affect chapter composition or encoding."""
     settings = {"version": 2}
@@ -448,7 +458,7 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
         clip_identity.append(item)
     ordinal = chapter.get("_ordinal", chapter.get("number", 1))
     total = chapter.get("_total_chapters", context.get("total_chapters", ordinal))
-    metadata = {key: deepcopy(chapter[key]) for key in ("id", "title", "number", "script_path")
+    metadata = {key: deepcopy(chapter[key]) for key in ("id", "title", "number", "script_path", "audio_stem")
                 if key in chapter}
     chapter_label = f"{metadata.get('number', ordinal)} / {total}"
     identity = {"context": deepcopy(context), "chapter": metadata, "book": deepcopy(book),
@@ -467,7 +477,7 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
         if clips:
             notify(f"Assembling chapter {chapter_label}: {metadata['title']}")
         composed = compose_chapter(
-            clips, stage / f"chapter-{metadata['number']:04d}.wav", sample_rate=settings["sample_rate"],
+            clips, stage / f"{chapter_audio_stem(metadata)}.wav", sample_rate=settings["sample_rate"],
             paragraph_pause_ms=settings["paragraph_pause_ms"],
             blank_pause_ms=settings["blank_pause_ms"], bracket_pause_ms=settings["bracket_pause_ms"],
             normalize_pauses=settings["normalize_pauses"],
@@ -481,7 +491,7 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
         if composed["frames"]:
             notify(f"Encoding chapter {chapter_label}: {metadata['title']}")
             encoded = encode_chapter(
-                composed, stage / f"chapter-{metadata['number']:04d}.{settings['chapter_format']}", book=book,
+                composed, stage / f"{chapter_audio_stem(metadata)}.{settings['chapter_format']}", book=book,
                 ordinal=ordinal, total_chapters=total, chapter_format=settings["chapter_format"],
                 aac_bitrate=settings["aac_bitrate"], mp3_bitrate=settings["mp3_bitrate"],
                 ffmpeg=settings["ffmpeg"], ffprobe=settings["ffprobe"])
@@ -548,14 +558,14 @@ def reencode_chapter(chapter, directory, *, book, render_settings, context, noti
     with tempfile.TemporaryDirectory(prefix=".chapter-", dir=directory) as temporary:
         stage = Path(temporary) / "ready"
         stage.mkdir()
-        wav = stage / f"chapter-{identity['chapter']['number']:04d}.wav"
+        wav = stage / f"{chapter_audio_stem(identity['chapter'])}.wav"
         link_audio(source["wav_path"], wav)
         encoded = None
         if source["frames"]:
             notify(f"Re-encoding chapter {source['number']} / {identity['total_chapters']}: {identity['chapter']['title']}")
             encoded = encode_chapter(
                 dict(source, wav_path=str(wav), title=identity["chapter"]["title"]),
-                stage / f"chapter-{identity['chapter']['number']:04d}.{settings['chapter_format']}",
+                stage / f"{chapter_audio_stem(identity['chapter'])}.{settings['chapter_format']}",
                 book=book, ordinal=identity["ordinal"], total_chapters=identity["total_chapters"],
                 chapter_format=settings["chapter_format"], aac_bitrate=settings["aac_bitrate"],
                 mp3_bitrate=settings["mp3_bitrate"], ffmpeg=settings["ffmpeg"], ffprobe=settings["ffprobe"])

@@ -1778,8 +1778,13 @@ def _reuse_inputs(chunk):
             json.dumps(performance_kwargs(chunk, voice), sort_keys=True))
 
 
-def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_paragraph=False):
-    """Group new paragraphs while preserving legacy accepted chunk boundaries."""
+def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_paragraph=False, ending=True):
+    """Group new paragraphs while preserving legacy accepted chunk boundaries.
+
+    A whole-book plan ends with the spoken ending chapter (``spoken_ending``)
+    unless ``[render] ending = false`` or ``ending=False`` (remote chapter
+    services, which cannot speak a line that is not in the bundle).
+    """
     plan = make_plan(bundle, config)
     work = config["render"].get("work_dir")
     requests = []
@@ -1796,6 +1801,15 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
                     work, [chapter for chapter in plan["chapters"] if not chapter.get("ignored")]))
         except (ValueError, OSError) as exc:
             raise RenderBlocked(f"Invalid saved synthesis identity: {exc}") from exc
+    from . import spoken_ending
+    if ending and spoken_ending.enabled(config):
+        # Appended after every source chapter, so no existing chapter, chunk
+        # or checkpoint identity changes; its narrator line takes the voice's
+        # accent cue below like any other line.
+        closing = spoken_ending.ending_chapter(bundle, plan, config["render"])
+        if closing is not None:
+            plan = dict(plan, chapters=[*plan["chapters"], closing], voice_ids=sorted(
+                set(plan["voice_ids"]) | {chunk["segment"]["voice_id"] for chunk in closing["chunks"]}))
     # Voice speech traits (pace, timbre, habits) are not sent with each line:
     # Drama 3 clones identity from the reference recording and the voice's own
     # earlier takes, and a long per-line description dilutes the line's own
@@ -1862,7 +1876,7 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
 
 
 def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
-               single_speaker_paragraph=False, voice_store_override=None):
+               single_speaker_paragraph=False, voice_store_override=None, ending=True):
     from .book_context import resolve_book_config, voice_store
     _check_analysis_update(bundle)
     try:
@@ -1903,7 +1917,7 @@ def _preflight(bundle, config, *, chapters_only=False, multi_speaker=True,
     config["_heard_variants_directory"] = (
         str(bundle["directory"]) if config.get("verification", {}).get("heard_variants", "learn") == "learn" else None)
     plan = make_render_plan(bundle, config, multi_speaker=multi_speaker,
-                            single_speaker_paragraph=single_speaker_paragraph)
+                            single_speaker_paragraph=single_speaker_paragraph, ending=ending)
     if plan["errors"]:
         raise RenderBlocked("\n".join(plan["errors"]))
     output = Path(config["render"]["output_dir"])
@@ -2084,6 +2098,19 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
     }
 
 
+def _tagged_chapter(bundle, chapter):
+    """The chapter with its track tag: ``N / total``, the spoken ending as the last track of its own total."""
+    return dict(chapter, _ordinal=chapter["number"],
+                _total_chapters=max(len(bundle["chapters"]), chapter["number"]))
+
+
+def _chapter_label(bundle, chapter):
+    from .spoken_ending import is_ending
+    if is_ending(chapter):
+        return "the spoken ending"
+    return f"chapter {chapter['number']} / {len(bundle['chapters'])}"
+
+
 _IGNORED_PROVENANCE = {"engine": "chapter-ignored", "model": "none"}
 
 
@@ -2097,7 +2124,7 @@ def _compose_ignored_chapter(bundle, chapter, config, *, notify=print):
     """
     context = _chapter_context(bundle, chapter, config, {}, _IGNORED_PROVENANCE, _IGNORED_PROVENANCE)
     return prepare_chapter(
-        dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
+        _tagged_chapter(bundle, chapter),
         [], Path(config["render"]["work_dir"]) / "chapters", book=bundle["source"]["book"],
         render_settings=config["render"], context=context, notify=notify, acceptance=[],
         **({"censorship_policy": config["censorship"]}
@@ -2503,6 +2530,34 @@ def _package(bundle, config, plan, store, voices, rendered, acceptance,
     notify(f"Audiobook ready: {output / audio['audiobook']['path']}")
     _publish_chapter_links(config, rendered, notify=notify)
     return result
+
+
+def _render_ending_for_assembly(bundle, chapter, config, voices, work, components, *, speech_cache, notify):
+    """Render and verify only the spoken ending, then save it like a rendered chapter."""
+    if components is None:
+        raise RenderBlocked("The spoken ending has not been rendered yet. Run render for this book: it "
+                            "renders only the ending and reuses every finished chapter. Or set "
+                            "render.ending = false to publish without it.")
+    notify("Rendering the spoken ending; every other chapter is reused as saved.")
+    engine, verifier = components()
+    from .continuity import require_support
+    require_support(engine, notify=notify)
+    from .pool import bind_engine_verifier
+    verifier = bind_engine_verifier(engine, verifier)
+    from .performance_runtime import require_engine_support
+    require_engine_support({"chapters": [chapter]}, engine)
+    chapter, clips, chapter_acceptance = _render_chapter_with_recovery(
+        bundle, chapter, voices, engine, engine.identity, verifier, config, work,
+        notify=notify, speech_cache=speech_cache)
+    context = _chapter_context(bundle, chapter, config, voices, engine.identity, verifier.identity)
+    composed = prepare_chapter(
+        _tagged_chapter(bundle, chapter), clips, Path(work) / "chapters", book=bundle["source"]["book"],
+        render_settings=config["render"], context=context, notify=notify, acceptance=chapter_acceptance,
+        **({"censorship_policy": config["censorship"]}
+           if config.get("censorship", {}).get("enabled", False) else {}))
+    _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
+    _publish_work_chapter_link(config, composed, notify=notify)
+    return composed, chapter_acceptance
 
 
 def _start_run(work, plan, mode):
@@ -3145,14 +3200,15 @@ def _publish_chapter_link(config, composed, *, notify):
         links = Path(config["render"]["output_dir"]) / "chapter-links"
         encoded = Path(encoded)
         suffix = encoded.suffix
-        link = links / f"chapter-{composed['track_number']:02d}{suffix}"
+        name = composed.get("audio_stem") or f"chapter-{composed['track_number']:02d}"
+        link = links / f"{name}{suffix}"
         relative = os.path.relpath(encoded, links)
         if link.exists() and not link.is_symlink():
             notify(f"Chapter link not created: {link} already exists")
             return
         if link.is_symlink() and os.readlink(link) == relative:
             return
-        temporary = links / f".chapter-{composed['track_number']:02d}{suffix}.link"
+        temporary = links / f".{name}{suffix}.link"
         if temporary.exists() or temporary.is_symlink():
             raise OSError(f"temporary chapter link already exists: {temporary}")
         links.mkdir(parents=True, exist_ok=True)
@@ -3179,11 +3235,11 @@ def _link_completed_chapters(work, records, *, notify):
         if not isinstance(audio, str) or not audio:
             continue
         cached = load_chapter(work / "chapters" / checkpoint["cache_key"])
-        number = cached["number"]
         suffix = cached["settings"]["chapter_format"]
         base = cached["cache_directory"]
-        wav = f"chapter-{number:04d}.wav"
-        encoded = f"chapter-{number:04d}.{suffix}"
+        from .chapter_cache import chapter_audio_stem
+        wav = f"{chapter_audio_stem(cached)}.wav"
+        encoded = f"{chapter_audio_stem(cached)}.{suffix}"
         record = dict(cached, wav_path=str(Path(base) / wav), encoded_path=str(Path(base) / encoded))
         legacy_names = set()
         if Path(audio) != Path(record["encoded_path"]):
@@ -3219,7 +3275,7 @@ def _publish_chapter_links(config, rendered, *, notify):
         if not encoded:
             continue
         published = output / "chapters" / (
-            f"chapter-{composed['track_number']:04d}" + Path(encoded).suffix)
+            (composed.get("audio_stem") or f"chapter-{composed['track_number']:04d}") + Path(encoded).suffix)
         _publish_chapter_link(config, dict(composed, encoded_path=str(published)), notify=notify)
 
 
@@ -3403,7 +3459,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
 
         def compose(chapter, clips, context, chapter_acceptance):
             composed = prepare_chapter(
-                dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
+                _tagged_chapter(bundle, chapter),
                 clips, work / "chapters", book=bundle["source"]["book"],
                 render_settings=config["render"], context=context, notify=notify,
                 acceptance=chapter_acceptance,
@@ -3439,7 +3495,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
             chapter = plan["chapters"][chapter_index]
             stop_if_requested()
             chapter_started = monotonic()
-            chapter_label = f"chapter {chapter['number']} / {len(bundle['chapters'])}"
+            chapter_label = _chapter_label(bundle, chapter)
             if chapter.get("ignored"):
                 # No synthesis, no checkpoint read, and no checkpoint write:
                 # a pre-ignore checkpoint stays untouched for a later unignore.
@@ -3538,7 +3594,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                 try:
                     with plan_lock:
                         chapter_failures.pop(number, None)
-                    notify(f"Retrying chapter {number} / {len(bundle['chapters'])} first, "
+                    notify(f"Retrying {_chapter_label(bundle, plan['chapters'][index])} first, "
                            "with a fresh retry allowance.")
                     if callable(prioritize):
                         prioritize(owner)
@@ -3553,7 +3609,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
                         # chapters' retries stay open.
                         try:
                             chapter_failed(index, plan["chapters"][index],
-                                           f"chapter {number} / {len(bundle['chapters'])}", error)
+                                           _chapter_label(bundle, plan["chapters"][index]), error)
                         except BaseException as inner:  # noqa: BLE001 - re-raised by the run after the drain
                             retry_errors.append(inner)
                             retries.close()
@@ -3676,11 +3732,16 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         lock.rmdir()
 
 
-def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_verifier_factory=None):
+def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_verifier_factory=None,
+             ending_components=None):
     """Recompose verified clips and publish without loading a synthesis model.
 
     Censorship changes rebuild PCM from originals. Optional ASR alignment is
     lazy and separate from speech acceptance; existing timing needs no model.
+    The one exception is a spoken ending that is missing or out of date (a
+    book rendered before it existed, or reworded): ``ending_components()``
+    returns ``(engine, verifier)`` to render and verify only that line, and
+    without it assembly stops and says to render.
     """
     config, plan, store = _preflight(bundle, config, chapters_only=chapters_only)
     work = Path(config["render"]["work_dir"])
@@ -3702,17 +3763,22 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
             raise RenderBlocked("Selected voices are missing: " + ", ".join(missing))
         records = [None if chapter.get("ignored") else _read_checkpoint(work, chapter)
                    for chapter in plan["chapters"]]
+        from .spoken_ending import is_ending
         missing = [chapter["number"] for chapter, record in zip(plan["chapters"], records)
-                   if record is None and not chapter.get("ignored")]
+                   if record is None and not chapter.get("ignored") and not is_ending(chapter)]
         if missing:
             raise RenderBlocked("Chapters have not finished rendering: " + ", ".join(map(str, missing))
                                 + ". Run render --chapters-only first.")
         rendered, acceptance = [], []
         identities = None
         publication_provenance = None
+        ending = None  # the spoken ending, when it must be rendered first
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
         for chapter, record in zip(plan["chapters"], records):
+            if is_ending(chapter) and record is None:
+                ending = chapter
+                continue
             if chapter.get("ignored"):
                 # No checkpoint validation and no TTS/ASR: the ignored chapter
                 # contributes a zero-frame record only, and any earlier
@@ -3756,14 +3822,33 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
                 restore_context["settings"]["censorship"] = saved["settings"]["censorship"]
             else:
                 restore_context["settings"].pop("censorship", None)
+            # A book that gained chapters moves its spoken ending to the new
+            # last place: it is proven under its saved number and recomposed
+            # from its verified take, like a censorship change below.
+            renumbered = is_ending(chapter) and record.get("chapter_number") != chapter["number"]
+            saved_chapter = dict(chapter, number=record.get("chapter_number")) if renumbered else chapter
+            if renumbered:
+                restore_context = dict(restore_context, chapter_hash=digest(saved_chapter),
+                                       plan_audio_hash=digest(_chapter_audio_plan(saved_chapter)))
             # Title and track-total metadata use the saved plan only for restoration.
-            restore_context = _display_restore_context(record, restore_context, chapter)
+            restore_context = _display_restore_context(record, restore_context, saved_chapter)
             total_changed = restore_context["total_chapters"] != context["total_chapters"]
             title_changed = record["title"] != chapter["title"]
-            composed, chapter_acceptance = _restore_chapter(
-                work, chapter, record, restore_context, voices, config, speech_cache=speech_cache)
+            if is_ending(chapter) and not (_same_chapter_audio_context(saved, restore_context)
+                                           and _saved_chapter_clips_present(work, record)):
+                # Reworded, or its take was retired: only the ending renders again.
+                ending = chapter
+                continue
+            try:
+                composed, chapter_acceptance = _restore_chapter(
+                    work, saved_chapter, record, restore_context, voices, config, speech_cache=speech_cache)
+            except ChapterNeedsRendering:
+                if not is_ending(chapter):
+                    raise
+                ending = chapter
+                continue
             _publish_work_chapter_link(config, composed, notify=notify)
-            if censorship_changed:
+            if censorship_changed or renumbered:
                 from .censorship_runtime import restore_verified_clips, prepare_chapter_censorship
                 clips = restore_verified_clips(chapter, chapter_acceptance, work,
                                                sample_rate=config["render"]["sample_rate"], notify=notify)
@@ -3772,7 +3857,7 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
                     cache_dir=work / "censorship-alignment", verifier_factory=get_alignment_verifier,
                     notify=notify)
                 composed = prepare_chapter(
-                    dict(chapter, _ordinal=chapter["number"], _total_chapters=len(bundle["chapters"])),
+                    _tagged_chapter(bundle, chapter),
                     clips, work / "chapters", book=bundle["source"]["book"],
                     render_settings=config["render"], context=context, notify=notify,
                     acceptance=chapter_acceptance,
@@ -3791,10 +3876,17 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
                 _save_checkpoint(work, chapter, composed, context, chapter_acceptance)
             rendered.append(composed)
             acceptance.extend(chapter_acceptance)
-            notify(f"Verified saved chapter {chapter['number']} / {len(bundle['chapters'])}: {chapter['title']}")
+            notify(f"Verified saved {_chapter_label(bundle, chapter)}: {chapter['title']}")
         if identities is None:
             raise RenderBlocked("Every selected chapter is ignored, so assembly would produce no audio. "
                                 "Clear the chapter ignores before assembling, or render non-ignored chapters first.")
+        if ending is not None:
+            # The ending is the plan's last chapter, so the order stays the manifest's.
+            composed, chapter_acceptance = _render_ending_for_assembly(
+                bundle, ending, config, voices, work, ending_components,
+                speech_cache=speech_cache, notify=notify)
+            rendered.append(composed)
+            acceptance.extend(chapter_acceptance)
         if chapters_only:
             result = {"format": "audiobook-chapters", "version": 1, "status": "chapters_complete",
                       "partial_book": plan["partial_book"], "chapter_count": len(rendered),

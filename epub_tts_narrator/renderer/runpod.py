@@ -1399,7 +1399,8 @@ print('EPUB_TTS_WORKER_STATUS=RUNNING' if running else 'EPUB_TTS_WORKER_STATUS=E
             config["render"]["chapter_numbers"] = chapter_numbers(args.chapters, len(bundle["chapters"]))
         if args.chapter_format:
             config["render"]["chapter_format"] = args.chapter_format
-        config, plan, store = _preflight(bundle, config, chapters_only=args.chapters_only, multi_speaker=True)
+        config, plan, store = _preflight(bundle, config, chapters_only=args.chapters_only, multi_speaker=True,
+                                         ending=False)
         missing = [voice_id for voice_id in plan["voice_ids"] if store.load(voice_id) is None]
         if missing:
             raise ValueError("Remote rendering requires saved voices; run cast first for: " + ", ".join(missing))

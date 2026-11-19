@@ -1012,7 +1012,7 @@ def _recover_failed_paragraph(bundle, config, plan, voices, capabilities, failur
         record_paragraph_fallback(config["render"]["work_dir"], request)
     except (ValueError, OSError) as exc:
         raise ChapterClientError(f"Could not save remote paragraph recovery: {exc}") from exc
-    new_plan = make_render_plan(bundle, config, multi_speaker=True)
+    new_plan = make_render_plan(bundle, config, multi_speaker=True, ending=False)
     if new_plan["errors"]:
         raise ChapterClientError("Paragraph recovery produced an invalid plan: "
                                  + "; ".join(new_plan["errors"]))
@@ -1027,13 +1027,23 @@ def _recover_failed_paragraph(bundle, config, plan, voices, capabilities, failur
     return new_plan, replacement
 
 
+def _note_no_ending(config, notify):
+    from .spoken_ending import enabled
+    if enabled(config):
+        notify("The spoken ending is not added to books from a remote chapter service: it speaks a line "
+               "the bundle does not contain. Render or assemble with local or worker-pool TTS to add it.")
+
+
 def render_remote(bundle, config, *, notify=print, chapters_only=False):
     from .workflow import _preflight, _lock_book_audio
     validated = config.pop("_validated_remote_plan", None)
     if validated is None:
-        config, plan, store = _preflight(bundle, config, chapters_only=chapters_only, multi_speaker=True)
+        config, plan, store = _preflight(bundle, config, chapters_only=chapters_only, multi_speaker=True,
+                                         ending=False)
     else:
         plan, store = validated
+    if not chapters_only:
+        _note_no_ending(config, notify)
     lock = _lock_book_audio(bundle)
     try:
         return _render_remote_locked(bundle, config, plan, store, notify=notify, chapters_only=chapters_only,
@@ -1043,6 +1053,9 @@ def render_remote(bundle, config, *, notify=print, chapters_only=False):
 
 
 def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only, validated=False):
+    from .spoken_ending import is_ending
+    # The service renders bundle chapters only; a local plan's ending never goes to it.
+    plan = dict(plan, chapters=[chapter for chapter in plan["chapters"] if not is_ending(chapter)])
     if config["render"]["chapter_format"] != "m4a":
         raise ChapterClientError("Remote chapter jobs currently produce M4A; use --chapter-format m4a")
     voices = {voice_id: store.load(voice_id) for voice_id in plan["voice_ids"]}
@@ -1203,7 +1216,8 @@ def has_remote_chapters(config):
 def assemble_remote(bundle, config, *, notify=print):
     """Package accepted chapters, fetching compressed masters only when needed."""
     from .workflow import _preflight, _lock_book_audio
-    config, plan, store = _preflight(bundle, config, chapters_only=False, multi_speaker=True)
+    config, plan, store = _preflight(bundle, config, chapters_only=False, multi_speaker=True, ending=False)
+    _note_no_ending(config, notify)
     lock = _lock_book_audio(bundle)
     try:
         voices = {voice_id: store.load(voice_id) for voice_id in plan["voice_ids"]}

@@ -461,6 +461,26 @@ def _stack_dumps_on_signal():
     return path
 
 
+def _render_components(config, command, *, ensured=False):
+    """The TTS engine and verifier ``render`` uses (its worker pool, else the local engine)."""
+    from .engines import create_engine
+    from .pool import create_render_components
+    from .verification import create_verifier
+    workers = config.get("render_pool", {}).get("workers", []) if command in {"render", "assemble"} else []
+    if not ensured:
+        from .model_setup import ModelSetup
+        setup = ModelSetup(config)
+        if not workers or any(worker["type"] == "local" for worker in workers):
+            setup.ensure("engine")
+        setup.ensure("verification")
+    if workers:
+        print("Rendering with " + ", ".join(
+            f"{worker['name']} ({worker['concurrency']} slot(s))" for worker in workers))
+        return create_render_components(config, verifier_factory=create_verifier)
+    return (create_engine(config["engine"]),
+            create_verifier(config["verification"], config.get("jev"), config.get("provider")))
+
+
 def main(argv=None, *, in_shell=False):
     """Run one renderer command.
 
@@ -842,8 +862,14 @@ def _main(argv=None, *, in_shell=False):
                     from .verification import create_verifier
                     ModelSetup(config).ensure("verification")
                     return create_verifier(config["verification"], config.get("jev"), config.get("provider"))
+                def ending_components():
+                    # Only a missing or reworded spoken ending loads a TTS engine here.
+                    nonlocal engine, verifier
+                    engine, verifier = _render_components(config, args.command)
+                    return engine, verifier
                 result = assemble(bundle, config, chapters_only=args.chapters_only,
-                                  alignment_verifier_factory=alignment_verifier)
+                                  alignment_verifier_factory=alignment_verifier,
+                                  ending_components=ending_components)
                 if args.chapters_only:
                     for chapter in result["chapters"]:
                         if chapter.get("audio_file"):
@@ -880,9 +906,6 @@ def _main(argv=None, *, in_shell=False):
             print(f"Dry run: {counts['imported']} voice(s) would be imported; {counts['kept']} kept, "
                   f"{counts['missing']} missing in the other book, {counts['unmatched']} unmatched.")
             return 0
-        from .engines import create_engine
-        from .pool import create_render_components
-        from .verification import create_verifier
         from .workflow import ensure_voice, import_voice, render
         from .model_setup import ModelSetup
         setup = ModelSetup(config)
@@ -907,13 +930,7 @@ def _main(argv=None, *, in_shell=False):
                 from .voice_clip_counts import extra_clip_plan
                 bundle = ensure_bundle_scripts(bundle, args.config, canonical_id=store.canonical_id, voice_ids=missing,
                                                extra_clips=extra_clip_plan(bundle, config, canonical_id=store.canonical_id))
-        if workers:
-            print("Rendering with " + ", ".join(
-                f"{worker['name']} ({worker['concurrency']} slot(s))" for worker in workers))
-            engine, verifier = create_render_components(config, verifier_factory=create_verifier)
-        else:
-            engine = create_engine(config["engine"])
-            verifier = create_verifier(config["verification"], config.get("jev"), config.get("provider"))
+        engine, verifier = _render_components(config, args.command, ensured=True)
         if args.command == "import-voices":
             from .voice_transfer import import_voices
             counts = import_voices(bundle, config, global_config, args.source_book, engine, verifier)

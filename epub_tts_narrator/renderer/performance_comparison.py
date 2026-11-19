@@ -163,7 +163,9 @@ def prepare_comparison(bundle, config, chapter_number, directory):
     if type(chapter_number) is not int or not 1 <= chapter_number <= len(bundle["chapters"]):
         raise ValueError("Comparison requires exactly one valid chapter number")
     config = resolve_book_config(bundle, config)
-    config["render"].update(chapter_numbers=[chapter_number], performance_mode="legacy", performance_plan=None)
+    # One chapter is compared; a one-chapter book must not gain the spoken ending.
+    config["render"].update(chapter_numbers=[chapter_number], performance_mode="legacy", performance_plan=None,
+                            ending=False)
     plan = make_plan(bundle, config)
     if plan["errors"]:
         raise ValueError("Cannot compare an invalid chapter: " + "; ".join(plan["errors"][:3]))
