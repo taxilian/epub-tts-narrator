@@ -549,6 +549,12 @@ def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=
         voices.pop(identity, None)
     voice_ids = {local_id: voice_replacements.get(identity, identity) if identity not in used_voices else identity
                  for local_id, identity in voice_ids.items()}
+    # An inherited ensemble (a chorus cast in an earlier book) keeps its member voices, which
+    # belong to no character in this book: carry them over as inherited voices.
+    for voice in list(voices.values()):
+        for member in (voice.get("ensemble") or {}).get("members", []):
+            if member not in voices and member in prior_voices:
+                voices[member] = inherited_voice(member, prior_voices[member]["voice"])
     updated["voices"] = list(voices.values())
     inherited_issues = _inherited_review_issues(registry, updated, set(matches.values()))
     issues.extend(inherited_issues)

@@ -120,6 +120,38 @@ class EnsembleCommandTests(unittest.TestCase):
 
 
 
+class EnsembleSeriesTests(unittest.TestCase):
+    def test_a_later_book_keeps_an_earlier_books_ensemble_with_its_pool_voices(self):
+        from epub_tts_narrator.analysis_directory import continuation_registry
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        first = root / "book-1"
+        document = build("chorus-1", "The Chorus", [("mara", "Mara", ()), ("chorus", "the chorus", ())], PARAGRAPHS)
+        linked = link_analysis(document, fresh_registry(first))
+        linked["provenance"]["voice_samples"] = {
+            "version": 1, "source_fingerprint": fingerprint(linked["source"]),
+            "cast_fingerprint": fingerprint(linked["cast"]),
+            "scripts": {voice["id"]: deepcopy(AUDITION) for voice in linked["cast"]["voices"]}, "samples": {}}
+        publish_directory(linked, fresh_registry(first), first, export_bundle)
+        chorus = next(item for item in linked["cast"]["characters"] if item["name"] == "the chorus")
+        apply(plan_ensemble(load_bundle(first), chorus["voice_id"], voices=3, mode="unison"), progress=lambda _: None)
+        pool = [voice["id"] for voice in _completed_directory(first)[0]["cast"]["voices"] if voice.get("member_of")]
+
+        second = build("chorus-2", "The Chorus Returns", [("chorus", "the chorus", ())],
+                       [[("“We return,” ", "chorus"), ("they said in unison.", None)]])
+        registry = continuation_registry(first, second["source"])
+        second["cast"]["characters"][0]["series_identity"] = {
+            "character_id": chorus["id"], "basis": "context", "review_required": False,
+            "reason": "The same chorus returns.",
+            "evidence": [{"block_id": "b1", "quote": second["source"]["blocks"][0]["text"]}]}
+        two = link_analysis(second, registry)
+        self.assertEqual(validate_document(two), [])
+        lead = next(voice for voice in two["cast"]["voices"] if voice["id"] == chorus["voice_id"])
+        self.assertEqual(lead["ensemble"]["members"], pool)
+        self.assertTrue(set(pool) <= {voice["id"] for voice in two["cast"]["voices"]})
+
+
 class EnsembleDetailsTests(unittest.TestCase):
     def test_the_details_say_what_a_person_chose_or_what_analysis_proposed(self):
         from epub_tts_narrator.renderer.cast_tui_model import ensemble_text
