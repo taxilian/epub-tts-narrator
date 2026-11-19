@@ -233,6 +233,10 @@ def parser():
                      help="Analysis strategy: narrator (default for a new book) or consensus. "
                           "Narrator uses one sequential prep read, then terse chapter markup. "
                           "Updating a saved book from a new EPUB defaults to the strategy it was analyzed with")
+    run.add_argument("--instructions",
+                     help="Notes on how the book's narration works, such as which characters' points of view it "
+                          "follows (1-2000 characters). Each section's narration is then read in the voice of the "
+                          "character whose point of view it follows; the notes are saved with the book")
     passage_review = input_command("review-attribution", "Review an existing script with source evidence and three-way consensus")
     output_options(passage_review)
     verification = commands.add_parser(
@@ -513,6 +517,11 @@ def main(argv=None, *, in_shell=False):
             if review_genders(directory, config, args.config, provider_client, progress):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # Narration is read by the character whose point of view it follows, when notes ask for it.
+            from .narrator_review import review_narrators
+            if review_narrators(directory, config, provider_client, progress, instructions=args.instructions):
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every paragraph's speakers and split are checked once, and again after it changes.
             from .attribution_recheck import recheck_attributions
             if recheck_attributions(directory, config, provider_client, progress):
@@ -658,6 +667,13 @@ def main(argv=None, *, in_shell=False):
             return _run_directory_command(args)
         directory_mode = (args.command == "analyze" and
                           (args.input.is_dir() or args.output is None or args.output.suffix.lower() != ".json"))
+        if args.command == "analyze" and args.instructions is not None:
+            if not directory_mode:
+                raise ValueError("--instructions needs a book directory, not legacy .json output")
+            if args.edits:
+                raise ValueError("--instructions cannot be combined with --edits; run them separately")
+            if not 1 <= len(args.instructions.strip()) <= 2000:
+                raise ValueError("--instructions must be 1-2000 characters")
         if args.command == "analyze" and directory_mode:
             if args.force:
                 raise ValueError("--force applies only to legacy .json output; choose a new output directory")
@@ -863,6 +879,12 @@ def main(argv=None, *, in_shell=False):
                 print(f"Wrote analysis, chapter scripts, cast, and series continuity to {args.output}")
                 print(f"{len(document['segments'])} segments, {len(document['cast']['characters'])} characters; "
                       f"{state['review_count']} advisory notes. Bundle created.")
+                if args.instructions:
+                    from .analysis_directory import _completed_directory
+                    from .narrator_review import review_narrators
+                    if review_narrators(args.output, config, provider_client, progress,
+                                        instructions=args.instructions):
+                        document = _completed_directory(args.output)[0]
                 return with_name_tags(args.output, config, _speaker_completion_status(document))
             write_json(args.output, document, overwrite=args.force)
             if registry is not None:

@@ -259,9 +259,10 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
                        scope="attribution", sidecars=None, speaker_decision_inputs=None,
                        reserved_update_locks=None):
     """Publish a revision, coordinating manual decisions with profile refreshes."""
-    if scope not in {"attribution", "source-edit", "voice-profiles", "speaker-decisions", "character-merge"}:
+    if scope not in {"attribution", "source-edit", "voice-profiles", "speaker-decisions", "character-merge",
+                     "narrators"}:
         raise ValueError("Revision scope must be attribution, source-edit, voice-profiles, speaker-decisions, "
-                         "or character-merge")
+                         "character-merge, or narrators")
     if speaker_decision_inputs is not None and scope != "speaker-decisions":
         raise ValueError("speaker_decision_inputs are accepted only for speaker-decisions revisions")
     if reserved_update_locks is not None and scope == "speaker-decisions":
@@ -322,7 +323,10 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
     directories to locks already owned through ``reserve_revision_scope``;
     publication reuses them instead of acquiring the locks again, and the
     render-activity re-checks trust that reservation's probe handshake.
-    Attribution revisions never refuse live renderers (see
+    ``"narrators"`` moves narration between narration roles and may append
+    narration roles attached to existing characters
+    (``narrator_review.validate_narrator_revision``).
+    Attribution and narrator revisions never refuse live renderers (see
     ``reserve_revision_scope``); every other scope still probes render
     activity before staging and again immediately before publication.
     """
@@ -386,6 +390,12 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                 from .character_merge import validate_character_merge
                 validate_character_merge(document, candidate, earlier_character_ids={
                     row["id"] for book in registry["books"][:-1] for row in book["cast"]["characters"]})
+        elif scope == "narrators":
+            if path in revisions:
+                from .narrator_review import validate_narrator_revision
+                validate_narrator_revision(document, candidate)
+            elif candidate != document:
+                raise ValueError("Narrator revisions may change only the selected book")
         elif scope == "voice-profiles":
             differences = profile_revision_differences(document, candidate)
             if differences:
@@ -399,7 +409,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes)
         if readiness(candidate)["errors"]:
             raise ValueError("Cannot publish an invalid speaker revision")
-        if scope != "attribution" and not reserved and (reason := _render_active(path)):
+        if scope not in {"attribution", "narrators"} and not reserved and (reason := _render_active(path)):
             raise ValueError(f"Rendering is active; finish it before revising analysis: {path} ({reason})")
     locks = []
     transaction = None
@@ -429,7 +439,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             # A resolved parent attribution may have been copied into descendants
             # as a review issue. Refresh only such inherited review records.
             history = dict(registry, books=registry["books"][:-1])
-            if scope in {"attribution", "speaker-decisions", "character-merge"}:
+            if scope in {"attribution", "speaker-decisions", "character-merge", "narrators"}:
                 _refresh_import_reviews(document, history, document["provenance"]["series"])
             document["readiness"] = readiness(document)
             snapshot = _snapshot(document)
@@ -482,7 +492,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
         for path in paths:
             if any(_hash(path / name) != checksum for name, checksum in original_hashes[path].items()):
                 raise ValueError(f"Analysis changed before publication: {path}")
-            if scope != "attribution" and not reserved and (reason := _render_active(path)):
+            if scope not in {"attribution", "narrators"} and not reserved and (reason := _render_active(path)):
                 raise ValueError(f"Rendering started during revision: {path} ({reason})")
         # A reservation destroyed or replaced after entry cannot write: each
         # handle must still prove exclusive ownership immediately before the

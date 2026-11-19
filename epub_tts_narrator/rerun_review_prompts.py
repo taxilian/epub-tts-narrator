@@ -27,3 +27,13 @@ GENDER_CHECK = f"""You check the gender of characters in an audiobook cast again
 
 Each item gives an entry (name|aliases|the gender its voice was given) and numbered paragraphs (N|text) that mention it.
 {{"r":[[item_id,gender,N,quote]]}} for every item: gender "Male", "Female" or "Androgynous" as the text shows it for this character (pronouns that refer to them, words like woman or man, titles), with a short exact quote from paragraph N that shows it; or [item_id,"?"] when these paragraphs do not show it. Only the text counts; the given gender may be wrong."""
+
+NARRATOR_REVIEW_VERSION = "1"
+
+NARRATOR_CHECK = f"""You decide whose point of view each section of an audiobook follows, so that section's narration can be read in that character's voice.
+{_DATA}
+
+"notes": a listener's description of how this book's narration works (for example which characters' points of view it follows, or that it changes between chapters): fallible leads to check against the text; the text wins.
+"cast": one line per entry: id|name|aliases.
+"items": sections of the book in order, each as numbered paragraphs (N|text) of its opening.
+Return {{"r":[[section_id,cast_id,N,quote]]}} for every section: the cast entry whose point of view the section's narration follows (whose thoughts, perceptions and feelings the narration reports from the inside), with a short exact quote from paragraph N that shows it; or [section_id,"-"] when the narration follows no single cast member (a title page, a poem, an epigraph, an omniscient or shifting narration) or the notes say the book's main narrator reads it. Being named or speaking is not enough: the narration must be told from that character's point of view."""
