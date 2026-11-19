@@ -263,6 +263,32 @@ class AuditionScriptTests(unittest.TestCase):
             self.assertFalse((Path(directory) / ".audition-scripts.lock").exists())
             self.assertEqual(json.loads((Path(directory) / FILENAME).read_text()), record)
 
+    def test_scripts_saved_for_an_earlier_cast_are_kept_for_voices_still_in_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = bundle()
+            data["directory"] = directory
+            old = validate_script({"text": BOOK_TEXT, "reason": "Old guidance."})
+            earlier = deepcopy(data["cast"])
+            earlier["roles"].append({"id": "gone", "kind": "dialogue", "character_id": None, "voice_id": "vn",
+                                     "description": "A role the cast no longer has."})
+            record = {"version": VERSION, "source_fingerprint": data["manifest"]["source_fingerprint"],
+                      "cast_fingerprint": fingerprint(earlier), "scripts": {"v1": old, "vn": old, "gone": old}}
+            (root / FILENAME).write_text(json.dumps(record))
+            messages = []
+            with patch("epub_tts_narrator.config.load_config", side_effect=AssertionError("No model needed")):
+                result = ensure_bundle_scripts(data, progress=messages.append)
+            saved = json.loads((root / FILENAME).read_text())
+            self.assertEqual(saved["cast_fingerprint"], fingerprint(data["cast"]))
+            self.assertEqual((saved["scripts"]["v1"], saved["scripts"]["vn"]), (old, old))
+            self.assertNotIn("gone", saved["scripts"])
+            self.assertEqual(result["audition_scripts"]["v1"], old)
+            self.assertIn("earlier cast", messages[0])
+            record["source_fingerprint"] = "0" * 64
+            (root / FILENAME).write_text(json.dumps(record))
+            with self.assertRaisesRegex(ValueError, "do not match this book's source"):
+                ensure_bundle_scripts(data, progress=messages.append)
+
     def test_refresh_v1_sidecar_uses_current_cached_guidance_and_preserves_unselected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -409,7 +435,7 @@ class AuditionScriptTests(unittest.TestCase):
             self.assertFalse((Path(data["directory"]) / ".audition-scripts.lock").exists())
 
     def test_corrupt_foreign_or_nonregular_sidecar_is_blocked_without_model(self):
-        for mutation in ("source", "cast", "version", "scripts", "missing_scripts", "invalid_json", "symlink", "directory"):
+        for mutation in ("source", "version", "scripts", "missing_scripts", "invalid_json", "symlink", "directory"):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
                 data = bundle()
                 data["directory"] = directory

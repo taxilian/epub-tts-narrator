@@ -39,11 +39,14 @@ def undecided(bundle, config, voice_ids=None):
     decided = set(accent_overrides(bundle, config, include_cleared=True)) | set(assigned_accents(bundle, config))
     decided |= {voice_id for voice_id, traits in speech_trait_overrides(bundle, config).items()
                 if traits and trait_accent(traits, _book_terms(bundle))}
+    from .voice_bindings import linked_voices
+    linked = linked_voices(bundle["cast"])
     profiles = {profile["id"]: profile for profile in bundle["cast"]["voices"]}
     result = []
     for voice_id in (voice_ids if voice_ids is not None else list(profiles)):
         profile = profiles.get(voice_id, {})
-        base = profile["derived_from"].get("voice_id") if isinstance(profile.get("derived_from"), dict) else None
+        base = (profile["derived_from"].get("voice_id") if isinstance(profile.get("derived_from"), dict)
+                else linked.get(voice_id))
         target = base or voice_id
         if target in decided or voice_id in decided or not ({voice_id, target} & speaking):
             continue

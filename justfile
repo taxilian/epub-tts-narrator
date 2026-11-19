@@ -61,6 +61,10 @@ accents *args:
 merge-characters *args:
     @"{{ python }}" -m epub_tts_narrator.renderer merge-characters "$@"
 
+# BOOK CHARACTER NEW_NAME [--dry-run] [--yes]: give a cast character a new name (a misspelling fixed, say).
+rename-character *args:
+    @"{{ python }}" -m epub_tts_narrator.renderer rename-character "$@"
+
 # BOOK --from OTHER_BOOK: reuse OTHER_BOOK's chosen voices for the same characters.
 import-voices *args:
     @"{{ python }}" -m epub_tts_narrator.renderer import-voices "$@"

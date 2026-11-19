@@ -235,6 +235,18 @@ def parser():
     merge.add_argument("--dry-run", action="store_true", help="Show the change; save nothing")
     merge.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     merge.set_defaults(work_dir=None, output=None, epub=None)
+    rename = commands.add_parser(
+        "rename-character", description=(
+            "Give a cast character a new name, for example to fix a misspelled name you typed. The old name stays "
+            "as an alias when the book's text uses it. Later books of the series that still use the old name follow; "
+            "the voice and every line stay, so nothing is rendered again. Shows the change and asks before saving."))
+    rename.add_argument("bundle", type=Path)
+    rename.add_argument("character", metavar="CHARACTER", help="A name, alias, character ID or voice ID")
+    rename.add_argument("name", metavar="NEW_NAME", help="The character's new name")
+    rename.add_argument("--yes", action="store_true", help="Rename without asking")
+    rename.add_argument("--dry-run", action="store_true", help="Show the change; save nothing")
+    rename.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
+    rename.set_defaults(work_dir=None, output=None, epub=None)
     doctor = commands.add_parser("doctor")
     doctor.add_argument("--config", type=Path, help="Global TOML file (default: ./epub-tts-narrator.toml; legacy fallback: ./epub-audiobook.toml)")
     serve = commands.add_parser("serve", help="Serve local Drama 3 through a Fish-compatible /v1/tts endpoint")
@@ -528,7 +540,7 @@ def _main(argv=None, *, in_shell=False):
         if args.command == "serve":
             from epub_tts_narrator.config import resolve_config_path
             config_path = resolve_config_path(config_path).resolve()
-        if args.command == "merge-characters":
+        if args.command in {"merge-characters", "rename-character"}:
             config = load_config(config_path, require_verifier=False, require_engine=False)
         elif args.command in {"refresh-metadata", "prepare-performance", "assemble", "pronunciations", "pronounce", "pronounce-name",
                             "history-echoes", "take-feedback", "accents", "convert-flac"}:
@@ -613,6 +625,9 @@ def _main(argv=None, *, in_shell=False):
                   + (f"; {counts['audio_changed']} take(s) changed since they were judged" if counts["audio_changed"] else "")
                   + ".")
             return 0
+        if args.command == "rename-character":
+            from .character_rename_command import run_rename_command
+            return run_rename_command(bundle, args)
         if args.command == "merge-characters":
             from .character_merge_command import run_merge_command
             return run_merge_command(bundle, config, args)

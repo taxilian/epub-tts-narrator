@@ -192,6 +192,9 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         Binding("D", "stop_sharing", "Unshare", show=False, tooltip="Stop sharing (this book's own link only)"),
         Binding("J", "merge", "Same as", show=False,
                 tooltip="This character is the same character as another: merge the two cast entries into one"),
+        Binding("N", "rename", "Rename", show=False,
+                tooltip="Give this character a new name, e.g. to fix a misspelling (later books follow; "
+                        "nothing is rendered again)"),
         Binding("c", "clips", "Clips", tooltip="Reference clip count for the next generation"),
         Binding("i", "instruct", "Instruct",
                 tooltip="Type how descriptions should change; the model revises them for you to review"),
@@ -645,6 +648,25 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
             self.push_screen(ChoiceScreen("Which entry is kept, with its voice, description and accent?",
                                           survivors, filterable=False), kept_one)
         self.push_screen(ChoiceScreen(f"Which character is the same character as {label(row)}?", options), chosen)
+
+    def action_rename(self):
+        row = self._require_row()
+        if row is None:
+            return
+        character = self._attempt(lambda: self.controller.character(row))
+        if character is None:
+            return
+
+        def typed(name):
+            if not name or not name.strip():
+                return
+            plan = self._attempt(lambda: self.controller.rename_plan(row, name))
+            if plan is not None:
+                self._confirm(plan.text + "\n\nSave this name?",
+                              lambda: self._attempt(lambda: self.controller.rename(plan)), title="Rename character?")
+        self.push_screen(TextEditScreen(f"New name — {label(row)}", character["name"], single_line=True,
+                                        help_text="The name as the book spells it. Ctrl+S saves · Escape cancels",
+                                        validate=lambda value: self.controller.rename_plan(row, value)), typed)
 
     def action_stop_sharing(self):
         row = self._require_row()

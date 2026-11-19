@@ -147,6 +147,12 @@ just merge-characters runs/book-01 "the old man" Arlen
 
 It shows what changes (which entry is kept, with its voice, description and accent; later books in the series that change too) and asks before saving. See [RENDERER.md](RENDERER.md#merging-two-cast-entries-into-one-character).
 
+To fix a misspelled name, or give a character another name, rename it (`cast` `N` does the same); nothing is rendered again:
+
+```sh
+just rename-character runs/book-01 Tmo Tom
+```
+
 Analysis is resumable: after a failure, rerun the same command. Validated model responses and journaled interactive speaker choices are reused. The output directory contains a `.analysis-pending/` workspace until publication, so an interrupted run resumes completed stages rather than starting over. Unassigned speech requires an explicit speaker choice and blocks rendering; advisory notes do not.
 
 `refresh-voice-profiles` never touches source text, segments, attribution, characters, roles, voice identity or order, audition scripts, reference recordings, or render caches. It rebinds the hidden `cast_fingerprint` records (analysis provenance and the book-local `audition-scripts.json`) so casting keeps working, backs up the originals, and refreshes descendant continuation links in the same transaction. The next render picks up the new profiles automatically; rerunning after everything is current makes no changes.

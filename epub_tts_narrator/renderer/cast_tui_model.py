@@ -550,7 +550,7 @@ class CastController:
                       if character["voice_id"] == row["voice_id"]), None)
         if found is None:
             raise ValueError(f"{label(row)} is not a character's own voice (narration or a changed-voice state), "
-                             "so it cannot be merged")
+                             "so it cannot be merged or renamed")
         return found
 
     def merge_options(self, row):
@@ -595,6 +595,26 @@ class CastController:
             self.log(f"Merged {plan.absorbed['name']} into {plan.name}; reopening the cast")
         return self.jobs.submit(f"Merge {plan.absorbed['name']} into {plan.name}", run,
                                 scope={"voice": [plan.kept["voice_id"], plan.absorbed["voice_id"]]})
+
+    # Renaming a character -----------------------------------------------------
+
+    def rename_plan(self, row, name):
+        """The planned rename of a row's character (raises ``ValueError`` for a name it cannot take)."""
+        from .character_rename_command import plan_rename
+        return plan_rename(self.session.bundle, self.character(row)["id"], name)
+
+    def rename(self, plan):
+        """Publish a planned rename; the screen reopens on the saved book."""
+        if any(job.active for job in self.jobs.jobs()):
+            raise ValueError("Wait for the running and queued jobs to finish before renaming a character")
+
+        def run():
+            from .character_rename_command import apply_rename
+            apply_rename(plan, progress=self.log)
+            self.reopen = True
+            self.log(f"Renamed {plan.character['name']} to {plan.name}; reopening the cast")
+        return self.jobs.submit(f"Rename {plan.character['name']} to {plan.name}", run,
+                                scope={"voice": [plan.character["voice_id"]]})
 
     def set_clips(self, row, count):
         voice_id = row["voice_id"]

@@ -37,6 +37,19 @@ def narrator_role_id(character_id):
     return f"narrator_{character_id}"
 
 
+def narrator_voice_id(document, role_id):
+    """A series-stable voice ID for a narration role of a character (linked to its own voice by the renderer)."""
+    import uuid
+    from .pipeline import fingerprint
+    series = document["provenance"].get("series") or {}
+    try:
+        namespace = uuid.UUID(series["series_id"]) if series.get("series_id") else uuid.NAMESPACE_URL
+    except (ValueError, AttributeError, TypeError):
+        namespace = uuid.NAMESPACE_URL
+    source_hash = series.get("source_fingerprint") or fingerprint(document["source"])
+    return "series_voice_" + uuid.uuid5(namespace, f"{source_hash}:narrator:{role_id}:voice").hex
+
+
 def sections(document):
     """The book's sections in order: ``{"title", "blocks"}``, split at chapters, headings and scene breaks."""
     from .narrator_read import HEADING_TAGS
@@ -140,6 +153,19 @@ def apply_narrators(document, chosen):
     narration_roles = {role["id"] for role in cast["roles"] if role["kind"] == "narration"}
     if MAIN not in roles:
         raise ValueError("The book has no main narrator role (narrator_main)")
+
+    def linked_voice(character, role_id):
+        own = next(voice for voice in cast["voices"] if voice["id"] == character["voice_id"])
+        voice_id = narrator_voice_id(document, role_id)
+        cast["voices"].append({"id": voice_id, "description": own["description"], "traits": []})
+        return voice_id
+    # Narrator roles saved on the character's own voice (before linked voices) move to a linked voice.
+    upgraded = {}
+    for role_id in upgradable_roles(document):
+        roles[role_id]["voice_id"] = upgraded[role_id] = linked_voice(characters[roles[role_id]["character_id"]], role_id)
+    for segment in revised["segments"]:
+        if segment.get("role_id") in upgraded:
+            segment["voice_id"] = upgraded[segment["role_id"]]
     narrator_of = {}
     for section in sections(revised):
         if section["key"] not in chosen:
@@ -150,9 +176,13 @@ def apply_narrators(document, chosen):
         else:
             role_id = narrator_role_id(character_id)
             if role_id not in roles:
+                # Its own voice ID, which the renderer links to the character's recording
+                # (voice_bindings.canonical_aliases): the narration sounds like the character,
+                # keeps its own continuity, and may later take its own accent or recording.
                 character = characters[character_id]
+                voice_id = linked_voice(character, role_id)
                 roles[role_id] = {"id": role_id, "kind": "narration", "character_id": character_id,
-                                  "voice_id": character["voice_id"],
+                                  "voice_id": voice_id,
                                   "description": f"Narration of the sections told from {character['name']}'s point of view."}
                 cast["roles"].append(roles[role_id])
                 narration_roles.add(role_id)
@@ -164,36 +194,76 @@ def apply_narrators(document, chosen):
                 or segment["attribution"].get("basis") == "user"):
             continue
         segment["role_id"], segment["voice_id"] = role["id"], role["voice_id"]
+    samples = revised["provenance"].get("voice_samples")
+    if isinstance(samples, dict) and "cast_fingerprint" in samples:
+        from .pipeline import fingerprint
+        samples["cast_fingerprint"] = fingerprint(cast)
     return revised
 
 
+def upgradable_roles(document):
+    """Narration roles of a character still on that character's own voice; a narrator gets a linked voice of its own."""
+    characters = {row["id"]: row for row in document["cast"]["characters"]}
+    return [role["id"] for role in document["cast"]["roles"]
+            if role["kind"] == "narration" and role.get("character_id") in characters
+            and role["voice_id"] == characters[role["character_id"]]["voice_id"]]
+
+
 def validate_narrator_revision(document, candidate):
-    """The ``narrators`` revision scope: narration moves between narration roles, and only narration roles are added."""
+    """The ``narrators`` scope: narration moves between narration roles; only narration roles and their linked voices are added.
+
+    Returns the added voice IDs."""
     from .analysis_revision import appended_cast
     if candidate["source"] != document["source"] or candidate["issues"] != document["issues"]:
         raise ValueError("Narrator revisions must preserve the source and issues")
-    if appended_cast(document["cast"], candidate["cast"]) != [] \
-            or candidate["cast"]["characters"] != document["cast"]["characters"]:
-        raise ValueError("Narrator revisions may only add narration roles")
+    # An upgraded role keeps its record apart from its new linked voice.
+    before_cast = deepcopy(document["cast"])
+    upgraded = {}
+    for role in before_cast["roles"]:
+        if role["id"] in upgradable_roles(document):
+            role["voice_id"] = upgraded[role["id"]] = narrator_voice_id(document, role["id"])
+    added_voices = appended_cast(before_cast, candidate["cast"])
+    if added_voices is None or candidate["cast"]["characters"] != document["cast"]["characters"]:
+        raise ValueError("Narrator revisions may only add narration roles and their voices")
     characters = {row["id"]: row for row in candidate["cast"]["characters"]}
-    for role in candidate["cast"]["roles"][len(document["cast"]["roles"]):]:
+    new_roles = candidate["cast"]["roles"][len(document["cast"]["roles"]):]
+    for role in new_roles:
         character = characters.get(role.get("character_id"))
-        if role.get("kind") != "narration" or character is None or role.get("voice_id") != character["voice_id"]:
-            raise ValueError("A narrator revision's new role must narrate in an existing character's voice")
+        if (role.get("kind") != "narration" or character is None or role.get("voice_id") not in added_voices
+                or role["voice_id"] != narrator_voice_id(document, role["id"])):
+            raise ValueError("A narrator revision's new role must narrate in a new voice linked to an existing "
+                             "character")
+    voices = {voice["id"]: voice for voice in candidate["cast"]["voices"]}
+    if sorted(added_voices) != sorted([*upgraded.values(), *(role["voice_id"] for role in new_roles)]) or any(
+            set(voices[voice_id]) != {"id", "description", "traits"} or voices[voice_id]["traits"]
+            for voice_id in added_voices):
+        raise ValueError("A narrator revision may add only one plain linked voice per new narration role")
     narration = {role["id"] for role in candidate["cast"]["roles"] if role["kind"] == "narration"}
     if len(candidate["segments"]) != len(document["segments"]):
         raise ValueError("Narrator revisions must keep every segment")
     for before, after in zip(document["segments"], candidate["segments"]):
         if before == after:
             continue
+        if before.get("role_id") in upgraded and after == {**before, "voice_id": upgraded[before["role_id"]]}:
+            continue
         if ({key: value for key, value in before.items() if key not in {"role_id", "voice_id"}}
                 != {key: value for key, value in after.items() if key not in {"role_id", "voice_id"}}
                 or before["kind"] != "narration" or before.get("role_id") not in narration
                 or after.get("role_id") not in narration or before["attribution"].get("basis") == "user"):
             raise ValueError("Narrator revisions may only move narration between narration roles")
-    others = lambda record: {key: value for key, value in record.items() if key != "narrator_review"}
-    if others(candidate["provenance"]) != others(document["provenance"]):
-        raise ValueError("Narrator revisions may only change provenance.narrator_review")
+    from .pipeline import fingerprint
+
+    def others(record, cast=None):
+        result = {key: deepcopy(value) for key, value in record.items() if key != "narrator_review"}
+        samples = result.get("voice_samples")
+        if isinstance(samples, dict) and "cast_fingerprint" in samples:
+            if cast is not None and samples["cast_fingerprint"] != fingerprint(cast):
+                raise ValueError("Narrator revisions must bind voice_samples to their cast")
+            samples.pop("cast_fingerprint")
+        return result
+    if others(candidate["provenance"], candidate["cast"]) != others(document["provenance"]):
+        raise ValueError("Narrator revisions may only change provenance.narrator_review and the voice_samples binding")
+    return added_voices
 
 
 def _ask(question):
@@ -254,7 +324,7 @@ def review_narrators(directory, config, client_factory, progress, *, instruction
               else (answers[section["key"]][0] if answers[section["key"]] else None) for section in book_sections}
     revised = apply_narrators(document, chosen)
     names = {row["id"]: row["name"] for row in document["cast"]["characters"]}
-    if revised["segments"] == document["segments"] and not wanted:
+    if revised["segments"] == document["segments"] and revised["cast"] == document["cast"] and not wanted:
         print("Narrator check: every section's narration already has its narrator.")
         return False
     print("Narrator check: whose point of view each section follows:")
@@ -263,6 +333,9 @@ def review_narrators(directory, config, client_factory, progress, *, instruction
         quote = answers.get(section["key"])
         print(f"  {_label(section)}: {reader}" + (f" (“{quote[1]}”)" if quote else ""))
     moved = sum(before != after for before, after in zip(document["segments"], revised["segments"]))
+    if upgradable_roles(document):
+        print("Narrator check: each point-of-view narrator now gets its own voice, linked to the character's "
+              "recording and accent (its narration keeps its own continuity).")
     if moved:
         print(f"Narrator check: {moved} narration passage(s) would be read in a different voice and rendered again.")
     # Saved answers were already accepted; only new ones are asked about.

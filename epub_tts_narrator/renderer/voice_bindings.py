@@ -51,6 +51,20 @@ def canonical_aliases(cast, explicit=None):
     return validate_aliases(aliases)
 
 
+def linked_voices(cast):
+    """``{voice_id: character voice}`` for role voices that share a character's recording.
+
+    A role attached to a character on a voice of its own that is not
+    ``derived_from`` the character's voice (a point-of-view narrator's voice,
+    for instance) is linked to that character's voice: it uses the same
+    recording and, unless a person chooses otherwise, the same accent.
+    """
+    try:
+        return canonical_aliases(cast)
+    except ValueError:
+        return {}
+
+
 def cast_voice_owners(cast):
     """Record exact identities for primary voices and alternate role voices."""
     owners = {}

@@ -1516,6 +1516,18 @@ Updated remote chapter workers can apply the same policy while assembling on the
 
 ## Audio storage and cleanup
 
+
+### Renaming a character
+
+To fix a misspelled name (one you typed when adding a character, say) or call a character by another name:
+
+```sh
+just rename-character runs/book-01 Tmo Tom --dry-run
+just rename-character runs/book-01 Tmo Tom
+# or: audiobook-render rename-character BOOK CHARACTER NEW_NAME [--yes] [--dry-run]
+```
+
+Name the character by its name, an alias, its character ID or its voice ID. Only words change: the character's name, its aliases, and the old name where its own description and its roles' descriptions use it. The old name stays as an alias when the book's text uses it (an epithet or an earlier name), and is dropped otherwise (a misspelling); a new name that was an alias stops being one. A name another cast entry already has is refused; if they are one person, use `merge-characters`. Later books in the series whose entry for the same character still has the old name are renamed too, earlier books keep theirs, and the accent groups' names follow. The voice, its recording and every line stay, so nothing is rendered again. It shows the change and asks; `--yes` saves without asking, `--dry-run` only shows it, and without a terminal nothing is saved unless `--yes` is given. In `cast`, `N` renames the highlighted character. Each rename is recorded in `provenance.character_renames` and published through the `character-rename` revision scope with backups.
 ### Kept audio is lossless FLAC
 
 The renderer keeps speech takes (accepted and rejected, including selections, recovery joins and parts, and clip-repair parts) under `render-work/clips/`, simultaneous-speaker mixes under `render-work/mixes/`, lossless chapter audio under `render-work/chapters/<cache-key>/`, and loudness-levelled listening previews under `render-work/voice-previews/` as FLAC, not uncompressed WAV. They take roughly a third of the space: measured on one book, about 38% of the WAV size for a take and 34% for a chapter.

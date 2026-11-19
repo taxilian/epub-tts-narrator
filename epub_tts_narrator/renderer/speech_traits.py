@@ -234,7 +234,8 @@ def accent_cues(bundle, config, *, store=None):
     group). A voice with neither uses the accent its description names
     (``suggest_accent``): the description that designed its saved recording,
     or, before it is made, the one that will. A derived voice (a character's
-    later state) without its own choice keeps its main voice's cue.
+    later state) or a linked one (``voice_bindings.linked_voices``, such as a
+    point-of-view narrator's) without its own choice keeps its character's cue.
     """
     from .accent_assignment import assigned_accents
     chosen = accent_overrides(bundle, config, include_cleared=True)
@@ -244,6 +245,8 @@ def accent_cues(bundle, config, *, store=None):
         from .book_context import voice_store
         store = voice_store(bundle, config)
     # Without a voice directory there are no saved recordings: descriptions are the profiles'.
+    from .voice_bindings import linked_voices
+    linked = linked_voices(bundle["cast"])
     cues = {}
     derived = {}
     for profile in bundle["cast"]["voices"]:
@@ -252,6 +255,9 @@ def accent_cues(bundle, config, *, store=None):
             cue = chosen[voice_id]
         elif isinstance(profile.get("derived_from"), dict):
             derived[voice_id] = profile["derived_from"].get("voice_id")
+            continue
+        elif voice_id in linked:
+            derived[voice_id] = linked[voice_id]
             continue
         elif trait_accent(chosen_traits.get(voice_id), _book_terms(bundle) if chosen_traits.get(voice_id) else ()):
             cue = trait_accent(chosen_traits[voice_id], _book_terms(bundle))

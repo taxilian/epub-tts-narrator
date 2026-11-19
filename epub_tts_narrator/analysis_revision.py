@@ -144,6 +144,7 @@ _REVISION_SIDECARS = {
     "source-edit": frozenset({"audition-scripts.json", "pronunciations.json", "scoped-pronunciations.json",
                               "performance-plan.json", "chapter-ignores.json"}),
     # A character merge drops the absorbed voice from every per-voice choice.
+    "character-rename": frozenset({"audition-scripts.json", "voice-accent-groups.json"}),
     "character-merge": frozenset({"audition-scripts.json", "voice-aliases.json", "voice-traits.json",
                                   "voice-accents.json", "voice-accent-assignments.json",
                                   "voice-accent-groups.json", "voice-clips.json", "character-notes.json",
@@ -240,19 +241,30 @@ def appended_cast(before, after):
 
 
 def _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes):
-    """New voices change the cast fingerprint the book's audition scripts are bound to."""
+    """A changed cast (new voices, or only new roles) changes the fingerprint the book's audition scripts are bound to."""
     sidecar = path / "audition-scripts.json"
-    if added_voices and (sidecar.exists() or sidecar.is_symlink()):
-        if sidecar.name in sidecars.get(path, {}):
+    if not ((added_voices or candidate["cast"] != document["cast"]) and (sidecar.exists() or sidecar.is_symlink())):
+        return
+    if sidecar.name in sidecars.get(path, {}):
+        if added_voices:
             raise ValueError("A revision that adds voices rebinds audition-scripts.json itself; do not supply it")
-        from .voice_profile_refresh import audition_sidecar_rebind
-        sidecars.setdefault(path, {})[sidecar.name] = audition_sidecar_rebind(
-            sidecar, source_fingerprint=fingerprint(document["source"]),
-            cast_fingerprint_before=fingerprint(document["cast"]),
-            cast_fingerprint_after=fingerprint(candidate["cast"]),
-            voice_ids=[voice["id"] for voice in candidate["cast"]["voices"]])
-        names[path].append(sidecar.name)
-        original_hashes[path][sidecar.name] = _hash(sidecar)
+        return
+    try:
+        bound = _read(sidecar).get("cast_fingerprint") if sidecar.is_file() and not sidecar.is_symlink() else None
+    except (OSError, ValueError, AttributeError):
+        bound = None
+    if bound is not None and bound != fingerprint(document["cast"]):
+        # Already bound to an earlier cast: left for casting to recover
+        # (audition_scripts.ensure_bundle_scripts keeps each voice's script).
+        return
+    from .voice_profile_refresh import audition_sidecar_rebind
+    sidecars.setdefault(path, {})[sidecar.name] = audition_sidecar_rebind(
+        sidecar, source_fingerprint=fingerprint(document["source"]),
+        cast_fingerprint_before=fingerprint(document["cast"]),
+        cast_fingerprint_after=fingerprint(candidate["cast"]),
+        voice_ids=[voice["id"] for voice in candidate["cast"]["voices"]])
+    names[path].append(sidecar.name)
+    original_hashes[path][sidecar.name] = _hash(sidecar)
 
 
 def revise_directories(revisions, *, directories=None, expected_manifest_hashes=None, progress=print,
@@ -260,9 +272,9 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
                        reserved_update_locks=None):
     """Publish a revision, coordinating manual decisions with profile refreshes."""
     if scope not in {"attribution", "source-edit", "voice-profiles", "speaker-decisions", "character-merge",
-                     "narrators"}:
+                     "narrators", "character-rename"}:
         raise ValueError("Revision scope must be attribution, source-edit, voice-profiles, speaker-decisions, "
-                         "character-merge, or narrators")
+                         "character-merge, narrators, or character-rename")
     if speaker_decision_inputs is not None and scope != "speaker-decisions":
         raise ValueError("speaker_decision_inputs are accepted only for speaker-decisions revisions")
     if reserved_update_locks is not None and scope == "speaker-decisions":
@@ -324,9 +336,13 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
     publication reuses them instead of acquiring the locks again, and the
     render-activity re-checks trust that reservation's probe handshake.
     ``"narrators"`` moves narration between narration roles and may append
-    narration roles attached to existing characters
+    narration roles attached to existing characters, each with its own voice
+    the renderer links to the character's recording
     (``narrator_review.validate_narrator_revision``).
-    Attribution and narrator revisions never refuse live renderers (see
+    ``"character-rename"`` accepts exactly the renames newly recorded in
+    ``provenance.character_renames`` (``character_rename.validate_character_rename``)
+    with the audition and accent-group name sidecars.
+    Attribution, narrator and rename revisions never refuse live renderers (see
     ``reserve_revision_scope``); every other scope still probes render
     activity before staging and again immediately before publication.
     """
@@ -390,10 +406,17 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                 from .character_merge import validate_character_merge
                 validate_character_merge(document, candidate, earlier_character_ids={
                     row["id"] for book in registry["books"][:-1] for row in book["cast"]["characters"]})
+        elif scope == "character-rename":
+            if path in revisions:
+                from .character_rename import validate_character_rename
+                validate_character_rename(document, candidate)
+            elif candidate != document:
+                raise ValueError("A character rename may change only the books it names")
         elif scope == "narrators":
             if path in revisions:
                 from .narrator_review import validate_narrator_revision
-                validate_narrator_revision(document, candidate)
+                added_voices = validate_narrator_revision(document, candidate)
+                _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes)
             elif candidate != document:
                 raise ValueError("Narrator revisions may change only the selected book")
         elif scope == "voice-profiles":
@@ -409,7 +432,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes)
         if readiness(candidate)["errors"]:
             raise ValueError("Cannot publish an invalid speaker revision")
-        if scope not in {"attribution", "narrators"} and not reserved and (reason := _render_active(path)):
+        if scope not in {"attribution", "narrators", "character-rename"} and not reserved and (reason := _render_active(path)):
             raise ValueError(f"Rendering is active; finish it before revising analysis: {path} ({reason})")
     locks = []
     transaction = None
@@ -492,7 +515,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
         for path in paths:
             if any(_hash(path / name) != checksum for name, checksum in original_hashes[path].items()):
                 raise ValueError(f"Analysis changed before publication: {path}")
-            if scope not in {"attribution", "narrators"} and not reserved and (reason := _render_active(path)):
+            if scope not in {"attribution", "narrators", "character-rename"} and not reserved and (reason := _render_active(path)):
                 raise ValueError(f"Rendering started during revision: {path} ({reason})")
         # A reservation destroyed or replaced after entry cannot write: each
         # handle must still prove exclusive ownership immediately before the

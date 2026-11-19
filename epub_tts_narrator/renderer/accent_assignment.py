@@ -291,7 +291,9 @@ def voice_entries(bundle, parents=(), known=None):
     """
     known = known or {}
     cast = bundle["cast"]
+    from .voice_bindings import linked_voices
     derived = {voice["id"] for voice in cast["voices"] if isinstance(voice.get("derived_from"), dict)}
+    derived |= set(linked_voices(cast))  # a linked voice takes its character's accent
     used, spoken = set(), {}
     for chapter in bundle.get("chapters", []):
         for row in chapter.get("rows", []):

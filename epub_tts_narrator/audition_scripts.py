@@ -345,6 +345,18 @@ def prepare_document_samples(document, requests, *, workers=5, progress=lambda m
     return result
 
 
+def _for_current_cast(record, cast):
+    """A saved audition record restricted to the voices ``cast`` still has (scripts are keyed by voice ID)."""
+    known = {voice["id"] for voice in cast["voices"]}
+    result = dict(record)
+    result["scripts"] = {voice: script for voice, script in record["scripts"].items() if voice in known}
+    if isinstance(record.get("extra_scripts"), dict):
+        result["extra_scripts"] = {voice: value for voice, value in record["extra_scripts"].items() if voice in known}
+    if isinstance(record.get("replaced_voice_ids"), list):
+        result["replaced_voice_ids"] = [voice for voice in record["replaced_voice_ids"] if voice in known]
+    return result
+
+
 def ensure_bundle_scripts(bundle, config_path=None, *, canonical_id=lambda value: value,
                           voice_ids=None, progress=print, refresh=False, extra_clips=0):
     """Prepare or explicitly refresh auditions without editing signed analysis."""
@@ -354,6 +366,8 @@ def ensure_bundle_scripts(bundle, config_path=None, *, canonical_id=lambda value
     path = directory / FILENAME
     expected = {"source_fingerprint": bundle["manifest"]["source_fingerprint"],
                 "cast_fingerprint": fingerprint(bundle["cast"])}
+    stale = []  # set when the saved scripts were bound to an earlier cast of this book
+
     def load_working():
         working = dict(bundle)
         if path.exists() or path.is_symlink():
@@ -361,9 +375,15 @@ def ensure_bundle_scripts(bundle, config_path=None, *, canonical_id=lambda value
                 raise ValueError("Audition script sidecar must be a regular file")
             record = json.loads(path.read_text(encoding="utf-8"))
             if (not isinstance(record, dict) or record.get("version") != VERSION
-                    or any(record.get(key) != value for key, value in expected.items())
+                    or record.get("source_fingerprint") != expected["source_fingerprint"]
                     or not isinstance(record.get("scripts"), dict)):
                 raise ValueError("Saved audition scripts do not match this book's source and cast")
+            if record.get("cast_fingerprint") != expected["cast_fingerprint"]:
+                # The cast changed since (a revision that did not rebind them): a voice's
+                # script belongs to its voice ID, so the scripts of voices still in the
+                # cast are kept and the rest are prepared again.
+                record = _for_current_cast(record, bundle["cast"])
+                stale[:] = [True]
             working["audition_scripts"] = record["scripts"]
             working["audition_script_overrides"] = record.get("replaced_voice_ids", [])
             working["audition_extra_scripts"] = record.get("extra_scripts", {})
@@ -376,9 +396,13 @@ def ensure_bundle_scripts(bundle, config_path=None, *, canonical_id=lambda value
                     audition_extra_scripts=prepared.get("extra_scripts", {}))
 
     working = load_working()
+    if stale:
+        progress("Audition scripts were saved for an earlier cast of this book; keeping those of voices still in "
+                 "the cast and binding them to the current cast.")
     # Fast path: no configuration or network is needed for prepared books.
     # Explicit refresh always persists its overrides, including source-only runs.
-    if not refresh:
+    # Scripts recovered from an earlier cast are saved again, bound to this one.
+    if not refresh and not stale:
         try:
             prepared = prepare_samples(working, None, canonical_id=canonical_id, voice_ids=voice_ids,
                                        extra_clips=extra_clips)

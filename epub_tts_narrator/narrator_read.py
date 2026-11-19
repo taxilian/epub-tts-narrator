@@ -1378,11 +1378,11 @@ def build_cast(source, ledger, speaking):
                               "voice_id": record["voice_id"], "description": f"Dialogue role for {row['name']}."})
         cast["voices"].append({"id": record["voice_id"], "description": "Voice pending design.", "traits": []})
     if narration["mode"] == "first" and narration["narrator"] and any(row["id"] == narration["narrator"] for row in include):
+        # The narration keeps its own voice, which the renderer links to the
+        # narrating character's recording (voice_bindings.canonical_aliases).
         role = cast["roles"][0]
         role["character_id"] = f"char_{narration['narrator']}"
-        role["voice_id"] = f"voice_{narration['narrator']}"
         role["description"] = "First-person narration by the narrating character."
-        cast["voices"] = [voice for voice in cast["voices"] if voice["id"] != "voice_narrator_main"]
     return cast
 
 
@@ -1509,7 +1509,11 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
         local_id = item.get("series_origin", {}).get("local_character_id", item["id"])
         if local_id in char_local:
             owners.setdefault(item["voice_id"], char_local[local_id])
-    narrator_voice = next(role["voice_id"] for role in cast["roles"] if role["id"] == "narrator_main")
+    narrator_role = next(role for role in cast["roles"] if role["id"] == "narrator_main")
+    narrator_voice = narrator_role["voice_id"]
+    # A narrating character's narration voice is linked to its own: it takes that description, not a design.
+    narrating = next((item["voice_id"] for item in cast["characters"] if item["id"] == narrator_role.get("character_id")),
+                     None)
     targets, inherited_changes = [], []
     for voice in cast["voices"]:
         row = owners.get(voice["id"])
@@ -1518,11 +1522,11 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
             if row is not None and any(change["kind"] in IDENTITY_CHANGES for change in row.get("changes", [])):
                 inherited_changes.append((voice, row))
             continue
-        if row is None and voice["id"] != narrator_voice:
+        if row is None and (voice["id"] != narrator_voice or narrating is not None):
             continue
         targets.append((voice, row))
     if not targets and not inherited_changes:
-        return cast, 0, {}
+        return _narrating_description(cast, narrator_voice, narrating), 0, {}
     narration = ledger["narration"]
     entries, changes_by_short = [], {}
     terms = book_terms(source, ledger)
@@ -1630,7 +1634,17 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
                 change_profiles[changes_by_short[short]] = profile
             else:
                 voices[by_short[short]["id"]].update(profile)
-    return cast, len(entries), change_profiles
+    return _narrating_description(cast, narrator_voice, narrating), len(entries), change_profiles
+
+
+def _narrating_description(cast, narrator_voice, narrating):
+    if narrating is not None and narrator_voice != narrating:
+        voices = {voice["id"]: voice for voice in cast["voices"]}
+        if narrator_voice in voices and narrating in voices:
+            cast = deepcopy(cast)
+            voices = {voice["id"]: voice for voice in cast["voices"]}
+            voices[narrator_voice]["description"] = voices[narrating]["description"]
+    return cast
 
 
 def _segment(block_id, start, text, *, role, kind, basis, reason, evidence=None, candidates=None,
