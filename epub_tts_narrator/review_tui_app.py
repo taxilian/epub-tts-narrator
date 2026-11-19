@@ -32,7 +32,7 @@ from .tui_widgets import (
 
 PASSAGE_CHARACTERS = 300
 CHAPTER_TITLE_CHARACTERS = 28
-_FIELD_KEYS = {"speaker": "e", "direction": "d", "review": "r", "takes": "t"}
+_FIELD_KEYS = {"speaker": "e", "direction": "d", "voices": "v", "review": "r", "takes": "t"}
 _TROUBLE = ("Save failed", "Ignore save failed", "Could not", "Playback failed", "Checkpoint archive failed")
 
 
@@ -63,6 +63,8 @@ class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
         Binding("e,f2", "speaker", "Speaker", tooltip="Reassign the passage to existing cast members"),
         Binding("d,f3", "direction", "Direction", tooltip="Edit the delivery direction (at most 240 characters)"),
         Binding("r,f4", "review", "Review flag", tooltip="Turn the passage's review flag on or off"),
+        Binding("v", "voices", "Voices",
+                tooltip="For a group's line or a line said together: how its several voices speak"),
         Binding("p", "play", "Play", tooltip="Play the passage's accepted take"),
         Binding("space", "stop", "Stop", show=False, tooltip="Stop playback"),
         Binding("greater_than_sign", "speed", "Speed",
@@ -275,6 +277,7 @@ class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
         if self._passage() is None:
             return
         options = [("speaker", "Change the speaker (existing cast only)"), ("direction", "Edit the delivery direction"),
+                   *([("voices", "How this line's several voices speak")] if self.controller.voices_kind() else []),
                    ("review", "Turn the review flag on or off"), ("play", "Play the accepted take"),
                    ("takes", "Listen to every take; change which one is used")]
 
@@ -317,6 +320,50 @@ class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
                                         single_line=True,
                                         help_text="At most 240 characters; empty means none · Enter saves · "
                                                   "Escape cancels"), chosen)
+
+    def action_voices(self):
+        if self._passage() is None:
+            return
+        controller = self.controller
+        kind = controller.voices_kind()
+        if kind is None:
+            self._log("This line has one voice. A group's voices are set up in the cast screen (C); "
+                      "Speaker (e) marks named characters saying it together.", "warning")
+            return
+        if kind == "simultaneous":
+            modes = [("unison", "unison: the same words at once"),
+                     ("staggered", "staggered: voices entering one after another"),
+                     ("layered", "layered: the first speaker clear, the others under")]
+
+            def mixed(mode):
+                if mode is not None:
+                    self.refresh_all(controller.set_simultaneous_mode(mode))
+            self.push_screen(ChoiceScreen("How do they say it together?", modes, filterable=False), mixed)
+            return
+        choice = controller.group_choices()
+        from .renderer.cast_tui_model import MODE_WORDS
+        modes = [("default", f"The group's default ({choice['mode']})")] + [
+            (mode, f"{mode}: {MODE_WORDS[mode]}") for mode in MODE_WORDS]
+
+        def moded(mode):
+            if mode is None:
+                return
+            if mode == "default":
+                return self.refresh_all(controller.set_line_voices())
+            if mode in {"unison", "staggered", "layered"}:
+                options = [(None, "All of the group's voices")] + choice["voices"]
+                self.push_screen(MultiChoiceScreen(
+                    "Which voices say this line? Space marks several", options),
+                    lambda members: members is not None and self.refresh_all(
+                        controller.set_line_voices(mode=mode, members=members or None)))
+            elif mode in {"pool", "alternate"}:
+                options = [("auto", "Chosen by the plan")] + choice["voices"]
+                self.push_screen(ChoiceScreen("Which voice speaks this line?", options, filterable=False),
+                                 lambda voice: voice is not None and self.refresh_all(controller.set_line_voices(
+                                     mode=mode, members=None if voice == "auto" else [voice])))
+            else:
+                self.refresh_all(controller.set_line_voices(mode=mode))
+        self.push_screen(ChoiceScreen("How do this line's voices speak?", modes, filterable=False), moded)
 
     def action_review(self):
         if self._passage() is not None:

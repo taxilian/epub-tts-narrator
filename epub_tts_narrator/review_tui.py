@@ -340,6 +340,81 @@ class ReviewApp:
         self._store_edit(edited)
         return True
 
+    # Several voices (COLLECTIVE_VOICES.md) ------------------------------------------
+
+    def _voices_by_id(self):
+        return {voice["id"]: voice for voice in self.document["cast"]["voices"]}
+
+    def voice_label(self, voice_id):
+        """A voice's name in this book: its character, else "GROUP, voice N" for a pool voice."""
+        names = {character["voice_id"]: character["name"] for character in self.document["cast"]["characters"]}
+        if voice_id in names:
+            return names[voice_id]
+        voice = self._voices_by_id().get(voice_id, {})
+        lead = self._voices_by_id().get(voice.get("member_of"), {})
+        members = (lead.get("ensemble") or {}).get("members", [])
+        if voice_id in members:
+            return f"{names.get(lead['id'], lead['id'])}, voice {members.index(voice_id) + 2}"
+        return voice_id
+
+    def voices_kind(self):
+        """``"group"`` (a cast ensemble's line), ``"simultaneous"`` (named characters together) or None."""
+        segment = self._segment(self.info_segment_id)
+        if segment.get("simultaneous_speakers"):
+            return "simultaneous"
+        lead = self._voices_by_id().get(segment.get("voice_id"))
+        return "group" if lead and lead.get("ensemble") else None
+
+    def group_choices(self):
+        """The focused group line: its ensemble's voices, default mode and this line's override."""
+        segment = self._segment(self.info_segment_id)
+        lead = self._voices_by_id()[segment["voice_id"]]
+        from .ensembles import lanes_of
+        return {"voices": [(voice_id, self.voice_label(voice_id)) for voice_id in lanes_of(lead)],
+                "mode": lead["ensemble"]["mode"], "override": dict(segment.get("ensemble") or {}),
+                "simultaneous_mode": segment.get("simultaneous_mode", "unison")}
+
+    def set_line_voices(self, **choice):
+        """Set (or, with no choice, clear) the focused group line's override."""
+        from .attribution_edits import edit_ensemble
+        try:
+            edited = edit_ensemble(self._segment(self.info_segment_id), self._voices_by_id(), **choice)
+        except ValueError as exc:
+            self.notice = str(exc)
+            return False
+        self._store_edit(edited)
+        return True
+
+    def set_simultaneous_mode(self, mode):
+        from .attribution_edits import edit_simultaneous_mode
+        try:
+            edited = edit_simultaneous_mode(self._segment(self.info_segment_id), mode)
+        except ValueError as exc:
+            self.notice = str(exc)
+            return False
+        self._store_edit(edited)
+        return True
+
+    def voices_text(self):
+        """One line for the details: how the focused line's several voices speak, or ''."""
+        kind = self.voices_kind()
+        segment = self._segment(self.info_segment_id)
+        if kind == "simultaneous":
+            return "Said together: " + segment.get("simultaneous_mode", "unison")
+        if kind != "group":
+            return ""
+        choice = self.group_choices()
+        override = choice["override"]
+        mode = override.get("mode", choice["mode"])
+        parts = [mode + ("" if "mode" in override else " (the group's default)")]
+        if override.get("members"):
+            parts.append("voices: " + ", ".join(self.voice_label(voice) for voice in override["members"]))
+        if override.get("lanes"):
+            parts.append(f"{override['lanes']} voice(s)")
+        if override.get("slot"):
+            parts.append(f"member {override['slot']}")
+        return "Several voices: " + "; ".join(parts)
+
     def direction(self):
         return self._segment(self.info_segment_id)["delivery"]["direction"]
 
@@ -437,6 +512,8 @@ class ReviewApp:
             self._toggle_review()
         elif field == "takes":
             self._open_takes()
+        elif field == "voices":
+            self.notice = "Several voices are changed in the full-screen review (run review-ui without --plain)."
 
     def _render_chapter(self) -> ChapterIndex:
         try:
@@ -814,6 +891,7 @@ class ReviewApp:
         rows = [
             ("speaker", "Speaker(s): " + speaker),
             ("direction", "Direction: " + (delivery["direction"] or "(none)")),
+            *([("voices", self.voices_text())] if self.voices_text() else []),
             ("review", "Review required: " + ("yes" if attribution["review_required"] else "no")),
             ("takes", "Takes: view and play rendered attempts"),
             (None, ""),
