@@ -98,6 +98,8 @@ def validate_voices(check, voices: list[dict[str, Any]], voice_index: dict[str, 
     """``cast.voices[i].ensemble`` and ``member_of``."""
     for i, voice in enumerate(voices):
         path = f"cast.voices[{i}]"
+        if not isinstance(voice.get("id"), str):
+            continue  # the voice's own ID error is already reported
         if "ensemble" in voice:
             at = f"{path}.ensemble"
             value = check.object(voice["ensemble"], at)

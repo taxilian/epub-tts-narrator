@@ -188,7 +188,8 @@ class _Validator:
         for i, character in enumerate(characters):
             if "group" in character:
                 validate_group(self, character, f"cast.characters[{i}].group", character_index)
-        self.group_voices = {character.get("voice_id") for character in characters if "group" in character}
+        self.group_voices = {character.get("voice_id") for character in characters
+                             if "group" in character and isinstance(character.get("voice_id"), str)}
 
         for i, role in enumerate(roles):
             path = f"cast.roles[{i}]"
@@ -239,7 +240,8 @@ class _Validator:
             if "through_end" in derived and type(derived["through_end"]) is not bool:
                 self.error(f"{path}.through_end", "must be a boolean")
         validate_voices(self, voices, voice_index, character_voices,
-                        {role.get("voice_id") for role in roles if role.get("kind") == "narration"})
+                        {role.get("voice_id") for role in roles
+                         if role.get("kind") == "narration" and isinstance(role.get("voice_id"), str)})
         self.voice_index = voice_index
         return role_index
 
