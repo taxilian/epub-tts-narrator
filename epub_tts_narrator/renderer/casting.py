@@ -794,6 +794,74 @@ class CastingSession:
         except ValueError as exc:
             raise RenderBlocked(str(exc)) from exc
 
+    def hear_ensemble(self, voice_id, *, murmur=False):
+        """A listening preview of a group's ensemble: one of its book lines, or 10 s of its murmur.
+
+        Each of the group's accepted voices says the group's first line (its
+        audition script when it has none); lane modes are mixed by the group's
+        recipe, one-voice modes play the voices one after another. ``murmur``
+        makes a short murmur loop instead. A preview, never a take: nothing is
+        verified, kept for rendering, or changed in the book.
+        """
+        from array import array
+        from ..ensembles import LANE_MODES, ensemble, lanes_of, recipe_for
+        from ..spoken_text import build_spoken
+        from .audio_naming import descriptive_audio_filename
+        from .lane_mix import mix_arrays, plan_lanes
+        from .murmur import _samples, _write, build_loop, lane_texts
+        from .stored_audio import audio_hash
+        profile = self._profile(voice_id)
+        chosen = ensemble(profile)
+        if not chosen or not chosen.get("members"):
+            raise ValueError("This voice has no ensemble yet: press C to set up its voices")
+        lanes = lanes_of(profile)[:8]
+        missing = [lane for lane in lanes if self.store.load(lane) is None]
+        if missing:
+            raise ValueError(f"Accept a take for every voice of the group first ({len(missing)} still without one)")
+        rows = [row for chapter in self.bundle.get("chapters", []) for row in chapter.get("rows", [])
+                if row.get("voice_id") == voice_id and row.get("kind") in {"dialogue", "thought", "letter"}]
+        line = build_spoken(rows[0])[0].strip().strip("\"“”‘’'") if rows else ""
+        line = line or self._draft(voice_id, self.store.load(voice_id))["reference_text"]
+        rate = self.config["render"]["sample_rate"]
+        directory = self.store.directory / "ensemble-auditions"
+        directory.mkdir(parents=True, exist_ok=True)
+        engine = self._get_engine()
+        with self._locked():
+            takes = []
+            for number, lane in enumerate(lanes):
+                texts = lane_texts(number, 2) if murmur else [line]
+                lane_takes = []
+                for index, text in enumerate(texts):
+                    path = directory / descriptive_audio_filename(
+                        "ensemble-audition-take", lane, f"n{index}", digest([lane, text])[:12], suffix=".wav")
+                    if not path.exists():
+                        engine.synthesize(text, self.store.load(lane), path, seed=self.config["render"]["seed"],
+                                          direction="talking quietly to a neighbour" if murmur else "")
+                    lane_takes.append(_samples(path))
+                takes.append(lane_takes)
+        key = digest([voice_id, lanes, murmur, line, chosen.get("mode"), chosen.get("mix")])[:16]
+        output = directory / descriptive_audio_filename(
+            "murmur-audition" if murmur else "ensemble-audition", voice_id, key, suffix=".wav")
+        if murmur:
+            loop = build_loop(takes, key, rate, 2800.0)
+            mixed = loop[:int(10 * rate)]
+        elif chosen["mode"] in LANE_MODES:
+            sources = [lane_takes[0] for lane_takes in takes]
+            plan = plan_lanes([{"audio_sha256": digest(list(source))} for source in sources], sources,
+                              recipe_for(chosen["mode"], chosen.get("mix")), rate)
+            mixed, _, _ = mix_arrays(sources, plan, rate)
+        else:
+            gap = array("h", [0] * int(0.4 * rate))
+            mixed = array("h")
+            for lane_takes in takes:
+                mixed.extend(lane_takes[0])
+                mixed.extend(gap)
+        if output.exists():
+            output.unlink()
+        _write(output, mixed, rate)
+        audio_hash(output)
+        return output
+
     def generate(self, voice_id):
         """Save a verified candidate without changing the active selection."""
         self._profile(voice_id)

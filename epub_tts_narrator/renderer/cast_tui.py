@@ -686,8 +686,14 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         from ..ensembles import DEFAULT_RECIPES
         quote = f" The book: “{shown['evidence'][0]}”." if shown["evidence"] else ""
         start = [("set", "Hear it as several voices"), ("single", "Keep it as one voice")]
+        if shown["ensemble"] and shown["ensemble"].get("members"):
+            start = [("hear", "Listen to a line in all its voices"), ("murmur", "Listen to its murmur"),
+                     ("set", "Change its voices"), ("single", "Keep it as one voice")]
 
         def started(choice):
+            if choice in {"hear", "murmur"}:
+                self._attempt(lambda: self.controller.hear_ensemble(row, murmur=choice == "murmur"))
+                return
             if choice == "single":
                 plan = self._attempt(lambda: self.controller.ensemble_decline(row))
                 if plan is not None:

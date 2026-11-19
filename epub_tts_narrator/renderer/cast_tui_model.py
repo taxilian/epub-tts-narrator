@@ -665,6 +665,16 @@ class CastController:
         from .ensemble_command import plan_decline
         return plan_decline(self.session.bundle, row["voice_id"])
 
+    def hear_ensemble(self, row, *, murmur=False):
+        """Make and play a preview of the group's voices together (or its murmur), as a job."""
+        def run():
+            path = self.session.hear_ensemble(row["voice_id"], murmur=murmur)
+            self.player.start(path)
+            self.playing = (row["voice_id"], "murmur" if murmur else "ensemble")
+            self.log(f"Playing {label(row)}'s " + ("murmur" if murmur else "voices together"))
+        return self.jobs.submit(f"Hear {label(row)}'s " + ("murmur" if murmur else "voices"), run,
+                                scope={"voice": [row["voice_id"]]})
+
     def save_ensemble(self, plan):
         """Publish a person's ensemble choice; the cast reopens with its voices to cast."""
         if any(job.active for job in self.jobs.jobs()):
