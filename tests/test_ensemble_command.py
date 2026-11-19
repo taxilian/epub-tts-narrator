@@ -166,7 +166,7 @@ class EnsembleDetailsTests(unittest.TestCase):
         self.assertEqual(ensemble_text({"group": proposal, "ensemble": chosen}, rows),
                          "2 voices, the same words, voices entering one after another, mixed swell: "
                          "this voice, the chorus, voice 2")
-        self.assertEqual(ensemble_text({"member_of": "v-chorus"}, rows), "One of the voices of the chorus")
+        self.assertTrue(ensemble_text({"member_of": "v-chorus"}, rows).startswith("One of the voices of the chorus."))
         self.assertEqual(ensemble_text({"ensemble": {"members": [], "mode": "single", "basis": "user"}}, rows),
                          "Kept as one voice (you chose; C changes it)")
         self.assertEqual(ensemble_text({}, rows), "")

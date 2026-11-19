@@ -220,7 +220,8 @@ def ensemble_text(row, rows_by_id):
     chosen, group = row.get("ensemble"), row.get("group")
     if row.get("member_of"):
         lead = rows_by_id.get(row["member_of"])
-        return f"One of the voices of {label(lead) if lead else row['member_of']}"
+        return (f"One of the voices of {label(lead) if lead else row['member_of']}. A member the book later "
+                "names can keep this voice: choose that character and press d (Share)")
     if chosen:
         if chosen["mode"] == "single":
             return "Kept as one voice (you chose; C changes it)"
