@@ -81,9 +81,11 @@ def plan_spans(rows, cast):
     A span whose group has no ensemble a person cast is skipped (listed, never
     blocking): its voices are not designed yet.
     """
+    if not any(isinstance(row.get("murmur"), dict) for row in rows):
+        return [], []
     from ..ensembles import ensemble, lanes_of
-    characters = {character["id"]: character for character in cast["characters"]}
-    voices = {voice["id"]: voice for voice in cast["voices"]}
+    characters = {character["id"]: character for character in cast.get("characters", [])}
+    voices = {voice["id"]: voice for voice in cast.get("voices", [])}
     by_id = {row["id"]: row for row in rows}
     spans, skipped = [], []
     for row in rows:
