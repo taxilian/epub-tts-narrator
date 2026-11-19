@@ -10,7 +10,6 @@ from test_renderer_phonetic_review import Client
 class ReferenceSubstitutionPairsTests(unittest.TestCase):
     def test_unaligned_reference_examples_nominate_complete_original_spans(self):
         examples = (
-            ("Dalley checked the records.", "Darly checked the records.", "Dalley", "Darly"),
             ("Dalley checked the records.", "Darling checked the records.", "Dalley", "Darling"),
             ("I assume you're here about the records.", "I assume you hear about the records.",
              "you're here", "you hear"),
@@ -34,7 +33,8 @@ class ReferenceSubstitutionPairsTests(unittest.TestCase):
                 self.assertNotIn("plausible", pair)
 
     def test_strictly_covered_and_exact_transcripts_do_not_enter_reference_review(self):
-        for expected, heard in (("Hello", "hello"), ("Nerys waited.", "Nerris waited.")):
+        for expected, heard in (("Hello", "hello"), ("Nerys waited.", "Nerris waited."),
+                                ("Dalley checked the records.", "Darly checked the records.")):
             with self.subTest(expected=expected, heard=heard):
                 self.assertIsNone(phonetic_review.reference_substitution_pairs(expected, heard))
         self.assertIsNone(phonetic_review.substitution_pairs(

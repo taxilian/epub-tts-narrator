@@ -502,7 +502,7 @@ class CastScreenMergeTests(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(sum(column.get_render_width(table) for column in table.ordered_columns),
                                  table.size.width)
 
-    async def test_j_picks_the_same_character_and_its_survivor_confirms_and_reopens_the_cast(self):
+    async def test_shift_j_picks_the_same_character_and_its_survivor_confirms_and_reopens_the_cast(self):
         plans, apply = await self.merge_in_cast_screen(fixed="")
         self.assertEqual(plans, [("v-ava", "v-ben", None), ("v-ava", "v-ben", "v-ben")])
         self.assertEqual(apply.call_args.args[0].kept["name"], "Ben")
@@ -544,7 +544,7 @@ class CastScreenMergeTests(unittest.IsolatedAsyncioTestCase):
                 table = app.query_one("#voices", DataTable)
                 table.focus()
                 await pilot.pause()
-                await pilot.press("j")
+                await pilot.press("J")
                 self.assertIsInstance(app.screen, ChoiceScreen)
                 await pilot.press("B", "e", "n", "enter")
                 if not fixed:

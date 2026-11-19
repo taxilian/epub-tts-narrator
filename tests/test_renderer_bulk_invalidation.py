@@ -122,6 +122,7 @@ class BulkInvalidationTests(unittest.TestCase):
     def test_shared_roles_invalidate_only_their_canonical_voice_once(self):
         alias = "additional-alias"
         self.session._profiles[alias] = dict(deepcopy(self.session._profiles[self.voice_id]), id=alias)
+        self.session._cast_ids.append(alias)  # rows list only cast voices with lines
         self.session.store = VoiceStore(
             self.session.store.directory, self.session.store.series_id,
             cast=self.bundle["cast"], explicit_aliases={alias: self.voice_id})

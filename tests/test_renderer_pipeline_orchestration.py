@@ -110,7 +110,7 @@ def chunk_runner(recorder, gates=None, failures=None):
     def fake(chunk, number, total, voices, engine, engine_identity, verifier,
              config, work, take_locks, take_locks_guard, *, notify,
              retry_budget=None, speech_cache=None, paragraph_split_available=False,
-             continuity=None):
+             continuity=None, saved_takes=None):
         name = chunk["chunk_id"]
         # ``number`` is the chunk's position; the chapter owns the share.
         owner = ("run", int(name.split("-")[0]))

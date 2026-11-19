@@ -131,7 +131,9 @@ class DerivedVoiceCastingTests(unittest.TestCase):
         self.assertEqual(young["creation"]["method"], "derived_clone")
         self.assertEqual(young["creation"]["derived_from"]["reference_sha256"], base["reference_sha256"])
         row = next(row for row in session.rows() if row["voice_id"] == "voice_mara_young")
-        self.assertIn("cloned from", row["label"])
+        # Named by its state; the cast screen's status says what it was cloned from.
+        self.assertEqual(row["label"], "Mara (age: a small girl, high and light)")
+        self.assertEqual(row["derived_from"]["voice_id"], "voice_mara")
         self.assertEqual(row["prompt"], "a small girl, high and light")   # the clone direction E edits
         self.assertFalse(row["clone_stale"])
 

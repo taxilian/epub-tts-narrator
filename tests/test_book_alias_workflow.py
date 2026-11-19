@@ -100,6 +100,9 @@ class BookAliasWorkflowTests(BookFixture):
         third_store = self.store(third)
         with contextlib.closing(self.session(first)) as session:
             session.generate_missing()
+            # The alternate narrator has no lines, and casting designs only voices
+            # with lines in bulk; it is asked for explicitly.
+            session.ensure_ready(alternate)
             character_asset = session.store.load(character)
             alternate_asset = session.store.load(alternate)
         self.aliases(first, {narrator: character})
