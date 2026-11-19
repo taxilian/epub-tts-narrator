@@ -1462,6 +1462,19 @@ By default, completed chapters receive two-pass loudness normalization to -20 LU
 
 `render` also creates missing voices if no casting edits or audition candidates exist. It prepares any missing character audition scripts before loading speech models, using the global analysis provider when creative text is needed. Use `cast` first to choose your voices before a long run. Without a worker pool, speech generation is sequential on the configured local model. With a pool, independent requests run across available workers; each local model and the coordinator's Whisper verifier remain serialized. Configured HTTP workers receive the requested passages and selected reference recordings.
 
+## Collective voices
+
+A group heard as several voices (a chorus, twins, a crowd) is cast by a person: the group's own voice stays its *lead*, and its ensemble (`cast.voices[i].ensemble`, see `FORMAT.md`) adds up to seven further voices, a mode and an optional mix recipe. Analysis may propose a group and how many voices it needs from the book's own words, but a proposal changes nothing until a person casts it; until then the group's lines are spoken by its own voice, as before.
+
+The plan resolves every group line into its performers (`renderer/ensemble_plan.py`):
+
+- `single`: the lead alone.
+- `unison`, `staggered`, `layered`: every voice (or a line's `lanes` count, always keeping the lead) says the whole line. Each take is synthesized and verified on its own, exactly like `simultaneous_speakers`, and mixed by a lane recipe: unison `tight`/`loose` (default)/`crowd`, staggered `swell`/`babble` (default)/`echo`, layered `lead` (default). Mixing aligns each take's first speech, adds the recipe's deterministic offsets and gains, and matches the line's loudness to its takes alone; the mix is never put through recognition.
+- `pool`: one voice per anonymous individual. A line's `slot` keeps its voice through the chapter; a new individual takes the free voice it prefers, so adding a voice moves only the individuals that now prefer it; a line with no slot is never the previous line's voice.
+- `alternate`: the voices take turns through a run of the group's consecutive lines.
+
+One-voice modes are ordinary takes of the member's voice and join that voice's chapter history. Lane takes hear their own voice's history and do not join it. A line's performers are part of its chunk identity, so changing an ensemble re-renders exactly the lines whose voices changed, and a changed mix recipe only re-mixes the saved takes. `plan` lists every member voice, so casting must cover them before render. A remote chapter service checks each resolution's shape and accepts it only with registered voices; it must run this version.
+
 ## Changing voices and equipment effects
 
 Analysis can mark two kinds of voice change (see [FORMAT.md](FORMAT.md#changing-voices)); neither needs a casting step of its own.

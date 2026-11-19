@@ -667,8 +667,11 @@ def _validate_timing_sources(metadata, chunks):
         for key in ("performance", "simultaneous_speakers"):
             if timing.get(key, {} if key == "performance" else []) != row.get(key, {} if key == "performance" else []):
                 raise ChapterClientError("Downloaded chapter timing differs from its submitted performers")
+        if timing.get("ensemble") != chunk.get("ensemble"):
+            raise ChapterClientError("Downloaded chapter timing differs from its submitted collective voice")
         lanes = timing.get("speaker_lanes")
-        speakers = row.get("simultaneous_speakers", [])
+        speakers = chunk_speakers(chunk) if row.get("simultaneous_speakers") or chunk.get("ensemble") else []
+        speakers = speakers if len(speakers) > 1 else []
         if speakers and not silent:
             if (not isinstance(lanes, list)
                     or [{key: lane.get(key) for key in ("role_id", "voice_id")} for lane in lanes] != speakers):

@@ -119,8 +119,10 @@ def _new_groups(chunks, *, max_chars, preserved, multi_speaker):
     for chunk in chunks:
         voice = chunk["segment"].get("voice_id")
         # An equipment effect is applied to one line's audio, so it never joins a
-        # continuous paragraph performance with dry lines.
+        # continuous paragraph performance with dry lines; a collective voice's
+        # line is spoken by its resolved member(s), never as the group's own turn.
         if (chunk.get("silent_control") or not voice or chunk["segment"].get("voice_effect")
+                or chunk.get("ensemble")
                 or not chunk["segment"].get("role_id") or _source_piece(chunk) is None):
             flush()
             result.append(chunk)
@@ -168,7 +170,7 @@ def _paragraph(chunks, *, max_chars, preserved, multi_speaker, saved_groups):
             if voice_count > _MAX_SPEAKERS or (not multi_speaker and performer_count > 1):
                 continue
             if any(chunk.get("silent_control") or chunk.get("paragraph_turns")
-                   or chunk["segment"].get("voice_effect")
+                   or chunk["segment"].get("voice_effect") or chunk.get("ensemble")
                    or not chunk["segment"].get("voice_id")
                    or not chunk["segment"].get("role_id")
                    or chunk["segment"].get("performance", {}).get("kind") == "bracketed"

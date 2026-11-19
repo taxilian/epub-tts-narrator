@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 import re
@@ -225,6 +226,10 @@ def chunk_speakers(chunk):
                     speakers.append(speaker)
         return speakers
     row = chunk["segment"]
+    if "ensemble" in chunk:
+        # A collective voice's line, resolved by the plan (``ensemble_plan``).
+        from .ensemble_plan import validate_resolution
+        return validate_resolution(chunk)
     if "simultaneous_speakers" in row:
         speakers = row["simultaneous_speakers"]
         if (not isinstance(speakers, list) or len(speakers) < 2
@@ -281,6 +286,7 @@ def make_plan(bundle, config):
     # part of their chunk identity, so they render again under new chunk IDs.
     revoiced = revoiced_segment_ids(bundle["manifest"].get("provenance", {}))
     chapters, errors, used = [], [], set()
+    cast_voices = {voice["id"]: voice for voice in bundle["cast"].get("voices", [])}
     established_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
     if established_series and config["voices"]["series_id"] != established_series:
         errors.append("Configured voices.series_id differs from the analyzer series ID; reuse the exact series ID")
@@ -299,9 +305,12 @@ def make_plan(bundle, config):
                              "chunks": [], "ignored": True})
             continue
         chunks = []
+        from .ensemble_plan import resolve_chapter
+        ensembles = resolve_chapter(item["rows"], cast_voices, f"chapter-{number:04d}")
         for row in item["rows"]:
             spoken, _ = build_spoken(row)
-            speakers = chunk_speakers({"segment": row})
+            resolution = ensembles.get(row["id"])
+            speakers = chunk_speakers({"segment": row, **({"ensemble": resolution} if resolution else {})})
             if not is_silent_control(spoken) and not speakers:
                 errors.append(f"Missing voice for segment {row['id']}; resolve attribution before synthesis")
             spans = list(split_text(spoken, settings["max_chunk_chars"])) or [(0, 0)]
@@ -319,8 +328,12 @@ def make_plan(bundle, config):
                 }
                 identity = {"source": chunk_identity_fingerprint(bundle["manifest"]),
                             "segment": row["id"], "start": start, "end": end, "spoken_text": speech}
-                if row["id"] in revoiced:
+                if row["id"] in revoiced or resolution is not None:
+                    # A collective voice's performers are part of its line's identity, so
+                    # take marks and choices never move to another member.
                     identity["speakers"] = sorted(speaker["voice_id"] for speaker in speakers)
+                if resolution is not None:
+                    chunk["ensemble"] = deepcopy(resolution)
                 chunk["chunk_id"] = digest(identity)[:32]
                 bind_chunk_performance(chunk, performance, sparse=performances is None)
                 if not chunk["silent_control"]:

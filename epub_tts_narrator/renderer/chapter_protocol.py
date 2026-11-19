@@ -183,7 +183,7 @@ def _leaf(chunk, bindings):
 def _chunk_shape(chunk, identifiers, *, paragraph=False):
     required = {"chunk_id", "segment", "spoken_text", "spoken_start", "spoken_end",
                 "source_ranges", "silent_control"}
-    allowed = required | {"speech_traits", "expressive_performance", "expressive_direction", "expressive_traits"} | ({"paragraph_turns"} if paragraph else set())
+    allowed = required | {"speech_traits", "expressive_performance", "expressive_direction", "expressive_traits"} | ({"paragraph_turns"} if paragraph else {"ensemble"})
     if (not isinstance(chunk, dict) or set(chunk) - allowed or required - set(chunk)
             or not isinstance(chunk.get("chunk_id"), str)
             or not re.fullmatch(r"[0-9a-f]{32,64}", chunk["chunk_id"])

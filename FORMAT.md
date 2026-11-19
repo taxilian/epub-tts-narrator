@@ -108,7 +108,24 @@ For identified people saying the same words together, the segment instead has an
 }
 ```
 
-This fragment supplements the normal segment fields. It requires at least two distinct existing dialogue roles and distinct voice IDs, with each voice matching its role in the cast. The segment kind is `dialogue`, `thought`, or `letter`; attribution is resolved (`explicit` or `context`, or `user` through corrections), has no candidates, and has `review_required: false`. Model assignments require exact evidence for the shared delivery. Null single-performer IDs therefore do not by themselves mean an unassigned segment: consumers must also inspect `simultaneous_speakers`. Each listed performer says the complete segment text. The list represents actual performers, never alternative identities or an uncertain crowd. Different words spoken over one another and staggered entrances are not represented by this version.
+This fragment supplements the normal segment fields. It requires at least two distinct existing dialogue roles and distinct voice IDs, with each voice matching its role in the cast. The segment kind is `dialogue`, `thought`, or `letter`; attribution is resolved (`explicit` or `context`, or `user` through corrections), has no candidates, and has `review_required: false`. Model assignments require exact evidence for the shared delivery. Null single-performer IDs therefore do not by themselves mean an unassigned segment: consumers must also inspect `simultaneous_speakers`. Each listed performer says the complete segment text. The list represents actual performers, never alternative identities or an uncertain crowd. Staggered entrances of the same words are chosen with the optional `simultaneous_mode` (`unison`, the default and `tight` mix; `staggered`, mixed `babble`; `layered`, mixed `lead`, the first speaker clear and the others under it). Different words spoken over one another are not represented.
+
+### Collective voices
+
+A group heard as several voices (a chorus, twins, a crowd) is one ordinary character, role and voice, plus optional fields (`epub_tts_narrator/ensembles.py`, design in `COLLECTIVE_VOICES.md`):
+
+```json
+{"id": "char_40", "name": "eunuch chorus", "voice_id": "voice_40",
+ "group": {"size": 24, "scale": "crowd", "members": [], "proposed_voices": 8, "proposed_mode": "unison",
+           "basis": "analysis", "evidence": [{"block_id": "b001780", "quote": "the two dozen shaven-headed men"}]}}
+```
+
+- `cast.characters[i].group` states that the character is a group. `size` is a number the source gives (≥2) or null; `scale` is `pair`, `few`, `several`, `many` or `crowd` from the source's words about the group (never its name); `members` are individual characters the source places in it; `proposed_voices` (2–8) and `proposed_mode` are proposals. With `basis: "analysis"` it requires source `evidence`; `basis: "user"` is a person's statement. A group changes nothing that is rendered until a person casts its ensemble.
+- `cast.voices[i].ensemble` is a person's casting choice (`basis: "user"` only): `{"members": [voice IDs], "mode", "mix"?}`. The voice itself (a character's ordinary designed voice, never the narration voice or a derived voice) is the *lead*, the first lane; `members` are up to 7 further distinct non-ensemble voices. `mode` is `single` (the lead alone, today's behaviour; the only mode with no members, recording a declined proposal), `unison`, `alternate`, `pool`, `staggered` or `layered`. `mix` is one of the renderer's lane recipes (`tight`, `loose`, `crowd`, `swell`, `babble`, `echo`, `lead`); unset, unison uses `loose`, staggered `babble`, layered `lead`.
+- `cast.voices[i].member_of` names the ensemble voice a *pool voice* was designed for. That ensemble must list it, and a pool voice belongs to no character. Existing characters' voices (twins) can be members without it.
+- `segments[i].ensemble` overrides one group line: `mode`, `members` (a subset of the ensemble's lanes; only once an ensemble exists), `lanes` (1–8 voices for this line), `slot` (the scene-local anonymous individual of a `pool` line). `basis` is `explicit` or `context` with source `evidence` from the line's own tag, or `user`.
+
+Series registration remaps ensemble members, `member_of` and group members to series IDs.
 
 The mandatory completion pass in `analyze` enumerates all remaining unassigned spoken spans and obtains three independent assignments using the final cast and source context. It updates only unanimous resolved decisions at common source boundaries, preserving source text, existing local delivery, protected human assignments, and unrelated review concerns. Up to three rounds supply wider context, including relevant cast evidence from other chapters in the final round, without exposing peer answers. `provenance.speaker_completion` retains input fingerprints, cases, reviewer results, decisions, and remaining unassigned counts. Unassigned speech requires an explicit speaker choice before generation; it is never filled with a fallback narrator.
 

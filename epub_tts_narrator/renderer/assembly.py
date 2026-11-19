@@ -543,12 +543,16 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     timing["performance"] = deepcopy(performance)
                 if row.get("simultaneous_speakers"):
                     timing["simultaneous_speakers"] = deepcopy(row["simultaneous_speakers"])
+                if clip.get("ensemble"):
+                    timing["ensemble"] = deepcopy(clip["ensemble"])
                 if "speaker_lanes" in clip:
                     lanes = clip["speaker_lanes"]
+                    from .bundle import chunk_speakers
                     if (not isinstance(lanes, list) or len(lanes) < 2
                             or any(not isinstance(lane, dict) for lane in lanes)
                             or [{"role_id": lane.get("role_id"), "voice_id": lane.get("voice_id")}
-                                for lane in lanes] != row.get("simultaneous_speakers")
+                                for lane in lanes] != (chunk_speakers(clip) if clip.get("ensemble")
+                                                       else row.get("simultaneous_speakers"))
                             or any(type(lane.get("start_frame")) is not int or lane["start_frame"] < 0
                                    or type(lane.get("end_frame")) is not int
                                    or not lane["start_frame"] < lane["end_frame"] <= cursor - first_frame

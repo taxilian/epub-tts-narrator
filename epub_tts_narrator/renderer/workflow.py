@@ -2421,8 +2421,9 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
                         raise ValueError("A simultaneous speaker lacks matching verification")
                     if not matches_request(request, lane, chunk):
                         stale_chunks.add(chunk["chunk_id"])
-                if not current_mixture(mix):
-                    # An older mixing recipe: re-mixed from the same verified takes.
+                from .ensemble_plan import lane_recipe
+                if not current_mixture(mix) or mix.get("recipe") != lane_recipe(chunk):
+                    # An older mixing recipe, or a person chose another: re-mixed from the same verified takes.
                     stale_chunks.add(chunk["chunk_id"])
             else:
                 request = _speech_request(chunk, voices[speakers[0]["voice_id"]], context["engine"], config)
@@ -3038,8 +3039,9 @@ def _render_chunk(chunk, number, total, voices, engine, engine_identity, verifie
             ("audio_sha256", "request_hash", "validation_key", "report")}))
     if len(lanes) > 1:
         censor_lanes = config.get("censorship", {}).get("enabled", False)
+        from .ensemble_plan import lane_recipe
         mixed = prepare_mixture(lanes, work / "mixes", sample_rate=config["render"]["sample_rate"], notify=notify,
-                                **({"preserve_lanes": True} if censor_lanes else {}))
+                                recipe=lane_recipe(chunk), **({"preserve_lanes": True} if censor_lanes else {}))
         mix, speaker_lanes = mixed["mix"], mixed["speaker_lanes"]
         acceptance = {
             "chunk_id": chunk["chunk_id"], "audio_sha256": mix["audio_sha256"],

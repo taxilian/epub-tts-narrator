@@ -184,6 +184,11 @@ class _Validator:
                 if voice_id in character_voices:
                     self.error(f"{path}.voice_id", "distinct characters must have distinct voice IDs")
                 character_voices[voice_id] = character.get("id")
+        from .ensembles import validate_group, validate_voices
+        for i, character in enumerate(characters):
+            if "group" in character:
+                validate_group(self, character, f"cast.characters[{i}].group", character_index)
+        self.group_voices = {character.get("voice_id") for character in characters if "group" in character}
 
         for i, role in enumerate(roles):
             path = f"cast.roles[{i}]"
@@ -233,6 +238,8 @@ class _Validator:
             self.evidence(derived.get("evidence"), f"{path}.evidence", required="series_origin" not in voice)
             if "through_end" in derived and type(derived["through_end"]) is not bool:
                 self.error(f"{path}.through_end", "must be a boolean")
+        validate_voices(self, voices, voice_index, character_voices,
+                        {role.get("voice_id") for role in roles if role.get("kind") == "narration"})
         self.voice_index = voice_index
         return role_index
 
@@ -352,6 +359,9 @@ class _Validator:
             if "voice_id" not in segment:
                 self.error(f"{path}.voice_id", "is required (string or null)")
             role_id, voice_id = segment.get("role_id"), segment.get("voice_id")
+            if "ensemble" in segment or "simultaneous_mode" in segment:
+                from .ensembles import validate_segment
+                validate_segment(self, segment, path, self.voice_index, getattr(self, "group_voices", set()))
             if "simultaneous_speakers" in segment:
                 performers = segment["simultaneous_speakers"]
                 if role_id is not None or voice_id is not None:

@@ -478,12 +478,20 @@ def reconcile_series_cast(source, cast, registry, *, confirmed_identity_matches=
         voice["id"] = new_id
         if isinstance(voice.get("derived_from"), dict) and voice["derived_from"].get("voice_id") in voice_ids:
             voice["derived_from"]["voice_id"] = voice_ids[voice["derived_from"]["voice_id"]]
+        # Collective voices name their members and owner by voice ID too.
+        if isinstance(voice.get("ensemble"), dict) and isinstance(voice["ensemble"].get("members"), list):
+            voice["ensemble"]["members"] = [voice_ids.get(member, member) for member in voice["ensemble"]["members"]]
+        if voice.get("member_of") in voice_ids:
+            voice["member_of"] = voice_ids[voice["member_of"]]
         voices[new_id] = (inherited_voice(new_id, voice) if new_id in prior_voices
                           and prior_voices[new_id]["source_fingerprint"] != source_hash else voice)
     for character in updated["characters"]:
         local_id = character["id"]
         character["id"] = character_ids[local_id]
         character["voice_id"] = voice_ids[character["voice_id"]]
+        if isinstance(character.get("group"), dict) and isinstance(character["group"].get("members"), list):
+            character["group"]["members"] = [character_ids.get(member, member)
+                                             for member in character["group"]["members"]]
         character["series_origin"] = {"series_id": registry["series_id"], "status": "reused" if local_id in matches else "new",
                                       "source_fingerprint": source_hash, "local_character_id": local_id,
                                       "original_character_fingerprint": _hash(next(item for item in cast["characters"] if item["id"] == local_id))}

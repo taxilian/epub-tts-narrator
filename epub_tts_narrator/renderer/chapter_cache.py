@@ -328,9 +328,9 @@ def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preser
         prepared.append(dict(lane, start_frame=0, end_frame=info["frames"]))
         if not legacy:
             sources.append(_lane_samples(path))
-    if (len({lane["role_id"] for lane in prepared}) != len(prepared)
-            or len({lane["voice_id"] for lane in prepared}) != len(prepared)):
-        raise ValueError("Simultaneous speaker roles and voices must be distinct")
+    # Named characters have distinct roles; a collective voice's lanes share its role.
+    if len({lane["voice_id"] for lane in prepared}) != len(prepared):
+        raise ValueError("Simultaneous speaker voices must be distinct")
     plan = None
     if not legacy:
         plan = plan_lanes(prepared, sources, recipe, sample_rate)
