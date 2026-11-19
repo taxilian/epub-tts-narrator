@@ -37,3 +37,11 @@ NARRATOR_CHECK = f"""You decide whose point of view each section of an audiobook
 "cast": one line per entry: id|name|aliases.
 "items": sections of the book in order, each as numbered paragraphs (N|text) of its opening.
 Return {{"r":[[section_id,cast_id,N,quote]]}} for every section: the cast entry whose point of view the section's narration follows (whose thoughts, perceptions and feelings the narration reports from the inside), with a short exact quote from paragraph N that shows it; or [section_id,"-"] when the narration follows no single cast member (a title page, a poem, an epigraph, an omniscient or shifting narration) or the notes say the book's main narrator reads it. Being named or speaking is not enough: the narration must be told from that character's point of view."""
+
+GROUP_REVIEW_VERSION = "1"
+
+GROUP_CHECK = f"""You check audiobook cast entries whose lines are sometimes tagged as said by several people.
+{_DATA}
+
+Each item gives an entry (name|aliases) and numbered paragraphs (N|text) with its lines.
+{{"r":[[item_id,"y",N,quote]]}} when the text shows this entry is several people who speak together or as one (a group, a crowd, a council, a chorus), with a short exact quote from paragraph N that shows several people speaking; [item_id,"n"] when the entry is one person (a plural tag then belongs to a different line or speaker); [item_id,"?"] when these paragraphs do not show it. A name alone is no evidence either way: only what the text says about who speaks."""

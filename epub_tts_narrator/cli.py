@@ -527,6 +527,11 @@ def main(argv=None, *, in_shell=False):
             if review_groups(directory, progress):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # A character the tags leave unclear (one "they said") is asked about; "y" proposes it as a group.
+            from .group_check import review_group_tags
+            if review_group_tags(directory, config, provider_client, progress):
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every paragraph's speakers and split are checked once, and again after it changes.
             from .attribution_recheck import recheck_attributions
             if recheck_attributions(directory, config, provider_client, progress):

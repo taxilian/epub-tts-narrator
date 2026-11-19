@@ -225,6 +225,7 @@ def skip_rerun_reviews(testcase):
     for target in ("epub_tts_narrator.attribution_recheck.recheck_attributions",
                    "epub_tts_narrator.cast_review.review_cast",
                    "epub_tts_narrator.group_proposals.review_groups",
+                   "epub_tts_narrator.group_check.review_group_tags",
                    "epub_tts_narrator.direction_review.review_book_directions",
                    "epub_tts_narrator.gender_review.review_genders"):
         patcher = patch(target, return_value=False)
