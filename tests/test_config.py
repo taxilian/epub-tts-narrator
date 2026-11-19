@@ -162,6 +162,18 @@ headings_and_nonstory_text = "The narrator reads headings."
         with self.assertRaisesRegex(ValueError, "Cannot read configuration"):
             load_config(self.root)
 
+    def test_a_permission_refusal_says_why_without_the_path(self):
+        import errno
+        path = self.root / "private-secret-name.toml"
+        path.write_text("")
+        refused = PermissionError(errno.EPERM, "Operation not permitted", str(path))
+        with patch.object(Path, "open", side_effect=refused), self.assertRaises(ValueError) as captured:
+            load_config(path)
+        message = str(captured.exception)
+        self.assertIn("Operation not permitted", message)
+        self.assertIn("Privacy & Security", message)
+        self.assertNotIn("private-secret-name", message)
+
     def test_relative_cache_directory_uses_config_directory(self):
         folder = self.root / "config"
         folder.mkdir()

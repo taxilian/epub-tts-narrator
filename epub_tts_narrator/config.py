@@ -181,8 +181,13 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
         raise ValueError("The requested configuration file does not exist.") from None
     except (tomllib.TOMLDecodeError, UnicodeDecodeError):
         raise ValueError("Invalid TOML configuration.") from None
-    except OSError:
-        raise ValueError("Cannot read configuration file.") from None
+    except OSError as exc:
+        import errno
+        reason = exc.strerror or type(exc).__name__
+        hint = (" On macOS, a terminal app needs Files and Folders (or Full Disk Access) permission in System "
+                "Settings > Privacy & Security to read a file in Documents, Desktop or Downloads, including through "
+                "a symlink." if exc.errno in {errno.EPERM, errno.EACCES} else "")
+        raise ValueError(f"Cannot read configuration file ({reason}).{hint}") from None
 
     result = deepcopy(DEFAULTS)
     from epub_tts_narrator.renderer.config import DEFAULTS as RENDERER_DEFAULTS
