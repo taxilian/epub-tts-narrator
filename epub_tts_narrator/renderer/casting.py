@@ -109,7 +109,15 @@ def speaking_voices(bundle):
     rows = [row for chapter in bundle.get("chapters", []) for row in chapter.get("rows", [])]
     if not rows:
         return None
-    return {row.get("voice_id") for row in rows if row.get("voice_id")}
+    from ..ensembles import lanes_of
+    voices = {voice["id"]: voice for voice in bundle.get("cast", {}).get("voices", [])}
+    speaking = set()
+    for row in rows:
+        performers = [row.get("voice_id"), *(speaker.get("voice_id") for speaker in row.get("simultaneous_speakers", []))]
+        for voice_id in filter(None, performers):
+            # A group's line is spoken by its ensemble's voices too (``COLLECTIVE_VOICES.md``).
+            speaking.update(lanes_of(voices[voice_id]) if voice_id in voices else [voice_id])
+    return speaking
 
 
 def _require_available_confirmation(report):
@@ -509,8 +517,15 @@ class CastingSession:
                           if character.get("voice_id") == voice_id]
             roles = [role for role in cast["roles"] if role.get("voice_id") == voice_id]
             derived = profile.get("derived_from") if isinstance(profile.get("derived_from"), dict) else None
+            group = next((character for character in cast["characters"]
+                          if character.get("voice_id") == profile.get("member_of")), None)
             if characters:
                 label = ", ".join(characters)
+            elif group is not None:
+                # A pool voice designed for one group: its lead is voice 1.
+                members = (self._profiles.get(profile["member_of"], {}).get("ensemble") or {}).get("members", [])
+                number = members.index(voice_id) + 2 if voice_id in members else "?"
+                label = f"{group['name']}, voice {number}"
             elif derived:
                 base_names = [character["name"] for character in cast["characters"]
                               if character.get("voice_id") == derived.get("voice_id")]

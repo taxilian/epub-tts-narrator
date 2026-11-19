@@ -263,6 +263,10 @@ def accent_cues(bundle, config, *, store=None):
             cue = trait_accent(chosen_traits[voice_id], _book_terms(bundle))
         elif assigned.get(voice_id):
             cue = assigned[voice_id]
+        elif profile.get("member_of"):
+            # A pool voice speaks with its group's accent unless a person chose its own.
+            derived[voice_id] = profile["member_of"]
+            continue
         else:
             cue = suggest_accent(designed_description(store, profile))
             if cue:

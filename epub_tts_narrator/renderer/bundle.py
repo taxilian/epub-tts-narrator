@@ -247,6 +247,31 @@ def chunk_speakers(chunk):
     return [{"role_id": row["role_id"], "voice_id": row["voice_id"]}]
 
 
+def collective_summary(bundle, chapters):
+    """Groups in the planned chapters: the ones a person cast, and proposals nobody has yet.
+
+    A proposal never blocks a render: its lines are spoken by the group's own
+    voice, as before, until a person casts its ensemble in the cast screen.
+    """
+    from ..ensembles import ensemble
+    voices = {voice["id"]: voice for voice in bundle["cast"].get("voices", [])}
+    speaking = {chunk["segment"].get("voice_id") for chapter in chapters for chunk in chapter["chunks"]}
+    lanes = sum(len(chunk["ensemble"]["performers"]) for chapter in chapters for chunk in chapter["chunks"]
+                if chunk.get("ensemble") and chunk["ensemble"].get("recipe"))
+    proposed, cast = [], []
+    for character in bundle["cast"].get("characters", []):
+        voice_id = character.get("voice_id")
+        if voice_id not in speaking:
+            continue
+        chosen = ensemble(voices.get(voice_id))
+        if chosen is not None:
+            cast.append({"name": character["name"], "mode": chosen["mode"], "voices": 1 + len(chosen["members"])})
+        elif isinstance(character.get("group"), dict):
+            proposed.append({"name": character["name"], "proposed_voices": character["group"].get("proposed_voices"),
+                             "proposed_mode": character["group"].get("proposed_mode")})
+    return {"cast": cast, "proposed": proposed, "lane_takes": lanes}
+
+
 def make_plan(bundle, config):
     from .book_context import resolve_book_config
     config = resolve_book_config(bundle, config)
@@ -345,5 +370,6 @@ def make_plan(bundle, config):
             "bundle_hash": bundle["bundle_hash"], "source_fingerprint": bundle["manifest"]["source_fingerprint"],
             "book": bundle["source"]["book"], "series_id": config["voices"]["series_id"],
             "voice_ids": sorted(used), "chapters": chapters, "errors": errors,
+            "collective_voices": collective_summary(bundle, chapters),
             "review_items": max(len(bundle["reviews"]), len(bundle.get("implied_reviews", []))),
             "partial_book": len(selected) != len(bundle["chapters"])}

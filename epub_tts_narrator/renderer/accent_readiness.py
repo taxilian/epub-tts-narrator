@@ -11,8 +11,9 @@ traits a person set, or a saved book-wide assignment
 accent" included). A person makes those decisions with ``audiobook-render
 accents BOOK``.
 
-A voice with no lines in this book needs no accent, and a derived voice (a
-character's later state) follows its main voice. The rule applies only when
+A voice with no lines in this book needs no accent, a derived voice (a
+character's later state) follows its main voice, and a pool voice of a
+collective voice follows its group's lead voice. The rule applies only when
 accents can be assigned at all: ``casting.assign_accents`` is on and a text
 model is configured (``provider.model``).
 """
@@ -46,7 +47,8 @@ def undecided(bundle, config, voice_ids=None):
     for voice_id in (voice_ids if voice_ids is not None else list(profiles)):
         profile = profiles.get(voice_id, {})
         base = (profile["derived_from"].get("voice_id") if isinstance(profile.get("derived_from"), dict)
-                else linked.get(voice_id))
+                # A linked voice follows the voice it is linked to; a pool voice follows its group's lead voice.
+                else linked.get(voice_id) or profile.get("member_of"))
         target = base or voice_id
         if target in decided or voice_id in decided or not ({voice_id, target} & speaking):
             continue

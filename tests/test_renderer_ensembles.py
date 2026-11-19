@@ -109,6 +109,78 @@ class EnsembleResolutionTests(unittest.TestCase):
                 validate_resolution(dict(chunk, ensemble=dict(chunk["ensemble"], **broken)))
 
 
+GROUP_TEXT = "“We are ready. Let us begin, and let every lantern on the long road burn until morning comes,”"
+GROUP_SPOKEN = GROUP_TEXT.strip("“”")
+
+
+def ensemble_bundle(root, ensemble):
+    """The example book with a second chapter where a chorus speaks, cast as ``ensemble``."""
+    document = read_json(EXAMPLE / "reviewed.json")
+    tag = " the chorus said in unison."
+    block_id = "b000007"
+    document["source"]["chapters"].append({"id": "ch0002", "title": "Chorus Pilot",
+        "source_href": "chorus.xhtml", "block_ids": [block_id]})
+    document["source"]["blocks"].append({"id": block_id, "chapter_id": "ch0002",
+        "text": GROUP_TEXT + tag, "source": {"href": "chorus.xhtml", "element_id": None, "tag": "p"}})
+    cast = document["cast"]
+    cast["characters"].append({"id": "chorus", "name": "chorus", "aliases": [], "evidence": [],
+        "description": "Voices answering together", "voice_id": "voice_chorus",
+        "group": {"size": None, "scale": "few", "members": [], "proposed_voices": 3, "proposed_mode": "unison",
+                  "basis": "analysis", "evidence": [{"block_id": block_id, "quote": "the chorus said in unison"}]}})
+    role = {"id": "chorus_dialogue", "kind": "dialogue", "character_id": "chorus", "voice_id": "voice_chorus",
+            "description": "Dialogue role for the chorus."}
+    cast["roles"].append(role)
+    cast["voices"].append({"id": "voice_chorus", "description": "Low chanting voices", "traits": [],
+                           **({"ensemble": ensemble} if ensemble else {})})
+    for member in (ensemble or {}).get("members", []):
+        cast["voices"].append({"id": member, "description": "Another low voice", "traits": [],
+                               "member_of": "voice_chorus"})
+    narrator = next(item for item in cast["roles"] if item["id"] == "narrator_main")
+    document["segments"].extend([
+        segment(document["source"], block_id, 0, GROUP_TEXT, role, kind="dialogue", basis="explicit",
+                reason="The chorus speaks.", evidence=[{"block_id": block_id, "quote": "the chorus said"}],
+                candidates=[], review_required=False),
+        segment(document["source"], block_id, len(GROUP_TEXT), tag, narrator, reason="Narrative speech tag.")])
+    export_bundle(document, root / "bundle")
+    return prepare_bundle(load_bundle(root / "bundle"))
+
+
+class EnsembleCastingTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.bundle = ensemble_bundle(self.root, {"members": ["voice_chorus_1", "voice_chorus_2"],
+                                                  "mode": "unison", "basis": "user"})
+        config = deepcopy(DEFAULTS)
+        config["provider"] = {"model": "fixture-model"}
+        from epub_tts_narrator.renderer.book_context import resolve_book_config
+        self.config = resolve_book_config(self.bundle, config)
+
+    def test_casting_offers_every_voice_of_a_speaking_ensemble(self):
+        from epub_tts_narrator.renderer.casting import speaking_voices
+        self.assertTrue({"voice_chorus", "voice_chorus_1", "voice_chorus_2"} <= speaking_voices(self.bundle))
+
+    def test_a_pool_voice_auditions_with_its_groups_own_lines(self):
+        from epub_tts_narrator.renderer.samples import _candidate_data
+        _, rejected, candidates, _ = _candidate_data(self.bundle, "voice_chorus_1", lambda value: value)
+        self.assertTrue(candidates, rejected)
+        self.assertNotIn("non_speech_role", rejected)
+
+    def test_a_pool_voice_speaks_with_its_groups_accent_unless_a_person_chose_its_own(self):
+        from epub_tts_narrator.renderer import accent_readiness
+        from epub_tts_narrator.renderer.accent_assignment import save_assignments
+        from epub_tts_narrator.renderer.speech_traits import accent_cues, save_accent
+        pool = ["voice_chorus_1", "voice_chorus_2"]
+        self.assertTrue(set(pool) <= set(accent_readiness.undecided(self.bundle, self.config)))
+        save_assignments(self.bundle, self.config, {"voice_chorus": "Welsh accent"})
+        self.assertFalse(set(pool) & set(accent_readiness.undecided(self.bundle, self.config)))
+        self.assertEqual([accent_cues(self.bundle, self.config).get(voice) for voice in pool],
+                         ["Welsh accent", "Welsh accent"])
+        save_accent(self.bundle, self.config, "voice_chorus_2", "Scottish accent")
+        self.assertEqual(accent_cues(self.bundle, self.config)["voice_chorus_2"], "Scottish accent")
+
+
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg integration")
 class EnsembleWorkflowTests(unittest.TestCase):
     def setUp(self):
@@ -117,36 +189,8 @@ class EnsembleWorkflowTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
 
     def bundle(self, ensemble):
-        document = read_json(EXAMPLE / "reviewed.json")
-        group_text = "“We are ready. Let us begin,”"
-        tag = " the chorus said in unison."
-        block_id = "b000007"
-        document["source"]["chapters"].append({"id": "ch0002", "title": "Chorus Pilot",
-            "source_href": "chorus.xhtml", "block_ids": [block_id]})
-        document["source"]["blocks"].append({"id": block_id, "chapter_id": "ch0002",
-            "text": group_text + tag, "source": {"href": "chorus.xhtml", "element_id": None, "tag": "p"}})
-        cast = document["cast"]
-        cast["characters"].append({"id": "chorus", "name": "chorus", "aliases": [], "evidence": [],
-            "description": "Voices answering together", "voice_id": "voice_chorus",
-            "group": {"size": None, "scale": "few", "members": [], "proposed_voices": 3, "proposed_mode": "unison",
-                      "basis": "analysis", "evidence": [{"block_id": block_id, "quote": "the chorus said in unison"}]}})
-        role = {"id": "chorus_dialogue", "kind": "dialogue", "character_id": "chorus", "voice_id": "voice_chorus",
-                "description": "Dialogue role for the chorus."}
-        cast["roles"].append(role)
-        cast["voices"].append({"id": "voice_chorus", "description": "Low chanting voices", "traits": [],
-                               "ensemble": ensemble})
-        for member in ensemble["members"]:
-            cast["voices"].append({"id": member, "description": "Another low voice", "traits": [],
-                                   "member_of": "voice_chorus"})
-        narrator = next(item for item in cast["roles"] if item["id"] == "narrator_main")
-        document["segments"].extend([
-            segment(document["source"], block_id, 0, group_text, role, kind="dialogue", basis="explicit",
-                    reason="The chorus speaks.", evidence=[{"block_id": block_id, "quote": "the chorus said"}],
-                    candidates=[], review_required=False),
-            segment(document["source"], block_id, len(group_text), tag, narrator, reason="Narrative speech tag.")])
-        export_bundle(document, self.root / "bundle")
-        self.group_spoken = "We are ready. Let us begin,"
-        return prepare_bundle(load_bundle(self.root / "bundle"))
+        self.group_spoken = GROUP_SPOKEN
+        return ensemble_bundle(self.root, ensemble)
 
     def config(self):
         config = deepcopy(DEFAULTS)
@@ -166,6 +210,17 @@ class EnsembleWorkflowTests(unittest.TestCase):
         group = plan["chapters"][0]["chunks"][0]
         self.assertEqual([speaker["voice_id"] for speaker in chunk_speakers(group)],
                          ["voice_chorus", "voice_chorus_1", "voice_chorus_2"])
+        self.assertEqual(plan["collective_voices"], {"cast": [{"name": "chorus", "mode": "unison", "voices": 3}],
+                                                     "proposed": [], "lane_takes": 3})
+
+    def test_a_group_nobody_has_cast_is_listed_and_speaks_in_its_own_voice(self):
+        plan = make_plan(self.bundle(None), self.config())
+        self.assertEqual(plan["errors"], [])
+        group = plan["chapters"][0]["chunks"][0]
+        self.assertNotIn("ensemble", group)
+        self.assertEqual(chunk_speakers(group), [{"role_id": "chorus_dialogue", "voice_id": "voice_chorus"}])
+        self.assertEqual(plan["collective_voices"]["proposed"],
+                         [{"name": "chorus", "proposed_voices": 3, "proposed_mode": "unison"}])
 
     def test_a_unison_group_line_is_three_verified_takes_mixed_by_its_recipe(self):
         bundle = self.bundle({"members": ["voice_chorus_1", "voice_chorus_2"], "mode": "unison",

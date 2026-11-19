@@ -834,6 +834,7 @@ def _main(argv=None, *, in_shell=False):
             accent_readiness.require_before_render(included, config)
             prepare_accents(included, config, config_path)
         plan = make_plan(bundle, config)
+        collective = plan.get("collective_voices", {"cast": [], "proposed": [], "lane_takes": 0})
         if args.command == "plan":
             from .workflow import make_render_plan
             workers = config.get("render_pool", {}).get("workers", [])
@@ -848,6 +849,7 @@ def _main(argv=None, *, in_shell=False):
                 "chunks": sum(len(c["chunks"]) for c in plan["chapters"]),
                 "voices": len(plan["voice_ids"]), "partial_book": plan["partial_book"],
                 "review_items": plan["review_items"], "errors": plan["errors"],
+                "collective_voices": collective,
                 "series_id": config["voices"]["series_id"],
                 "voice_directory": config["voices"]["directory"],
                 "voice_search_directories": [config["voices"]["directory"],
@@ -862,6 +864,11 @@ def _main(argv=None, *, in_shell=False):
         expected_series = bundle["manifest"].get("provenance", {}).get("series", {}).get("series_id")
         if expected_series and expected_series != config["voices"]["series_id"]:
             raise ValueError("Configured voices.series_id must match the analyzer's series ID")
+        proposed = collective["proposed"]
+        if args.command == "render" and proposed:
+            names = ", ".join(item["name"] for item in proposed[:6]) + (" and more" if len(proposed) > 6 else "")
+            print(f"Proposed as groups, not cast as several voices yet: {names}. They speak in their own voice; "
+                  f"set them up in the cast screen to hear them as a chorus or crowd.")
         if args.command in {"render", "assemble"} and plan["errors"]:
             raise ValueError("\n".join(plan["errors"]))
         if args.command == "assemble":

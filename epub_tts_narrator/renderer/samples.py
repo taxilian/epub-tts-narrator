@@ -168,9 +168,14 @@ def _role_priority(row, role):
     return None
 
 
-def _eligible_performers(row):
+def _eligible_performers(row, voices=None):
     if row.get("simultaneous_speakers"):
         return row["simultaneous_speakers"]
+    lead = (voices or {}).get(row.get("voice_id"))
+    if lead is not None and lead.get("ensemble"):
+        # Every voice of a group's ensemble says the group's lines.
+        from ..ensembles import lanes_of
+        return [{"voice_id": voice_id, "role_id": row.get("role_id")} for voice_id in lanes_of(lead)]
     return [{"voice_id": row.get("voice_id"), "role_id": row.get("role_id")}]
 
 
@@ -224,12 +229,13 @@ def _candidate_data(bundle, voice_id, canonical_id):
         "book_id": book["id"], "book_title": book.get("title", ""),
     }
     roles = {role["id"]: role for role in bundle["cast"]["roles"]}
+    profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
     rejected, candidates = Counter(), []
     for chapter_number, chapter in enumerate(bundle["chapters"], 1):
         for row_number, row in enumerate(chapter["rows"]):
             # An explicit unison passage is also something each member actually
             # says. Use it as a solo audition without changing its attribution.
-            performers = [performer for performer in _eligible_performers(row)
+            performers = [performer for performer in _eligible_performers(row, profiles)
                           if canonical.get(performer.get("voice_id")) == target]
             if not performers:
                 continue
@@ -237,7 +243,9 @@ def _candidate_data(bundle, voice_id, canonical_id):
             original_voice, role_id = performer["voice_id"], performer["role_id"]
             role = roles.get(role_id, {})
             priority = _role_priority(row, role)
-            if priority is None or role.get("voice_id") != original_voice:
+            from ..ensembles import lanes_of
+            lead = profiles.get(role.get("voice_id"))
+            if priority is None or original_voice not in (lanes_of(lead) if lead else [role.get("voice_id")]):
                 rejected["non_speech_role"] += 1
                 continue
             attribution = row.get("attribution", {})
