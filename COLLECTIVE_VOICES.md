@@ -1,6 +1,6 @@
 # Collective voices — design
 
-Status: **approved design (2026-11-19), partly implemented** (see §10). The phases in §8 are the implementation plan; §9 lists the questions still open.
+Status: **approved design (2026-11-19), implemented** (see §10). The phases in §8 are the implementation plan; §9 lists the questions still open.
 
 A *collective voice* is one cast role heard as two or more voices: a chorus, a pair of twins, a crowd, a hive mind. This document surveys how the analyzed books under `runs/` present such speakers, what the project does today, and proposes a representation, an analysis rule set, review tools, a renderer recipe, and guards.
 
@@ -380,22 +380,40 @@ Analysis may *propose* group identity and per-line cues from evidence, just as i
 
 ## 10. Implementation status (branch `claude/collective-voices`)
 
-Done:
-- **Mixing** (phase 1): lane recipes `tight/loose/crowd/swell/babble/echo/lead` (`renderer/lane_mix.py`), onset alignment, loudness matching under a peak ceiling, censorship over offset lanes. Version-1 mixes restore exactly and are re-mixed from cached takes on the next render.
-- **Format and renderer** (phase 2): `group`, `ensemble`, `member_of`, segment `ensemble`, `simultaneous_mode` (`ensembles.py`, `FORMAT.md`). `renderer/ensemble_plan.py` resolves every mode in `make_plan`, with performers in chunk identity. The chapter service checks resolutions without the cast.
-- **Casting and readiness**: casting offers and auditions member voices; pool voices follow the group's accent; `plan` reports `collective_voices`; `render` names uncast proposals.
-- **Cast screen** `C`: voice count, mode, mix, named members, decline. Published through revision scope `ensembles`; new pool voices are described separately and designed like any voice.
+Every phase in §8 is implemented:
+- **Mixing:** lane recipes `tight/loose/crowd/swell/babble/echo/lead` (`renderer/lane_mix.py`), onset alignment, loudness matching under a peak ceiling, censorship over offset lanes. Version-1 mixes restore exactly and are re-mixed from cached takes on the next render.
+- **Format and renderer:**
+  - fields `group`, `ensemble`, `member_of`, segment `ensemble`, segment `murmur`, `simultaneous_mode` (`ensembles.py`, `FORMAT.md`);
+  - `renderer/ensemble_plan.py` resolves every mode in `make_plan`, with performers in chunk identity;
+  - the chapter service checks resolutions without the cast.
+- **Casting and readiness:**
+  - casting offers and auditions member voices, and pool voices follow the group's accent;
+  - `plan` reports `collective_voices`, including murmurs and the groups they wait for, and `render` names uncast proposals.
+- **Cast screen `C`:**
+  - set-up choices: voice count, mode, mix, named members, decline;
+  - previews of a line in all voices and of the murmur;
+  - published through revision scope `ensembles`, with new pool voices described separately;
+  - a pool voice a named member keeps is shared with `d`.
+- **review-ui:**
+  - `v`: a group line's mode, voices or pinned member, and `simultaneous_mode`;
+  - `m`: add, end, shape, level or remove a murmur;
+  - takes: each voice's takes listed by name.
+- **Crowd murmur** (§5.7, `renderer/murmur.py`):
+  - verified murmur takes from a project-owned sentence set, or the repeated book line;
+  - one filtered loop per group that must fail recognition (three heard words in a row → filtered harder → refused);
+  - mixed under the span, ducked under speech, in the chapter identity;
+  - local composition only.
 - **Guards** (§6.1): `group_cues.py` flags `plural_tag`, `singular_tag` and `invented_member`. They appear as narrator-read issues and in `verify-attribution`'s risk set.
-- **Analysis proposals** (§5.2), made from tags without a model call (`group_proposals.py`): group, size, scale, voice count, mode, and line `lanes`/`mode`/`slot`. They run in fresh narrator reads, and on rerun through revision scope `group-proposals`.
-- **Series**: ensemble, member and group IDs are remapped; a later book carries an inherited ensemble's pool voices.
+- **Analysis proposals** (§5.2), made from tags without a model call (`group_proposals.py`):
+  - group, size, scale, voice count, mode;
+  - line `lanes`, `mode` and `slot`;
+  - murmur spans from narration cues.
+
+  They run in fresh narrator reads, and on rerun through scope `group-proposals`. `group_check.py` asks the model about characters with a single plural tag; "y" needs an exact quote.
+- **Series:** ensemble, member and group IDs are remapped; a later book carries an inherited ensemble's pool voices.
 
 Differs from the plan above:
-- Proposals come from speaker tags in code (like `speech_cues`), not from a ledger `kind: group` plus a model group check.
-- A single tag on a one-person name stays a flag, never a proposal.
-
-Not done yet:
-- the crowd murmur bed (§5.7);
-- `review-ui` per-line mode, member and lanes edits, and `simultaneous_mode` editing;
-- per-lane takes in the run shell `TakesScreen`;
-- a model-backed group check for groups whose tags are ambiguous;
-- promotion of a pool voice to a named character.
+- Proposals come from speaker tags and narration cues in code (like `speech_cues`). The model is asked only about unclear characters (`GROUP_CHECK`), rather than through a ledger `kind: group`.
+- Promotion of a pool voice to a named character uses voice sharing (`d`), not a format change. A later book carries pool voices only when the group itself returns.
+- Murmur beds are mixed in local chapter composition; a remote chapter service renders without them and says so.
+- The plain (curses) `review-ui` shows group and murmur details but changes them only in the full-screen view.
