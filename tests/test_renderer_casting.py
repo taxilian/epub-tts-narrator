@@ -381,6 +381,18 @@ class CastingTests(unittest.TestCase):
         self.assertEqual(len(self.session.rows()[0]["candidates"]), 2)
         self.assertIsNone(self.session.store.load(self.voice_id))
 
+    def test_every_line_about_a_voice_says_whose_voice_it_is(self):
+        messages = []
+        self.session.notify = messages.append
+        self.session.generate(self.voice_id)
+        self.assertTrue(messages)
+        self.assertTrue(all(message.startswith(f"Mara ({self.voice_id}): ") for message in messages), messages)
+        self.session.notify("Between voices")
+        self.assertEqual(messages[-1], "Between voices")
+        from epub_tts_narrator.renderer.workflow import voice_owner
+        self.assertEqual(voice_owner(self.bundle, self.voice_id), f"Mara ({self.voice_id})")
+        self.assertEqual(voice_owner(self.bundle, "unknown-voice"), "unknown-voice")
+
     def test_accept_replaces_only_selection_and_keeps_history(self):
         first = self.session.generate(self.voice_id)
         before_accept = len(self.verifier.calls)

@@ -116,8 +116,8 @@ class GeminiFreshRegenerationTests(unittest.TestCase):
                          ["/voices", "/interactions", "/voices", "/interactions"])
         self.assertEqual(self.calls[0][1]["voice"]["prompted"], self.calls[2][1]["voice"]["prompted"])
         self.assertEqual(session.store.load("voice_mara")["creation"]["remote_voice_id"], "voice_second")
-        self.assertIn("Selected Gemini voice ID: voice_first", self.notices)
-        self.assertIn("Selected Gemini voice ID: voice_second", self.notices)
+        self.assertIn("Mara (voice_mara): Selected Gemini voice ID: voice_first", self.notices)
+        self.assertIn("Mara (voice_mara): Selected Gemini voice ID: voice_second", self.notices)
         self.assertEqual(self.deleted_voices, ["voice_first", "voice_second"])
 
     def test_explicit_regeneration_leaves_repaired_pending_untouched_and_creates_new_remote_voice(self):

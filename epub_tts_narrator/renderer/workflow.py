@@ -1387,11 +1387,35 @@ def derive_voice_take(engine, verifier, config, base, profile, text, directory, 
     return wav, accepted, request, metadata
 
 
+def voice_owner(bundle, voice_id):
+    """Who a voice is for, for log lines: "Mara (voice_id)", or the bare ID when the cast does not say."""
+    cast = bundle.get("cast") if isinstance(bundle, dict) else None
+    if not isinstance(cast, dict):
+        return voice_id
+    characters = {row.get("id"): row.get("name") for row in cast.get("characters", []) if isinstance(row, dict)}
+    names = [row.get("name") for row in cast.get("characters", [])
+             if isinstance(row, dict) and row.get("voice_id") == voice_id and row.get("name")]
+    if not names:
+        names = list(dict.fromkeys(
+            characters[role["character_id"]] + (" (narration)" if role.get("kind") == "narration" else "")
+            for role in cast.get("roles", []) if isinstance(role, dict) and role.get("voice_id") == voice_id
+            and characters.get(role.get("character_id"))))
+    if not names and any(isinstance(role, dict) and role.get("voice_id") == voice_id and role.get("kind") == "narration"
+                         for role in cast.get("roles", [])):
+        names = ["Narrator"]
+    return f"{', '.join(names)} ({voice_id})" if names else voice_id
+
+
 def ensure_voice(store, voice_id, profile, engine, verifier, config, work, *, notify=print,
                  designer=None, bundle=None):
     import sys
     import uuid
 
+    owner = voice_owner(bundle, voice_id)
+    if owner != voice_id:
+        # Every line about this voice (attempts and verification included) says whose it is.
+        outer = notify
+        notify = lambda message: outer(f"{owner}: {message}")
     store.persist_aliases()
     requested_id = voice_id
     voice_id = store.canonical_id(voice_id)

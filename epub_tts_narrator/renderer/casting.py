@@ -143,6 +143,17 @@ def _recovery_inputs(request):
     return result
 
 
+def _about_voice(method):
+    """Run a per-voice method with its log lines saying whose voice it is."""
+    import functools
+
+    @functools.wraps(method)
+    def wrapper(self, voice_id, *args, **kwargs):
+        with self._noticing(voice_id):
+            return method(self, voice_id, *args, **kwargs)
+    return wrapper
+
+
 class CastingSession:
     """Series-scoped casting operations shared by CLI and terminal UI."""
 
@@ -155,6 +166,7 @@ class CastingSession:
         from .config import resolve_voice_design
         self.config["voice_design"] = resolve_voice_design(config)
         self._model_setup = model_setup_factory(self.config) if model_setup_factory else None
+        self._notice = threading.local()  # the voice this thread is working on, for its log lines
         self.notify = notify
         self.store = voice_store(bundle, config)
         self._engine_factory = engine_factory
@@ -473,6 +485,83 @@ class CastingSession:
             self._samples.clear()
             return {"voices": list(groups), "history": str(history)}
 
+    @property
+    def notify(self):
+        """Log a line; while a voice is being worked on, the line says whose voice it is."""
+        target = self._notify_target
+        label = getattr(self._notice, "label", None)
+        if not label:
+            return target
+        return lambda message: target(f"{label}: {message}")
+
+    @notify.setter
+    def notify(self, value):
+        self._notify_target = value
+
+    @contextmanager
+    def _noticing(self, voice_id):
+        """Label this thread's log lines with the voice's character and ID (an outer label is kept)."""
+        if getattr(self._notice, "label", None):
+            yield
+            return
+        try:
+            name = self.voice_label(voice_id)
+        except Exception:  # a label must never stop the work it describes
+            name = voice_id
+        self._notice.label = voice_id if name == voice_id else f"{name} ({voice_id})"
+        try:
+            yield
+        finally:
+            self._notice.label = None
+
+    def voice_label(self, voice_id):
+        """Who a voice is for, as the cast list names it ("Mara", "Mara (age: …)", "Echo (narration)")."""
+        from epub_tts_narrator.narration_identity import author_narrator_name
+        cast = self.bundle["cast"]
+        character_names = {character["id"]: character["name"] for character in cast["characters"]}
+        profile = self._profiles.get(voice_id)
+        if profile is None:
+            return voice_id
+        characters = [character["name"] for character in cast["characters"]
+                      if character.get("voice_id") == voice_id]
+        roles = [role for role in cast["roles"] if role.get("voice_id") == voice_id]
+        derived = profile.get("derived_from") if isinstance(profile.get("derived_from"), dict) else None
+        group = next((character for character in cast["characters"]
+                      if character.get("voice_id") == profile.get("member_of")), None)
+        if characters:
+            label = ", ".join(characters)
+        elif group is not None:
+            # A pool voice designed for one group: its lead is voice 1.
+            members = (self._profiles.get(profile["member_of"], {}).get("ensemble") or {}).get("members", [])
+            number = members.index(voice_id) + 2 if voice_id in members else "?"
+            label = f"{group['name']}, voice {number}"
+        elif derived:
+            base_names = [character["name"] for character in cast["characters"]
+                          if character.get("voice_id") == derived.get("voice_id")]
+            base_label = ", ".join(base_names) or derived.get("voice_id")
+            # The same words the speaker lists use for this state; "cloned from" is the status note.
+            from ..speaker_decisions import _role_label
+            label = _role_label({"kind": "dialogue", "character_id": "base", "voice_id": voice_id},
+                                {"base": {"name": base_label}}, self.bundle["source"]["book"], [profile])
+        else:
+            narrators = list(dict.fromkeys(
+                character_names[role["character_id"]] for role in roles
+                if role.get("kind") == "narration" and role.get("character_id") in character_names))
+            authors = list(dict.fromkeys(
+                name for role in roles
+                if (name := author_narrator_name(role, self.bundle["source"]["book"])) is not None))
+            prefix, colon, _ = profile["description"].partition(":")
+            prefix = prefix.strip()
+            if narrators:
+                label = ", ".join(narrators) + " (narration)"
+            elif authors:
+                label = ", ".join(authors) + " (author)"
+            elif colon and 0 < len(prefix) <= 60:
+                label = prefix.removesuffix(" voice")
+            else:
+                label = ", ".join(dict.fromkeys(role["kind"].capitalize() for role in roles)) or voice_id
+        return label
+
     def rows(self):
         from epub_tts_narrator.narration_identity import author_narrator_name
         from ..speech_traits import speech_traits
@@ -517,40 +606,7 @@ class CastingSession:
                           if character.get("voice_id") == voice_id]
             roles = [role for role in cast["roles"] if role.get("voice_id") == voice_id]
             derived = profile.get("derived_from") if isinstance(profile.get("derived_from"), dict) else None
-            group = next((character for character in cast["characters"]
-                          if character.get("voice_id") == profile.get("member_of")), None)
-            if characters:
-                label = ", ".join(characters)
-            elif group is not None:
-                # A pool voice designed for one group: its lead is voice 1.
-                members = (self._profiles.get(profile["member_of"], {}).get("ensemble") or {}).get("members", [])
-                number = members.index(voice_id) + 2 if voice_id in members else "?"
-                label = f"{group['name']}, voice {number}"
-            elif derived:
-                base_names = [character["name"] for character in cast["characters"]
-                              if character.get("voice_id") == derived.get("voice_id")]
-                base_label = ", ".join(base_names) or derived.get("voice_id")
-                # The same words the speaker lists use for this state; "cloned from" is the status note.
-                from ..speaker_decisions import _role_label
-                label = _role_label({"kind": "dialogue", "character_id": "base", "voice_id": voice_id},
-                                    {"base": {"name": base_label}}, self.bundle["source"]["book"], [profile])
-            else:
-                narrators = list(dict.fromkeys(
-                    character_names[role["character_id"]] for role in roles
-                    if role.get("kind") == "narration" and role.get("character_id") in character_names))
-                authors = list(dict.fromkeys(
-                    name for role in roles
-                    if (name := author_narrator_name(role, self.bundle["source"]["book"])) is not None))
-                prefix, colon, _ = profile["description"].partition(":")
-                prefix = prefix.strip()
-                if narrators:
-                    label = ", ".join(narrators) + " (narration)"
-                elif authors:
-                    label = ", ".join(authors) + " (author)"
-                elif colon and 0 < len(prefix) <= 60:
-                    label = prefix.removesuffix(" voice")
-                else:
-                    label = ", ".join(dict.fromkeys(role["kind"].capitalize() for role in roles)) or voice_id
+            label = self.voice_label(voice_id)
             clone_stale = False
             if derived and selected is not None:
                 cloned = selected.get("creation", {}).get("derived_from", {})
@@ -862,6 +918,7 @@ class CastingSession:
         audio_hash(output)
         return output
 
+    @_about_voice
     def generate(self, voice_id):
         """Save a verified candidate without changing the active selection."""
         self._profile(voice_id)
@@ -1300,6 +1357,7 @@ class CastingSession:
         _, _, directory, previous = max(matches, key=lambda item: item[:2])
         return directory, previous
 
+    @_about_voice
     def _clone_locked(self, voice_id, profile):
         """A changed voice: cloned from its base voice's selected reference."""
         from .workflow import derive_voice_take
@@ -1324,6 +1382,7 @@ class CastingSession:
         return self.store.publish_candidate(voice_id, deepcopy(profile), wav, metadata["reference_text"],
                                             binding_identity, accepted["report"], metadata, candidate_id=nonce)
 
+    @_about_voice
     def _generate_locked(self, voice_id, *, fresh=False):
         profile = self._profile(voice_id)
         if not isinstance(profile.get("derived_from"), dict):
@@ -1338,7 +1397,7 @@ class CastingSession:
         from .character_notes import character_notes, description_conflict
         conflict = description_conflict(prompt, character_notes(self.bundle, self.config).get(voice_id))
         if conflict:
-            self.notify(f"{voice_id}: {conflict}")
+            self.notify(str(conflict))
         # The voice is designed with the accent its lines will be cued with, so the recording and the cue agree.
         from .speech_traits import accent_cues, with_accent
         accented = with_accent(prompt, accent_cues(self.bundle, self.config, store=self.store).get(voice_id, ""))
@@ -1374,7 +1433,7 @@ class CastingSession:
             if pending is not None:
                 directory, request, resume_attempt = pending
                 nonce = request["nonce"]
-                self.notify(f"Retrying verification of the saved voice sample for {voice_id}; no new voice is being generated.")
+                self.notify("Retrying verification of the saved voice sample; no new voice is being generated.")
             else:
                 resume_attempt = None
                 if not fresh and self.config.get("voice_design", {}).get("type") == "elevenlabs":
@@ -1382,7 +1441,7 @@ class CastingSession:
                     if unfinished is not None:
                         directory, request = unfinished
                         nonce = request["nonce"]
-                        self.notify(f"Resuming the saved ElevenLabs voice request for {voice_id}.")
+                        self.notify("Resuming the saved ElevenLabs voice request.")
             if pending is None and self.config.get("voice_design", {}).get("type") == "gemini":
                 request, directory = self._prepare_gemini_request(request, directory, fresh=fresh)
             if self.config.get("voice_design", {}).get("type") == "elevenlabs":
@@ -1396,7 +1455,7 @@ class CastingSession:
                     write_json(durable_request, request)
             prompt = request["prompt"]
             if pending is None:
-                self.notify(f"Generating voice sample for {voice_id} using {designer.identity.get('model', 'configured designer')}")
+                self.notify(f"Generating a voice sample using {designer.identity.get('model', 'configured designer')}")
             take_config = self.config
             cleaned_pending = pending is not None and (directory / "gemini-voice-cleanup.json").exists()
             if cleaned_pending:
@@ -1462,6 +1521,7 @@ class CastingSession:
                 self._release_gemini_voice(designer, directory, request,
                                            preserve_error=sys.exception() is not None)
 
+    @_about_voice
     def ensure_ready(self, voice_id):
         """Reuse an active voice, adopt the latest saved take, or create one.
 
@@ -1605,6 +1665,7 @@ class CastingSession:
         for canonical in drafts:
             self.store.invalidate(canonical)
 
+    @_about_voice
     def regenerate(self, voice_id, *, voice_designer=None):
         """Create a fresh voice and select its verified reference under one lock."""
         self._profile(voice_id)
@@ -1634,6 +1695,7 @@ class CastingSession:
                     self.notify(f"Selected Gemini voice ID: {remote_id}")
                 return selected
 
+    @_about_voice
     def recover_attempt(self, voice_id, attempt_path, *, select=True):
         """Recheck and preserve a saved casting take without synthesizing again.
 
@@ -1694,7 +1756,7 @@ class CastingSession:
             engine, verifier = self._get_engine(), self._get_verifier()
             binding_identity = getattr(engine, "voice_binding_identity", engine.identity)
             self._check_engine(request.get("engine", {}), binding_identity)
-            self.notify(f"Rechecking saved voice sample for {voice_id}")
+            self.notify("Rechecking the saved voice sample")
             report = validate_audio(wav, text, verifier, self.config["quality"], purpose="reference")
             if not report.get("passed"):
                 _require_available_confirmation(report)
@@ -1753,12 +1815,14 @@ class CastingSession:
                 raise error
         return [result["selected"] for result in results]
 
+    @_about_voice
     def accept(self, voice_id, candidate_id):
         """Select a saved candidate after checking engine and verification policy."""
         self._profile(voice_id)
         with self._locked():
             return self._accept_locked(voice_id, candidate_id)
 
+    @_about_voice
     def _accept_locked(self, voice_id, candidate_id):
         voice_id = self.store.canonical_id(voice_id)
         selected = self.store.load(voice_id)
@@ -1777,7 +1841,7 @@ class CastingSession:
                 and candidate["verification"].get("passed") is True):
             report = candidate["verification"]
         else:
-            self.notify(f"Rechecking {voice_id} against the current verification settings")
+            self.notify("Rechecking it against the current verification settings")
             from .reference_clips import recheck
             report = recheck(candidate["reference_audio"], candidate["reference_text"],
                              candidate.get("verification"), verifier, self.config["quality"])
