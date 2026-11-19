@@ -158,8 +158,9 @@ def restore_verified_clips(chapter, acceptance, work, *, sample_rate, notify=pri
         accepted = accepted_by_id[chunk["chunk_id"]]
         if "speaker_lanes" in accepted:
             lanes = [dict(lane, wav_path=audio(lane)) for lane in accepted["speaker_lanes"]]
+            # Rebuilt exactly as accepted, including a mix from an older recipe.
             mix = prepare_mixture(lanes, work / "mixes", sample_rate=sample_rate,
-                                  notify=notify, preserve_lanes=True)
+                                  notify=notify, preserve_lanes=True, reproduce=accepted["mix"])
             if mix["mix"] != accepted["mix"]:
                 raise ValueError("Restored simultaneous mixture differs from accepted audio")
             from .chapter_cache import LANE_FIELDS

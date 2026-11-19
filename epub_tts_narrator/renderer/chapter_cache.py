@@ -11,7 +11,7 @@ import re
 import subprocess
 import tempfile
 
-from .assembly import _check_encoded, _wave_info, compose_chapter, encode_chapter, mix_speakers
+from .assembly import _check_encoded, _wave_info, compose_chapter, encode_chapter, mix_lanes, mix_speakers
 from .audio_naming import descriptive_audio_filename, validate_audio_filename
 from .chapter_records import signed_record
 from .common import digest, file_hash, read_json, regular_file, write_json
@@ -183,10 +183,10 @@ def _timings(chapter):
             lanes = segment["speaker_lanes"]
             if (not isinstance(lanes, list) or len(lanes) < 2
                     or any(not isinstance(lane, dict)
-                           or lane.get("start_frame") != 0
+                           or type(lane.get("start_frame")) is not int or lane["start_frame"] < 0
                            or type(lane.get("end_frame")) is not int
-                           or not 0 < lane["end_frame"] <= end - start
-                           or lane.get("chapter_start_frame") != start
+                           or not lane["start_frame"] < lane["end_frame"] <= end - start
+                           or lane.get("chapter_start_frame") != start + lane["start_frame"]
                            or lane.get("chapter_end_frame") != start + lane["end_frame"] for lane in lanes)
                     or max(lane["chapter_end_frame"] for lane in lanes) != end):
                 raise ValueError("Cached simultaneous speaker timing is invalid")
@@ -212,6 +212,7 @@ def _censorship_timing(segment, sample_rate):
     source_start, source_end = segment["source_audio_start_frame"], segment["source_audio_end_frame"]
     chapter_start = segment["chapter_start_frame"]
     for lane in value["lanes"]:
+        offset = 0
         if set(lane) != {"voice_id", "audit", "chapter_masks"} or not isinstance(lane["audit"], dict):
             raise ValueError("Cached censorship lane audit is invalid")
         audit = lane["audit"]
@@ -220,16 +221,17 @@ def _censorship_timing(segment, sample_rate):
                            targets=audit.get("targets"))
         if "speaker_lanes" in segment:
             source_lane = next(item for item in segment["speaker_lanes"] if item["voice_id"] == lane["voice_id"])
-            if (audit["frames"] != source_lane["end_frame"]
+            offset = source_lane["start_frame"]
+            if (audit["frames"] != source_lane["end_frame"] - offset
                     or audit["audio_sha256"] != source_lane["audio_sha256"]):
                 raise ValueError("Cached censorship timing differs from its original speaker audio")
         elif audit["frames"] < source_end:
             raise ValueError("Cached censorship timing leaves its original audio")
         expected = [{"source_start": mask["source_start"], "source_end": mask["source_end"],
-                     "chapter_start_frame": chapter_start + max(mask["mute_start_frame"], source_start) - source_start,
-                     "chapter_end_frame": chapter_start + min(mask["mute_end_frame"], source_end) - source_start}
+                     "chapter_start_frame": chapter_start + max(offset + mask["mute_start_frame"], source_start) - source_start,
+                     "chapter_end_frame": chapter_start + min(offset + mask["mute_end_frame"], source_end) - source_start}
                     for mask in audit["masks"]
-                    if mask["mute_end_frame"] > source_start and mask["mute_start_frame"] < source_end]
+                    if offset + mask["mute_end_frame"] > source_start and offset + mask["mute_start_frame"] < source_end]
         if lane["chapter_masks"] != expected:
             raise ValueError("Cached censorship frame mapping differs from its original audio")
 
@@ -246,10 +248,36 @@ def _audio_hash_or_none(path):
         return None
 
 
-def mixture_identity(lanes, sample_rate):
-    """Bind the fixed mixing recipe to each independently verified performer."""
-    return {"version": 1, "method": "aligned_fixed_average", "sample_rate": sample_rate,
-            "speaker_lanes": [{key: lane[key] for key in LANE_FIELDS} for lane in lanes]}
+LEGACY_MIX_METHOD = "aligned_fixed_average"
+LANE_MIX_METHOD = "lane_recipe"
+
+
+def mixture_identity(lanes, sample_rate, mix=None):
+    """Bind the mixing recipe to each independently verified performer.
+
+    ``mix`` is the recorded mix (or ``None`` for a version-1 average). A
+    version-2 lane recipe also binds its plan: each lane's offset sits in its
+    ``start_frame``, its gain and filter in ``plan``.
+    """
+    speaker_lanes = [{key: lane[key] for key in LANE_FIELDS} for lane in lanes]
+    if mix is None or mix.get("version") == 1:
+        return {"version": 1, "method": LEGACY_MIX_METHOD, "sample_rate": sample_rate,
+                "speaker_lanes": speaker_lanes}
+    return {"version": 2, "method": LANE_MIX_METHOD, "recipe": mix.get("recipe"),
+            "recipe_version": mix.get("recipe_version"), "sample_rate": sample_rate,
+            "plan": {key: mix.get("plan", {}).get(key) for key in ("gains", "filters")},
+            "speaker_lanes": speaker_lanes}
+
+
+def current_mixture(mix):
+    """Whether a recorded mix is the current recipe's, so no re-mix is due.
+
+    A version-1 average (or an older recipe version) is still a valid record
+    of what was published; a render re-mixes it from the same verified takes.
+    """
+    from .lane_mix import RECIPE_VERSION
+    return (isinstance(mix, dict) and mix.get("version") == 2 and mix.get("method") == LANE_MIX_METHOD
+            and mix.get("recipe_version") == RECIPE_VERSION)
 
 
 def mixture_validation_key(lanes):
@@ -264,11 +292,31 @@ def mixture_audio_filename(lanes, key):
                                       *(lane["voice_id"] for lane in lanes), suffix=".wav")
 
 
-def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preserve_lanes=False):
-    """Cache a mix only after every lane has passed independent verification."""
+def _lane_samples(path):
+    from .lane_mix import from_bytes
+    from .stored_audio import open_wave
+    with open_wave(path) as stream:
+        return from_bytes(stream.readframes(stream.getnframes()))
+
+
+def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preserve_lanes=False,
+                    recipe=None, reproduce=None):
+    """Cache a mix only after every lane has passed independent verification.
+
+    ``recipe`` names a ``lane_mix`` recipe (default: ``tight``). ``reproduce``
+    is an accepted mix record to rebuild exactly as published, including a
+    version-1 fixed average from before lane recipes.
+    """
+    from .lane_mix import DEFAULT_RECIPE, MAX_LANES, plan_lanes
     if not isinstance(lanes, list) or len(lanes) < 2:
         raise ValueError("Simultaneous speech requires at least two verified lanes")
-    prepared = []
+    if len(lanes) > MAX_LANES:
+        raise ValueError(f"A simultaneous mix takes at most {MAX_LANES} verified lanes")
+    legacy = isinstance(reproduce, dict) and reproduce.get("version") == 1
+    if isinstance(reproduce, dict) and not legacy:
+        recipe = reproduce.get("recipe")
+    recipe = recipe or DEFAULT_RECIPE
+    prepared, sources = [], []
     for lane in lanes:
         if (not isinstance(lane, dict) or not isinstance(lane.get("report"), dict)
                 or lane["report"].get("passed") is not True):
@@ -278,10 +326,22 @@ def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preser
         if not info["frames"] or audio_hash(path) != lane["audio_sha256"]:
             raise ValueError("Verified simultaneous speaker audio changed or is empty")
         prepared.append(dict(lane, start_frame=0, end_frame=info["frames"]))
+        if not legacy:
+            sources.append(_lane_samples(path))
     if (len({lane["role_id"] for lane in prepared}) != len(prepared)
             or len({lane["voice_id"] for lane in prepared}) != len(prepared)):
         raise ValueError("Simultaneous speaker roles and voices must be distinct")
-    identity = mixture_identity(prepared, sample_rate)
+    plan = None
+    if not legacy:
+        plan = plan_lanes(prepared, sources, recipe, sample_rate)
+        for lane, offset in zip(prepared, plan["offsets"]):
+            lane["start_frame"], lane["end_frame"] = offset, offset + lane["end_frame"]
+        described = {"version": 2, "recipe": recipe, "recipe_version": plan["recipe_version"],
+                     "plan": {"gains": plan["gains"], "filters": plan["filters"]}}
+        if isinstance(reproduce, dict) and (reproduce.get("recipe_version") != plan["recipe_version"]
+                                            or reproduce.get("plan") != described["plan"]):
+            raise ValueError("A recorded simultaneous mix used another recipe version; render again to re-mix it")
+    identity = mixture_identity(prepared, sample_rate, None if legacy else described)
     key, frames = digest(identity), max(lane["end_frame"] for lane in prepared)
     directory = Path(directory)
     for parent in (directory, directory.parent):
@@ -304,9 +364,18 @@ def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preser
                 or _wave_info(wav, sample_rate)["frames"] != frames
                 or record.get("frames") != frames):
             raise ValueError("Simultaneous mixture cache failed integrity checks")
-        mix = {"version": 1, "method": "aligned_fixed_average", "sample_rate": sample_rate,
-               "frames": frames, "cache_key": key, "audio_sha256": record["audio_sha256"],
-               "weight": 1 / len(prepared), "peak_amplitude": record["peak_amplitude"]}
+        if legacy:
+            mix = {"version": 1, "method": LEGACY_MIX_METHOD, "sample_rate": sample_rate,
+                   "frames": frames, "cache_key": key, "audio_sha256": record["audio_sha256"],
+                   "weight": 1 / len(prepared), "peak_amplitude": record["peak_amplitude"]}
+        else:
+            if type(record.get("scale")) is not float or not record["scale"] > 0:
+                raise ValueError("Simultaneous mixture cache failed integrity checks")
+            mix = {"version": 2, "method": LANE_MIX_METHOD, "recipe": recipe,
+                   "recipe_version": plan["recipe_version"], "plan": deepcopy(described["plan"]),
+                   "scale": record["scale"], "sample_rate": sample_rate, "frames": frames,
+                   "cache_key": key, "audio_sha256": record["audio_sha256"],
+                   "peak_amplitude": record["peak_amplitude"]}
         result = {"wav_path": str(wav.resolve()), "mix": mix,
                 "speaker_lanes": [{key: value for key, value in lane.items() if key != "wav_path"}
                                   for lane in prepared]}
@@ -323,12 +392,22 @@ def prepare_mixture(lanes, directory, *, sample_rate=44100, notify=print, preser
     with tempfile.TemporaryDirectory(prefix=".mix-", dir=directory) as temporary:
         stage = Path(temporary) / "ready"
         stage.mkdir()
-        notify(f"Mixing {len(prepared)} independently verified simultaneous speakers")
+        notify(f"Mixing {len(prepared)} independently verified simultaneous speakers"
+               + ("" if legacy else f" ({recipe})"))
         filename = mixture_audio_filename(prepared, key)
-        mixed = mix_speakers(prepared, stage / filename, sample_rate=sample_rate)
+        if legacy:
+            mixed = mix_speakers(prepared, stage / filename, sample_rate=sample_rate)
+        else:
+            mixed = mix_lanes(sources, plan, stage / filename, sample_rate=sample_rate)
         record = {"format": "audiobook-renderer-mix", "version": 1, "identity": identity,
                   "frames": frames, "audio_sha256": mixed["audio_sha256"],
                   "peak_amplitude": mixed["peak_amplitude"], "audio_file": filename}
+        if not legacy:
+            record["scale"] = mixed["scale"]
+            for lane in prepared:
+                # The same check the fixed average makes after mixing.
+                if audio_hash(regular_audio(lane["wav_path"])) != lane["audio_sha256"]:
+                    raise ValueError("Verified simultaneous speaker audio changed before mixing")
         write_json(stage / "mix.json", dict(record, record_sha256=digest(record)))
         store_quietly(stage / filename, expected_sha256=mixed["audio_sha256"])
         try:

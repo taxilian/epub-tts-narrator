@@ -116,7 +116,7 @@ class CensorshipAssemblyTests(unittest.TestCase):
                     self.assertEqual(plain["segments"][0][key], muted["segments"][0][key])
                 _timings(muted)
 
-    def test_simultaneous_lanes_mute_independently_before_average(self):
+    def simultaneous(self, **mix_options):
         other = pcm(self.root / "other.wav", [4000] * RATE)
         lanes = [{"role_id": "first", "voice_id": "voice_1", "wav_path": self.wav,
                   "audio_sha256": audio_hash(self.wav), "request_hash": "first", "validation_key": "first",
@@ -125,7 +125,7 @@ class CensorshipAssemblyTests(unittest.TestCase):
                   "audio_sha256": audio_hash(other), "request_hash": "second", "validation_key": "second",
                   "report": self.report(.4, .7)}]
         mixed = prepare_mixture(lanes, self.root / "mixes", sample_rate=RATE,
-                                preserve_lanes=True, notify=lambda _: None)
+                                preserve_lanes=True, notify=lambda _: None, **mix_options)
         self.item["segment"]["simultaneous_speakers"] = [
             {"role_id": lane["role_id"], "voice_id": lane["voice_id"]} for lane in lanes]
         self.item.update(mixed)
@@ -135,6 +135,11 @@ class CensorshipAssemblyTests(unittest.TestCase):
                                       for lane in mixed["speaker_lanes"]]
         for lane in self.item["censorship_lanes"]:
             lane["censorship"] = self.audit(dict(self.item, wav_path=lane["wav_path"]), report=lane["report"])
+        return mixed
+
+    def test_simultaneous_lanes_mute_independently_before_average(self):
+        # A fixed-average mix from before lane recipes is still censored exactly.
+        mixed = self.simultaneous(reproduce={"version": 1})
         plain_hash = audio_hash(mixed["wav_path"])
         result = self.compose("separate.wav", policy=self.policy)
         data = samples(result["wav_path"])
@@ -144,6 +149,23 @@ class CensorshipAssemblyTests(unittest.TestCase):
         self.assertEqual(data[2800], 2000)
         self.assertEqual(audio_hash(mixed["wav_path"]), plain_hash)
         self.assertEqual(result["frames"], RATE)
+        _timings(result)
+
+    def test_lane_recipe_lanes_mute_independently_with_the_accepted_arithmetic(self):
+        mixed = self.simultaneous()
+        scale = mixed["mix"]["scale"]
+        offset = mixed["speaker_lanes"][1]["start_frame"]
+        self.assertGreater(offset, 0)
+        plain_hash = audio_hash(mixed["wav_path"])
+        result = self.compose("separate.wav", policy=self.policy)
+        data = samples(result["wav_path"])
+        # Before lane two enters: lane one alone, at the recorded loudness scale.
+        self.assertEqual(data[0], round(2000 * scale))
+        # Lane one muted while lane two (placed later, masked later) still speaks.
+        self.assertEqual(data[2800], round(4000 * scale))
+        self.assertEqual(data[RATE // 10], round(6000 * scale))
+        self.assertEqual(audio_hash(mixed["wav_path"]), plain_hash)
+        self.assertEqual(result["frames"], RATE + offset)
         _timings(result)
 
     def test_sync_rejects_fabricated_chapter_mask_offsets(self):

@@ -15,7 +15,8 @@ import unicodedata
 
 from .assembly import normalize_clip, package_audio
 from .audio_naming import descriptive_audio_filename, speech_take_filename, validate_audio_filename
-from .chapter_cache import (LANE_FIELDS, chapter_settings, load_chapter, prepare_chapter,
+from .chapter_cache import (LANE_FIELDS, LANE_MIX_METHOD, LEGACY_MIX_METHOD, chapter_settings,
+                            current_mixture, load_chapter, prepare_chapter,
                             mixture_identity, mixture_validation_key, prepare_mixture)
 from .chapter_records import signed_record
 from .bundle import chunk_identity_fingerprint, chunk_speakers, make_plan
@@ -2388,16 +2389,20 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
                 if (not isinstance(lanes, list) or len(lanes) != len(speakers)
                         or not isinstance(mix, dict)
                         or any(not isinstance(lane, dict) or not isinstance(lane.get("report"), dict)
-                               or lane.get("start_frame") != 0 or type(lane.get("end_frame")) is not int
-                               or lane["end_frame"] <= 0 for lane in lanes)):
+                               or type(lane.get("start_frame")) is not int or lane["start_frame"] < 0
+                               or type(lane.get("end_frame")) is not int
+                               or lane["end_frame"] <= lane["start_frame"] for lane in lanes)):
                     raise ValueError("Incomplete simultaneous speaker verification")
                 lane_metadata = [{key: lane[key] for key in LANE_FIELDS} for lane in lanes]
+                legacy_mix = mix.get("version") == 1
                 if (cached.get("speaker_lanes") != lane_metadata or cached.get("mix") != mix
-                        or mix.get("cache_key") != digest(mixture_identity(lanes, config["render"]["sample_rate"]))
-                        or mix.get("method") != "aligned_fixed_average" or mix.get("version") != 1
+                        or mix.get("cache_key") != digest(mixture_identity(lanes, config["render"]["sample_rate"], mix))
+                        or (mix.get("method"), mix.get("version")) not in {
+                            (LEGACY_MIX_METHOD, 1), (LANE_MIX_METHOD, 2)}
+                        or legacy_mix and (any(lane["start_frame"] != 0 for lane in lanes)
+                                           or mix.get("weight") != 1 / len(lanes))
                         or mix.get("sample_rate") != config["render"]["sample_rate"]
                         or mix.get("frames") != max(lane["end_frame"] for lane in lanes)
-                        or mix.get("weight") != 1 / len(lanes)
                         or mix.get("audio_sha256") != accepted["audio_sha256"]
                         or accepted["request_hash"] != mix["cache_key"]
                         or accepted["validation_key"] != mixture_validation_key(lanes)
@@ -2416,6 +2421,9 @@ def _restore_chapter(work, chapter, record, context, voices, config, *, speech_c
                         raise ValueError("A simultaneous speaker lacks matching verification")
                     if not matches_request(request, lane, chunk):
                         stale_chunks.add(chunk["chunk_id"])
+                if not current_mixture(mix):
+                    # An older mixing recipe: re-mixed from the same verified takes.
+                    stale_chunks.add(chunk["chunk_id"])
             else:
                 request = _speech_request(chunk, voices[speakers[0]["voice_id"]], context["engine"], config)
                 if not matches_request(request, accepted, chunk):

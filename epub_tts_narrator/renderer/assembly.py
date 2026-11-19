@@ -202,19 +202,25 @@ def _censorship_inputs(clip, policy, sample_rate, info):
         checksum = _hash(path)
         if (not lane_info["frames"] or lane_info["frames"] > info["frames"]
                 or "speaker_lanes" in clip and
-                (checksum != lane.get("audio_sha256") or lane_info["frames"] != lane.get("end_frame"))):
+                (checksum != lane.get("audio_sha256")
+                 or lane_info["frames"] != lane.get("end_frame", 0) - lane.get("start_frame", 0))):
             raise ValueError("Original censorship speaker audio changed or has an invalid timeline")
         audit = validate_mask_plan(lane.get("censorship"), clip["spoken_text"], policy,
                                    sample_rate=sample_rate, frames=lane_info["frames"],
                                    audio_sha256=checksum, targets=targets)
         prepared.append(dict(voice_id=lane["voice_id"], wav_path=path,
-                             frames=lane_info["frames"], audit=audit))
+                             frames=lane_info["frames"], audit=audit,
+                             offset=lane.get("start_frame", 0) if "speaker_lanes" in clip else 0,
+                             mix=clip.get("mix") if "speaker_lanes" in clip else None))
     return prepared
 
 
 def _masked_pcm(lanes, start, end):
-    """Yield masked PCM, averaging simultaneous lanes only after each mask."""
+    """Yield masked PCM, mixing simultaneous lanes only after each mask."""
     from .censorship import apply_masks
+    if len(lanes) > 1 and (lanes[0].get("mix") or {}).get("version") == 2:
+        yield from _masked_lane_recipe(lanes, start, end)
+        return
     with ExitStack() as handles:
         inputs = [handles.enter_context(open_wave(lane["wav_path"])) for lane in lanes]
         for source, lane in zip(inputs, lanes):
@@ -249,16 +255,65 @@ def _masked_pcm(lanes, start, end):
             raise ValueError("Original censorship audio changed during chapter composition")
 
 
+def _masked_lane_recipe(lanes, start, end):
+    """A lane-recipe mix of masked lanes, with the accepted mix's exact arithmetic."""
+    from .censorship import apply_masks
+    from .lane_mix import from_bytes, mix_arrays, to_bytes
+    mix = lanes[0]["mix"]
+    sources = []
+    for lane in lanes:
+        with open_wave(lane["wav_path"]) as source:
+            data = source.readframes(lane["frames"])
+        if len(data) != lane["frames"] * 2:
+            raise ValueError("Truncated original censorship PCM")
+        sources.append(from_bytes(apply_masks(data, 0, lane["audit"]["masks"])))
+    plan = {"offsets": [lane["offset"] for lane in lanes], **mix["plan"]}
+    mixed, _, _ = mix_arrays(sources, plan, mix["sample_rate"], scale=mix["scale"])
+    for cursor in range(start, end, 65536):
+        yield to_bytes(mixed[cursor:min(end, cursor + 65536)])
+    for lane in lanes:
+        if _hash(lane["wav_path"]) != lane["audit"]["audio_sha256"]:
+            raise ValueError("Original censorship audio changed during chapter composition")
+
+
+def mix_lanes(sources, plan, output_wav, *, sample_rate=44100):
+    """Write verified lanes mixed by a ``lane_mix`` plan (offsets, gains, loudness match)."""
+    from .lane_mix import mix_arrays, to_bytes
+    _rate(sample_rate)
+    target = Path(output_wav)
+    if target.exists() or target.is_symlink():
+        raise ValueError(f"Output already exists: {target}")
+    if any(not len(source) for source in sources):
+        raise ValueError("A simultaneous speaker lane cannot be empty")
+    mixed, scale, peak = mix_arrays(sources, plan, sample_rate)
+    if peak == 0:
+        raise ValueError("Simultaneous mixture is silent; speaker lanes cancelled each other")
+    frames = max(offset + len(source) for offset, source in zip(plan["offsets"], sources))
+    if len(mixed) != frames:
+        raise ValueError("Simultaneous mixture has an invalid PCM timeline")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".mix-", dir=target.parent) as temporary:
+        staged = Path(temporary) / target.name
+        with wave.open(str(staged), "wb") as destination:
+            destination.setparams((1, 2, sample_rate, 0, "NONE", "not compressed"))
+            destination.writeframes(to_bytes(mixed))
+        target.hardlink_to(staged)
+    return {"wav_path": str(target), "sample_rate": sample_rate, "channels": 1, "frames": frames,
+            "scale": scale, "peak_amplitude": peak, "audio_sha256": _hash(target)}
+
+
 def _censorship_timing(lanes, policy, first_frame, edges):
     from .censorship import policy_identity
     return {"version": 1, "policy": policy_identity(policy), "lanes": [{
         "voice_id": lane["voice_id"], "audit": deepcopy(lane["audit"]),
+        # A lane placed later in its mix (``offset``) is masked later in the chapter too.
         "chapter_masks": [{
             "source_start": mask["source_start"], "source_end": mask["source_end"],
-            "chapter_start_frame": first_frame + max(mask["mute_start_frame"], edges["start"]) - edges["start"],
-            "chapter_end_frame": first_frame + min(mask["mute_end_frame"], edges["end"]) - edges["start"],
+            "chapter_start_frame": first_frame + max(lane["offset"] + mask["mute_start_frame"], edges["start"]) - edges["start"],
+            "chapter_end_frame": first_frame + min(lane["offset"] + mask["mute_end_frame"], edges["end"]) - edges["start"],
         } for mask in lane["audit"]["masks"]
-            if mask["mute_end_frame"] > edges["start"] and mask["mute_start_frame"] < edges["end"]],
+            if lane["offset"] + mask["mute_end_frame"] > edges["start"]
+            and lane["offset"] + mask["mute_start_frame"] < edges["end"]],
     } for lane in lanes]}
 
 
@@ -494,9 +549,10 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                             or any(not isinstance(lane, dict) for lane in lanes)
                             or [{"role_id": lane.get("role_id"), "voice_id": lane.get("voice_id")}
                                 for lane in lanes] != row.get("simultaneous_speakers")
-                            or any(type(lane.get("start_frame")) is not int or lane["start_frame"] != 0
+                            or any(type(lane.get("start_frame")) is not int or lane["start_frame"] < 0
                                    or type(lane.get("end_frame")) is not int
-                                   or not 0 < lane["end_frame"] <= cursor - first_frame for lane in lanes)
+                                   or not lane["start_frame"] < lane["end_frame"] <= cursor - first_frame
+                                   for lane in lanes)
                             or max(lane["end_frame"] for lane in lanes) != cursor - first_frame):
                         raise ValueError("Invalid simultaneous speaker timing")
                     timing["speaker_lanes"] = [dict(deepcopy(lane),

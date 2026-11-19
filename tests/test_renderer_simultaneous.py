@@ -71,8 +71,10 @@ class SimultaneousMixerTests(unittest.TestCase):
             prepare_mixture(bad, self.root / "mixes", notify=lambda _: None)
         self.assertFalse((self.root / "mixes").exists())
         mixed = prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
-        self.assertEqual([lane["end_frame"] for lane in mixed["speaker_lanes"]], [4, 2])
-        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
+        # Each lane keeps its own length, placed at its offset; the lead is never delayed.
+        self.assertEqual([lane["end_frame"] - lane["start_frame"] for lane in mixed["speaker_lanes"]], [4, 2])
+        self.assertEqual(mixed["speaker_lanes"][0]["start_frame"], 0)
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_lanes", side_effect=AssertionError("Remixed")):
             self.assertEqual(prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None), mixed)
         path = Path(mixed["wav_path"])
         data = bytearray(stored_audio.read_bytes(path))
@@ -94,7 +96,7 @@ class SimultaneousMixerTests(unittest.TestCase):
         self.assertEqual(audio_hash(folder / name), record["audio_sha256"])
         self.assertEqual({path.name for path in folder.iterdir()}, {"mix.json", stored_audio.locate(folder / name).name})
         self.assertTrue(stored_audio.is_stored(folder / name), "the mix is kept as FLAC")
-        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_lanes", side_effect=AssertionError("Remixed")):
             self.assertEqual(prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None), mixed)
 
     def test_legacy_mixture_cache_without_recorded_name_still_loads_without_remixing(self):
@@ -105,7 +107,7 @@ class SimultaneousMixerTests(unittest.TestCase):
         stored_audio.rename_audio(folder / record.pop("audio_file"), folder / "mix.wav")
         record.pop("record_sha256")
         write_json(folder / "mix.json", dict(record, record_sha256=digest(record)))
-        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=AssertionError("Remixed")):
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_lanes", side_effect=AssertionError("Remixed")):
             reused = prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
         self.assertEqual(Path(reused["wav_path"]).name, "mix.wav")
 
@@ -142,11 +144,13 @@ class SimultaneousMixerTests(unittest.TestCase):
     def test_audio_changed_between_verification_and_mixing_never_publishes(self):
         lanes = self.lanes()
 
-        def changed_before_mix(accepted, target, **kwargs):
-            pcm(Path(accepted[0]["wav_path"]), [1000] * 4)
-            return mix_speakers(accepted, target, **kwargs)
+        from epub_tts_narrator.renderer.assembly import mix_lanes
 
-        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=changed_before_mix):
+        def changed_before_mix(sources, plan, target, **kwargs):
+            pcm(Path(lanes[0]["wav_path"]), [1000] * 4)
+            return mix_lanes(sources, plan, target, **kwargs)
+
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_lanes", side_effect=changed_before_mix):
             with self.assertRaisesRegex(ValueError, "changed before mixing"):
                 prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
         self.assertEqual(list((self.root / "mixes").iterdir()), [])
@@ -154,7 +158,7 @@ class SimultaneousMixerTests(unittest.TestCase):
     def test_mixture_interruption_keeps_inputs_and_publishes_nothing(self):
         lanes = self.lanes()
         original = [audio_hash(lane["wav_path"]) for lane in lanes]
-        with patch("epub_tts_narrator.renderer.chapter_cache.mix_speakers", side_effect=KeyboardInterrupt):
+        with patch("epub_tts_narrator.renderer.chapter_cache.mix_lanes", side_effect=KeyboardInterrupt):
             with self.assertRaises(KeyboardInterrupt):
                 prepare_mixture(lanes, self.root / "mixes", notify=lambda _: None)
         self.assertEqual(list((self.root / "mixes").iterdir()), [])
@@ -327,18 +331,45 @@ class SimultaneousWorkflowTests(unittest.TestCase):
         output = self.root / "output"
         acceptance = read_json(output / "verification.json")[0]
         self.assertEqual(acceptance["report"]["method"], "independently_verified_simultaneous_lanes")
-        self.assertEqual([lane["end_frame"] for lane in acceptance["speaker_lanes"]], [44100, 66150])
-        self.assertTrue(all(lane["report"]["passed"] for lane in acceptance["speaker_lanes"]))
+        lanes = acceptance["speaker_lanes"]
+        self.assertEqual([lane["end_frame"] - lane["start_frame"] for lane in lanes], [44100, 66150])
+        self.assertEqual(lanes[0]["start_frame"], 0)
+        self.assertEqual(acceptance["mix"]["recipe"], "tight")
+        # Unison spread stays within the tight recipe's 15 ms.
+        self.assertLessEqual(lanes[1]["start_frame"], round(0.015 * 44100))
+        self.assertTrue(all(lane["report"]["passed"] for lane in lanes))
         sync = read_json(output / "sync.json")
         group = sync["segments"][0]
-        self.assertEqual(group["chapter_end_frame"] - group["chapter_start_frame"], 66150)
+        mix_frames = max(lane["end_frame"] for lane in lanes)
+        self.assertEqual(group["chapter_end_frame"] - group["chapter_start_frame"], mix_frames)
         self.assertEqual(group["source_text"], self.group_text)
-        self.assertEqual([lane["book_end_frame"] for lane in group["speaker_lanes"]], [44100, 66150])
-        self.assertEqual(group["book_end_frame"], 66150)
+        self.assertEqual([lane["book_end_frame"] for lane in group["speaker_lanes"]],
+                         [lane["end_frame"] for lane in lanes])
+        self.assertEqual([lane["book_start_frame"] for lane in group["speaker_lanes"]],
+                         [lane["start_frame"] for lane in lanes])
+        self.assertEqual(group["book_end_frame"], mix_frames)
         self.assertEqual([lane["voice_id"] for lane in group["speaker_lanes"]], ["voice_mara", "voice_lena"])
         self.assertEqual(sum(item["chunk_id"] == group["chunk_id"] for item in sync["segments"]), 1)
         self.assertFalse(any("mixes" in path for path in self.verifier.calls))
         self.assertTrue((output / result["audio"]["audiobook"]["path"]).is_file())
+
+    def test_a_fixed_average_from_an_earlier_render_is_remixed_without_new_speech(self):
+        from epub_tts_narrator.renderer import workflow
+        original = workflow.prepare_mixture
+
+        def fixed_average(*args, **kwargs):
+            return original(*args, reproduce={"version": 1}, **kwargs)
+
+        with patch.object(workflow, "prepare_mixture", side_effect=fixed_average):
+            self.run_render()
+        output = self.root / "output"
+        self.assertEqual(read_json(output / "verification.json")[0]["mix"]["version"], 1)
+        spoken = len(self.engine.speech_calls)
+        self.run_render()
+        acceptance = read_json(output / "verification.json")[0]
+        self.assertEqual(len(self.engine.speech_calls), spoken, "the verified takes are reused")
+        self.assertEqual((acceptance["mix"]["version"], acceptance["mix"]["recipe"]), (2, "tight"))
+        self.assertEqual(read_json(output / "sync.json")["segments"][0]["mix"], acceptance["mix"])
 
     def test_failed_second_lane_cannot_publish_a_mix_chapter_or_book(self):
         self.verifier.failed_voice = "voice_lena"
