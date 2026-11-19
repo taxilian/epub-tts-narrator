@@ -108,6 +108,16 @@ python3.11 scripts/sweep_narrator_reasoning.py --config epub-tts-narrator.toml -
 
 `compare_analyses.py` maps characters one-to-one by co-labeled quotations (one character absorbing two counts as disagreement) and reports per-quotation agreement, unresolved counts, splits and merges. It can write a Markdown sample of disagreements with context for spot-checking. `measure_cached_analysis.py` replays a consensus analysis from its cache with no network to count requests and request/response sizes per stage. `sweep_narrator_reasoning.py` runs model × reasoning-effort cells on a chapter subset, each with its own cache, because cache keys exclude model and effort. The outputs of all three contain book text; keep them in gitignored run directories.
 
+### Plural speakers (groups, twins, crowds)
+
+A speaker tag can say that several people speak ("the twins said in unison", "they all replied", "several of them answered"), that one unnamed member does ("one of the others observed", "another man roared"), or name one person. The narrator read checks each line's tag against its speaker (`group_cues.py`, flags only; it never changes attribution):
+
+- `plural_tag`: the tag says several people speak, but the line went to one ordinary character (not a group, not `simultaneous_speakers`);
+- `singular_tag`: a group's line whose tag names another character;
+- `invented_member`: the tag says only "one of them" or "the other", but the line went to a character with a personal name (twins the text never tells apart).
+
+The tag's subject decides, never a character's name: only a clause with a speech verb counts, its subject must be a short noun phrase, "in unison" counts only right after the verb, and "and" only between two short names. Each flag is an advisory `group_tag` issue and a `self_check.group_tags` count, and `verify-attribution` adds its paragraph to the risk set for the jury to read again. Groups themselves (`cast.characters[].group`) and their voices are described in `COLLECTIVE_VOICES.md` and `FORMAT.md`.
+
 ## Character identity consensus
 
 Identity consensus is enabled by default in the consensus pipeline with `analysis.identity_consensus = true`. After discovery and reconciliation, a source scan looks for both directions of error: distinct people combined as one character, and one returning person represented by several characters. Shared or similar names are grounds for investigation, never proof. The audit examines aliases, descriptions, relationships, and source context. A proposed split includes replacement character, role, and voice records before judgment.

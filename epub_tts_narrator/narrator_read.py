@@ -1087,7 +1087,7 @@ def cast_audit(cast):
     return warnings
 
 
-def self_check_report(verify_stats, duplicate_outcomes, warnings, unresolved):
+def self_check_report(verify_stats, duplicate_outcomes, warnings, unresolved, *, group_flags=()):
     """Numbers summarising what the narrator read checked and changed."""
     reasons, changed = Counter(verify_stats.get("reasons", {})), Counter(verify_stats.get("changed_by_reason", {}))
     followup = verify_stats.get("scene_followup") or {}
@@ -1096,6 +1096,7 @@ def self_check_report(verify_stats, duplicate_outcomes, warnings, unresolved):
     return {"lines_rechecked": dict(reasons), "lines_changed": dict(changed),
             "duplicate_checks": dict(Counter(outcome["verdict"] for outcome in duplicate_outcomes)),
             "cast_warnings": dict(Counter(warning["kind"] for warning in warnings)),
+            **({"group_tags": dict(Counter(flag["kind"] for flag in group_flags))} if group_flags else {}),
             "unresolved_lines": unresolved}
 
 
@@ -2264,6 +2265,12 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
         segment_stats = {}
         segments = build_segments(source, cast, spans, labels, extras, ledger, notes, segment_stats,
                                   variant_roles=variant_roles, default_roles=default_roles)
+        # Plural speakers are guarded by their tags (flags only; COLLECTIVE_VOICES.md §6.1).
+        from .group_cues import group_warnings
+        group_flags = group_warnings({"source": source, "cast": cast, "segments": segments})
+        for flag in group_flags:
+            issues.append({"id": f"narrator_group_{flag['kind']}_{flag['segment_id']}", "kind": "group_tag",
+                           "target": flag["segment_id"], "reason": flag["reason"], "resolved": False})
         metrics = meter.summary()
         metrics["wall_seconds"] = round(time.monotonic() - started_all, 3)
         metrics["cache_hits"] = requests.cache_hits
@@ -2282,7 +2289,8 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
                 "alias_checks": alias_outcomes,
                 "verification": verify_stats, "voices_designed": designed,
                 "self_check": self_check_report(verify_stats, duplicate_outcomes, warnings,
-                                                sum(1 for row in segments if row["role_id"] is None)),
+                                                sum(1 for row in segments if row["role_id"] is None),
+                                                group_flags=group_flags),
                 "dropped_ledger_claims": dict(ledger["dropped"]),
                 "ledger": {key: deepcopy(ledger[key]) for key in ("characters", "narration", "questions")},
                 "voice_changes": [{"character": row["id"], **{key: change[key] for key in ("id", "kind", "instruction", "start", "end")},

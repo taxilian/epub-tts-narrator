@@ -22,6 +22,9 @@ def risk_blocks(document):
         by_block[segment["block_id"]].append(segment)
     selected = []
     blocks = document["source"]["blocks"]
+    # A tag that says several people speak, given to one (or the reverse): read it again.
+    from .group_cues import group_warnings
+    tagged = {flag["block_id"] for flag in group_warnings(document)}
     for index, block in enumerate(blocks):
         segments = by_block[block["id"]]
         flagged = any(segment["attribution"].get("review_required")
@@ -33,7 +36,7 @@ def risk_blocks(document):
         contextual = any(segment["kind"] in {"dialogue", "thought"}
                          and segment["attribution"].get("basis") == "context"
                          for segment in segments)
-        if flagged or (contextual and len(speakers) >= 2):
+        if flagged or block["id"] in tagged or (contextual and len(speakers) >= 2):
             selected.append(block["id"])
     return selected
 
