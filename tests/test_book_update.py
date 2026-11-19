@@ -935,6 +935,50 @@ class BookUpdateTests(unittest.TestCase):
         _completed_directory(self.book)
         self.assertEqual(continuation_directories(self.book), [earlier.resolve()])
 
+    def test_a_continued_book_may_gain_a_speaker_and_its_later_book_follows(self):
+        from epub_tts_narrator.analysis_directory import _completed_directory, continuation_directories
+        from epub_tts_narrator.analysis_revision import revise_directories
+        earlier = self.root / "book-one"
+        status, _, stderr = self.run_cli("analyze", "--strategy", "consensus",
+                                         self.epub("book-one", [CHAPTER_ONE, CHAPTER_THREE], "book-one"), "-o", earlier)
+        self.assertEqual(status, 0, stderr)
+        status, _, stderr = self.run_cli(
+            "analyze", self.epub("serial-gain", [("Four", ["Mara said, “Morning.”"])], "serial-gain-1"),
+            "-o", self.book, "--continue-from", earlier, "--strategy", "consensus")
+        self.assertEqual(status, 0, stderr)
+        document = read_json(earlier / "analysis.json")
+        cast = document["cast"]
+        character = next(row for row in cast["characters"] if row["voice_id"] in
+                         {role["voice_id"] for role in cast["roles"] if role["kind"] == "dialogue"})
+        role = next(row for row in cast["roles"] if row["voice_id"] == character["voice_id"])
+        voice = next(row for row in cast["voices"] if row["id"] == character["voice_id"])
+        candidate = deepcopy(document)
+        added = candidate["cast"]
+        added["characters"].append(dict(deepcopy(character), id="char_newcomer", name="Newcomer",
+                                        aliases=[], voice_id="voice_newcomer"))
+        added["voices"].append(dict(deepcopy(voice), id="voice_newcomer"))
+        added["roles"].append(dict(deepcopy(role), id="role_newcomer", character_id="char_newcomer",
+                                   voice_id="voice_newcomer"))
+        line = next(row for row in candidate["segments"] if row.get("role_id") == role["id"])
+        line.update(role_id="role_newcomer", voice_id="voice_newcomer")
+
+        def hashes():
+            return {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
+                    for path in (earlier.resolve(), self.book.resolve())}
+        changed = deepcopy(candidate)
+        changed["cast"]["characters"][0]["name"] += " renamed"
+        with self.assertRaisesRegex(ValueError, "only add cast records"):
+            revise_directories({earlier: changed}, directories=[earlier, self.book],
+                               expected_manifest_hashes=hashes(), scope="source-edit", progress=lambda _: None)
+        revise_directories({earlier: candidate}, directories=[earlier, self.book],
+                           expected_manifest_hashes=hashes(), scope="source-edit", progress=lambda _: None)
+        self.assertIn("Newcomer", [row["name"] for row in read_json(earlier / "analysis.json")["cast"]["characters"]])
+        history = read_json(self.book / "series-cast.json")["books"][0]
+        self.assertIn("char_newcomer", [row["id"] for row in history["cast"]["characters"]])
+        _completed_directory(earlier)
+        _completed_directory(self.book)
+        self.assertEqual(continuation_directories(self.book), [earlier.resolve()])
+
     def test_plan_estimates_only_the_appended_chapters(self):
         self.seed()
         calls = len(self.model_payloads())

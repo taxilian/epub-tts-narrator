@@ -220,6 +220,41 @@ def _install(source, destination):
         Path(temporary).unlink(missing_ok=True)
 
 
+def appended_cast(before, after):
+    """Voice IDs ``after`` adds when it only appends cast records to ``before``; else ``None``."""
+    if set(before) != set(after):
+        return None
+    for key, records in before.items():
+        if not isinstance(records, list):
+            if after[key] != records:
+                return None
+            continue
+        grown = after[key]
+        if not isinstance(grown, list) or grown[:len(records)] != records:
+            return None
+        known = [row.get("id") for row in records if isinstance(row, dict)]
+        added = [row.get("id") for row in grown[len(records):] if isinstance(row, dict)]
+        if len(added) != len(grown) - len(records) or len(set(known + added)) != len(known) + len(added):
+            return None
+    return [voice["id"] for voice in after.get("voices", [])[len(before.get("voices", [])):]]
+
+
+def _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes):
+    """New voices change the cast fingerprint the book's audition scripts are bound to."""
+    sidecar = path / "audition-scripts.json"
+    if added_voices and (sidecar.exists() or sidecar.is_symlink()):
+        if sidecar.name in sidecars.get(path, {}):
+            raise ValueError("A revision that adds voices rebinds audition-scripts.json itself; do not supply it")
+        from .voice_profile_refresh import audition_sidecar_rebind
+        sidecars.setdefault(path, {})[sidecar.name] = audition_sidecar_rebind(
+            sidecar, source_fingerprint=fingerprint(document["source"]),
+            cast_fingerprint_before=fingerprint(document["cast"]),
+            cast_fingerprint_after=fingerprint(candidate["cast"]),
+            voice_ids=[voice["id"] for voice in candidate["cast"]["voices"]])
+        names[path].append(sidecar.name)
+        original_hashes[path][sidecar.name] = _hash(sidecar)
+
+
 def revise_directories(revisions, *, directories=None, expected_manifest_hashes=None, progress=print,
                        scope="attribution", sidecars=None, speaker_decision_inputs=None,
                        reserved_update_locks=None):
@@ -339,9 +374,11 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
         elif scope == "source-edit":
             if path in revisions:
                 if (candidate["source"].get("book") != document["source"].get("book")
-                        or candidate["cast"] != document["cast"]
+                        or (added_voices := appended_cast(document["cast"], candidate["cast"])) is None
                         or candidate["provenance"].get("series") != document["provenance"].get("series")):
-                    raise ValueError("Source-only updates must preserve book identity, cast, and series context")
+                    raise ValueError("Source-only updates must preserve book identity and series context, and may "
+                                     "only add cast records after the saved ones")
+                _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes)
             elif candidate != document:
                 raise ValueError("Source-only updates may change only the selected book")
         elif scope == "character-merge":
@@ -359,16 +396,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             from .manual_speaker_revision import validate_manual_speaker_revision
             added_voices = validate_manual_speaker_revision(
                 document, speaker_decision_inputs[path], candidate)
-            sidecar = path / "audition-scripts.json"
-            if added_voices and (sidecar.exists() or sidecar.is_symlink()):
-                from .voice_profile_refresh import audition_sidecar_rebind
-                sidecars.setdefault(path, {})[sidecar.name] = audition_sidecar_rebind(
-                    sidecar, source_fingerprint=fingerprint(document["source"]),
-                    cast_fingerprint_before=fingerprint(document["cast"]),
-                    cast_fingerprint_after=fingerprint(candidate["cast"]),
-                    voice_ids=[voice["id"] for voice in candidate["cast"]["voices"]])
-                names[path].append(sidecar.name)
-                original_hashes[path][sidecar.name] = _hash(sidecar)
+            _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes)
         if readiness(candidate)["errors"]:
             raise ValueError("Cannot publish an invalid speaker revision")
         if scope != "attribution" and not reserved and (reason := _render_active(path)):

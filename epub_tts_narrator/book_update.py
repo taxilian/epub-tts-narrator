@@ -368,9 +368,10 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None, keep_cast=False)
     about them retired. Existing cast records are kept and the delta adds only
     those the book lacks. Where the model now reads an unchanged context
     paragraph's speakers differently, a review issue is added instead of
-    changing it. With ``keep_cast`` (a re-read in a book another book continues
-    from) the cast stays exactly as saved: a changed paragraph whose new
-    speaker the book lacks keeps its saved segments and gets a review issue.
+    changing it. With ``keep_cast`` the cast stays exactly as saved: a changed
+    paragraph whose new speaker the book lacks keeps its saved segments and
+    gets a review issue. ``update_book`` no longer asks for it: a re-read adds
+    the speaker, also in a book later books continue from.
     ``delta`` is ``None`` when nothing needed the model. Returns
     the merged document; its update record is ``provenance.book_updates[-1]``.
     """
@@ -962,8 +963,9 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
                     # The book's own history: returning characters keep their voices.
                     series_registry=deepcopy(registry),
                     policy=config["performance_policy"], progress=progress)
-            document = merge_update(original, analyzed, comparison, epub_sha256=digest,
-                                    keep_cast=bool(reread) and related != [directory])
+            # A re-read may add a speaker the book lacks, also in a book later books continue
+            # from: publication appends it and refreshes their series history.
+            document = merge_update(original, analyzed, comparison, epub_sha256=digest)
             pending.complete_stage("analyzed", document)
         if resume_index <= 1:
             pending.begin_stage("speech-normalized-1")
