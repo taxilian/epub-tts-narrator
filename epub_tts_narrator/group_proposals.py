@@ -186,6 +186,7 @@ def propose_groups(document):
         character["group"] = group
         changes.append({"character_id": character["id"], "name": character["name"], "group": deepcopy(group)})
         _line_cues(rows, tags, texts, group, own, changes)
+    propose_murmurs(candidate, changes)
     return candidate, changes
 
 
@@ -237,6 +238,118 @@ def _line_cues(rows, tags, texts, group, own, changes):
             row["ensemble"] = dict(override, basis="explicit",
                                    evidence=[{"block_id": row["block_id"], "quote": quote}])
             changes.append({"segment_id": row["id"], "ensemble": deepcopy(row["ensemble"])})
+
+
+_MURMUR_CUE = re.compile(r"\b(?:murmur(?:ed|ing|s)?|hubbub|babble|babbling|buzz(?:ed|ing)?|chatter(?:ed|ing)?|"
+                         r"mutter(?:ed|ing)|swell(?:ed|ing)|chant(?:ed|ing)|clamou?r(?:ed|ing)?|"
+                         r"voices (?:rose|grew|swelled)|din)\b", re.IGNORECASE)
+_MURMUR_END = re.compile(r"\b(?:fell silent|died (?:away|down)|subsided|quieted|went quiet|silence fell|"
+                         r"stopped|ceased|faded)\b", re.IGNORECASE)
+_MURMUR_PAST = re.compile(r"\b(?:had (?:murmured|chanted|muttered)|no longer|not a (?:murmur|sound)|without a)\b",
+                          re.IGNORECASE)
+_SENTENCE = re.compile(r"[^.!?…]+[.!?…]?")
+_GENERIC = frozenset({"other", "others", "rest", "them", "they", "people", "voice", "voices", "group"})
+
+
+def _murmur_subject(sentence, groups, words):
+    """The group whose plural or collective word comes just before the cue ("the eunuchs murmured")."""
+    cue = _MURMUR_CUE.search(sentence)
+    before = _WORD.findall(sentence[:cue.start()])[-7:]
+    after = _WORD.findall(sentence[cue.end():])[:4]   # "a murmur of voices from the crowd"
+    for window in (before, after):
+        for index, word in enumerate(window):
+            folded = word.casefold()
+            several = folded in COLLECTIVE_NOUNS or (_plural_noun(folded) and folded.removesuffix("s") != folded)
+            if not several:
+                continue
+            if index >= 2 and window[index - 2].casefold() == "of" and window is before:
+                continue  # "the leader of the Grolims": one person
+            stem = folded.removesuffix("s")
+            for character in groups:
+                if stem in words[character["id"]] or folded in words[character["id"]]:
+                    return character
+    return None
+MURMUR_REACH = 8      # paragraphs a murmur may run before an end cue
+MURMUR_DEFAULT = 2    # paragraphs after its cue when the text never says it stops
+
+
+def propose_murmurs(document, changes):
+    """Add murmur spans under passages where the narration says a group's voices keep sounding."""
+    cast = document["cast"]
+    groups = [character for character in cast["characters"] if isinstance(character.get("group"), dict)]
+    if not groups:
+        return
+    roles = {role["id"]: role.get("character_id") for role in cast["roles"]}
+    segments = document["segments"]
+    blocks = document["source"]["blocks"]
+    chapter_of = {block["id"]: block["chapter_id"] for block in blocks}
+    order = [block["id"] for block in blocks]
+    place = {block_id: index for index, block_id in enumerate(order)}
+    by_block = {}
+    for row in segments:
+        by_block.setdefault(row["block_id"], []).append(row)
+    covered = set()
+    for row in segments:
+        if "murmur" in row:
+            covered.update(_span_ids(segments, row["id"], row["murmur"]["until"]))
+    words = {character["id"]: {word for word in _own_words(character)
+                               if len(word) > 3 and word not in _GENERIC} for character in groups}
+    for row in segments:
+        if row.get("kind") != "narration" or row["id"] in covered or "murmur" in row:
+            continue
+        for sentence in _SENTENCE.findall(row["text"]):
+            if not _MURMUR_CUE.search(sentence) or _MURMUR_PAST.search(sentence) or _MURMUR_END.search(sentence):
+                continue
+            group = _murmur_subject(sentence, groups, words)
+            if group is None:
+                continue
+            # A speech tag beside a line ("one of the others muttered.") is that line, not a bed.
+            spoken_here = any(other.get("kind") in SPOKEN for other in by_block[row["block_id"]])
+            if spoken_here and tag_subject(sentence) is not None:
+                continue
+            # The group's own speech tag ("the eunuchs murmured." after their line) is a line, not a bed.
+            own_lines = [other for other in by_block[row["block_id"]]
+                         if other.get("kind") in SPOKEN and roles.get(other.get("role_id")) == group["id"]]
+            if own_lines and not re.search(r"\b(?:repeat|repeating|again and again|echo)", sentence, re.IGNORECASE):
+                continue
+            quote = " ".join(sentence.split()).strip()
+            if not quote or quote not in row["text"]:
+                continue
+            until = _murmur_end(by_block, order, place, chapter_of, row["block_id"])
+            shape = ("swell" if re.search(r"\b(?:swell|rose|grew|growing|spread)", sentence, re.IGNORECASE)
+                     else "fade" if re.search(r"\b(?:fad|dying|died)", sentence, re.IGNORECASE) else "steady")
+            row["murmur"] = {"group": group["id"], "until": until, "shape": shape, "basis": "explicit",
+                             "evidence": [{"block_id": row["block_id"], "quote": quote[:200]}]}
+            if own_lines:
+                row["murmur"]["from_line"] = own_lines[0]["id"]
+            covered.update(_span_ids(segments, row["id"], until))
+            changes.append({"segment_id": row["id"], "murmur": dict(row["murmur"])})
+            break
+
+
+def _span_ids(segments, start, until):
+    ids = [row["id"] for row in segments]
+    if start not in ids or until not in ids:
+        return set()
+    return set(ids[ids.index(start):ids.index(until) + 1])
+
+
+def _murmur_end(by_block, order, place, chapter_of, block_id):
+    """The last segment of the paragraph where the murmur stops, within the chapter."""
+    start = place[block_id]
+    chapter = chapter_of[block_id]
+    last = block_id
+    for index in range(start, min(len(order), start + MURMUR_REACH + 1)):
+        candidate = order[index]
+        if chapter_of[candidate] != chapter or candidate not in by_block:
+            break
+        last = candidate
+        text = " ".join(row["text"] for row in by_block[candidate])
+        if index > start and _MURMUR_END.search(text):
+            break
+        if index - start >= MURMUR_DEFAULT and not any(_MURMUR_CUE.search(row["text"]) for row in by_block[candidate]):
+            break
+    return by_block[last][-1]["id"]
 
 
 def review_groups(directory, progress=print):

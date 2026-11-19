@@ -269,7 +269,10 @@ def collective_summary(bundle, chapters):
         elif isinstance(character.get("group"), dict):
             proposed.append({"name": character["name"], "proposed_voices": character["group"].get("proposed_voices"),
                              "proposed_mode": character["group"].get("proposed_mode")})
-    return {"cast": cast, "proposed": proposed, "lane_takes": lanes}
+    murmurs = sum(len(chapter.get("murmur_spans", [])) for chapter in chapters)
+    waiting = sorted({item["group"] for chapter in chapters for item in chapter.get("murmur_skipped", [])})
+    return {"cast": cast, "proposed": proposed, "lane_takes": lanes,
+            **({"murmurs": murmurs} if murmurs else {}), **({"murmurs_waiting": waiting} if waiting else {})}
 
 
 def make_plan(bundle, config):
@@ -364,8 +367,12 @@ def make_plan(bundle, config):
                 if not chunk["silent_control"]:
                     used.update(speaker["voice_id"] for speaker in speakers)
                 chunks.append(chunk)
+        from .murmur import plan_spans
+        murmur_spans, murmur_skipped = plan_spans(item["rows"], bundle["cast"])
         chapters.append({"number": number, "id": f"chapter-{number:04d}", "title": item["entry"]["title"],
-                         "script_path": item["entry"]["path"], "chunks": chunks})
+                         "script_path": item["entry"]["path"], "chunks": chunks,
+                         **({"murmur_spans": murmur_spans} if murmur_spans else {}),
+                         **({"murmur_skipped": murmur_skipped} if murmur_skipped else {})})
     return {"format": "audiobook-render-plan", "version": 1,
             "bundle_hash": bundle["bundle_hash"], "source_fingerprint": bundle["manifest"]["source_fingerprint"],
             "book": bundle["source"]["book"], "series_id": config["voices"]["series_id"],

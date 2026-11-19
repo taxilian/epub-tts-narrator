@@ -453,6 +453,10 @@ class _Validator:
                 self.error("provenance.bracket_delivery.warnings", "must match unmatched source bracket warnings")
         roles = self.cast(doc.get("cast"))
         self.segments(doc.get("segments"), roles)
+        rows = doc.get("segments") if isinstance(doc.get("segments"), list) else []
+        if any(isinstance(row, dict) and "murmur" in row for row in rows):
+            from .ensembles import validate_murmurs
+            validate_murmurs(self, doc)
         issues, _ = self.entries(doc.get("issues"), "issues")
         for i, issue in enumerate(issues):
             path = f"issues[{i}]"

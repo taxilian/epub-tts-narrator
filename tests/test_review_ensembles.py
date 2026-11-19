@@ -91,6 +91,30 @@ class GroupLineEditTests(unittest.TestCase):
         self.assertEqual(chunks["b3:0"]["segment"]["simultaneous_mode"], "layered")
 
 
+class ReviewMurmurTests(GroupLineEditTests):
+    def test_review_ui_adds_changes_and_removes_a_murmur_and_saves_it(self):
+        chorus = next(item["id"] for item in self.document["cast"]["characters"] if item["name"] == "the chorus")
+        group = next(item for item in self.document["cast"]["characters"] if item["id"] == chorus)
+        self.assertNotIn("group", group)
+        app = ReviewApp(self.path, self.document, revise_directories=revise_directories,
+                        related_directories=related_directories)
+        self.assertEqual([name for _, name in app.murmur_groups()], ["the chorus"], "a cast ensemble counts")
+        # A group is analysis's or a person's statement; mark it as a person would in the cast screen.
+        app.document["cast"]["characters"][[item["id"] for item in app.document["cast"]["characters"]].index(chorus)][
+            "group"] = {"size": None, "scale": None, "members": [], "basis": "user"}
+        app.info_segment_id = "b2:1"
+        self.assertEqual(app.murmur_groups(), [(chorus, "the chorus")])
+        ends = [segment_id for segment_id, _ in app.murmur_ends()]
+        self.assertEqual(ends[0], "b2:1")
+        self.assertTrue(app.set_murmur(group=chorus, until=ends[-1], shape="fade"))
+        self.assertIn("Murmur: the chorus", app.murmur_text())
+        self.assertTrue(app.set_murmur(level="medium"))
+        self.assertEqual(app.murmur_here()["level"], "medium")
+        self.assertTrue(app.set_murmur(remove=True))
+        self.assertIsNone(app.murmur_here())
+        self.assertFalse(app.set_murmur(shape="steady"), "a new murmur needs a group and an end")
+
+
 class LaneTakeTests(unittest.TestCase):
     def test_each_voice_of_a_line_said_together_has_its_own_takes(self):
         from epub_tts_narrator.review_tui_render import _acceptance_clips, _acceptance_lanes

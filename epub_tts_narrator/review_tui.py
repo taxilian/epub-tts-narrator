@@ -10,6 +10,7 @@ below (``--plain``, or without Textual) through ``handle_key``/``draw``.
 
 from __future__ import annotations
 
+from copy import deepcopy
 import hashlib
 import json
 import os
@@ -395,6 +396,50 @@ class ReviewApp:
         self._store_edit(edited)
         return True
 
+    # Crowd murmur --------------------------------------------------------------
+
+    def murmur_here(self):
+        """The murmur starting at the focused passage, or None."""
+        return deepcopy(self._segment(self.info_segment_id).get("murmur")) or None
+
+    def murmur_groups(self):
+        """``[(character id, name)]``: groups a murmur can be heard from (analysis's or a person's groups)."""
+        voices = self._voices_by_id()
+        return [(character["id"], character["name"]) for character in self.document["cast"]["characters"]
+                if character.get("group") or (voices.get(character["voice_id"], {}).get("ensemble") or {}).get("members")]
+
+    def murmur_ends(self, limit=30):
+        """``[(segment id, label)]``: this passage and the next ones of its chapter where a murmur may end."""
+        segments = self._effective_document()["segments"]
+        chapter_of = {block["id"]: block["chapter_id"] for block in self.document["source"]["blocks"]}
+        start = next(index for index, row in enumerate(segments) if row["id"] == self.info_segment_id)
+        chapter = chapter_of[segments[start]["block_id"]]
+        result = []
+        for row in segments[start:]:
+            if chapter_of[row["block_id"]] != chapter or len(result) >= limit:
+                break
+            text = " ".join(row["text"].split())
+            result.append((row["id"], text[:70] + ("…" if len(text) > 70 else "")))
+        return result
+
+    def set_murmur(self, **choice):
+        from .attribution_edits import edit_murmur
+        try:
+            edited = edit_murmur(self._segment(self.info_segment_id), **choice)
+        except ValueError as exc:
+            self.notice = str(exc)
+            return False
+        self._store_edit(edited)
+        return True
+
+    def murmur_text(self):
+        value = self.murmur_here()
+        if not value:
+            return ""
+        names = dict(self.murmur_groups())
+        return (f"Murmur: {names.get(value['group'], value['group'])} under this passage to {value['until']}, "
+                f"{value.get('shape', 'steady')}, {value.get('level', 'low')}")
+
     def voices_text(self):
         """One line for the details: how the focused line's several voices speak, or ''."""
         kind = self.voices_kind()
@@ -512,8 +557,8 @@ class ReviewApp:
             self._toggle_review()
         elif field == "takes":
             self._open_takes()
-        elif field == "voices":
-            self.notice = "Several voices are changed in the full-screen review (run review-ui without --plain)."
+        elif field in {"voices", "murmur"}:
+            self.notice = "Several voices and murmurs are changed in the full-screen review (run review-ui without --plain)."
 
     def _render_chapter(self) -> ChapterIndex:
         try:
@@ -892,6 +937,7 @@ class ReviewApp:
             ("speaker", "Speaker(s): " + speaker),
             ("direction", "Direction: " + (delivery["direction"] or "(none)")),
             *([("voices", self.voices_text())] if self.voices_text() else []),
+            *([("murmur", self.murmur_text())] if self.murmur_text() else []),
             ("review", "Review required: " + ("yes" if attribution["review_required"] else "no")),
             ("takes", "Takes: view and play rendered attempts"),
             (None, ""),

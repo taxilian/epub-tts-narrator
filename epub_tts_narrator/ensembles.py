@@ -241,7 +241,49 @@ def validate_group_proposal_revision(document: dict[str, Any], candidate: dict[s
                 and ("group" in before or after["group"].get("basis") != "analysis")):
             raise ValueError(f"A group proposal may only add an analysis group to {before.get('id')}")
     for before, after in zip(document["segments"], candidate["segments"]):
-        if _without(after, {"ensemble"}) != _without(before, {"ensemble"}) or (
-                after.get("ensemble") != before.get("ensemble")
-                and ("ensemble" in before or after["ensemble"].get("basis") not in {"explicit", "context"})):
+        if _without(after, {"ensemble", "murmur"}) != _without(before, {"ensemble", "murmur"}):
             raise ValueError(f"A group proposal may only add a line cue with source evidence to {before.get('id')}")
+        for key in ("ensemble", "murmur"):
+            if after.get(key) != before.get(key) and (
+                    key in before or after[key].get("basis") not in {"explicit", "context"}):
+                raise ValueError(f"A group proposal may only add a {key} with source evidence to {before.get('id')}")
+
+
+MURMUR_SHAPES = ("steady", "swell", "fade", "swell_fade")
+MURMUR_LEVELS = ("low", "medium")
+
+
+def validate_murmurs(check, document: dict[str, Any]) -> None:
+    """``segments[i].murmur``: a group's quiet talk under a span that ends with ``until``."""
+    segments = document.get("segments") if isinstance(document.get("segments"), list) else []
+    cast = document.get("cast") if isinstance(document.get("cast"), dict) else {}
+    characters = {item.get("id"): item for item in cast.get("characters", []) if isinstance(item, dict)}
+    blocks = {block.get("id"): block.get("chapter_id") for block in document.get("source", {}).get("blocks", [])
+              if isinstance(block, dict)}
+    position = {row.get("id"): index for index, row in enumerate(segments)
+                if isinstance(row, dict) and isinstance(row.get("id"), str)}
+    for index, row in enumerate(segments):
+        if not isinstance(row, dict) or "murmur" not in row:
+            continue
+        path = f"segments[{index}].murmur"
+        value = check.object(row["murmur"], path)
+        group = value.get("group")
+        if not isinstance(group, str) or group not in characters:
+            check.error(f"{path}.group", "must name a character of the cast")
+        until = value.get("until")
+        if not isinstance(until, str) or until not in position:
+            check.error(f"{path}.until", "must name a segment of the book")
+        elif (position[until] < index or blocks.get(segments[position[until]].get("block_id"))
+              != blocks.get(row.get("block_id"))):
+            check.error(f"{path}.until", "must be this segment or a later one in the same chapter")
+        if "shape" in value:
+            check.choice(value["shape"], set(MURMUR_SHAPES), f"{path}.shape")
+        if "level" in value:
+            check.choice(value["level"], set(MURMUR_LEVELS), f"{path}.level")
+        line = value.get("from_line")
+        if line is not None and (not isinstance(line, str) or line not in position
+                                 or segments[position[line]].get("kind") not in {"dialogue", "thought", "letter"}):
+            check.error(f"{path}.from_line", "must name a spoken segment")
+        check.choice(value.get("basis"), set(LINE_BASES), f"{path}.basis")
+        if value.get("basis") != "user" or "evidence" in value:
+            check.evidence(value.get("evidence"), f"{path}.evidence", required=value.get("basis") != "user")

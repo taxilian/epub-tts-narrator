@@ -119,6 +119,31 @@ def edit_ensemble(segment, voices_by_id, *, mode=None, members=None, lanes=None,
     return result
 
 
+def edit_murmur(segment, *, group=None, until=None, shape=None, level=None, remove=False):
+    """Return a segment with a person's crowd murmur starting here (or removed).
+
+    A new murmur needs ``group`` and ``until``; changing one keeps what is not
+    given. The span's other checks (a later segment of the same chapter, a cast
+    group) are the document contract's.
+    """
+    from .ensembles import MURMUR_LEVELS, MURMUR_SHAPES
+    result = deepcopy(segment)
+    if remove:
+        result.pop("murmur", None)
+        return result
+    current = deepcopy(segment.get("murmur") or {})
+    value = {key: current[key] for key in ("group", "until", "shape", "level", "from_line") if key in current}
+    for key, given in (("group", group), ("until", until), ("shape", shape), ("level", level)):
+        if given is not None:
+            value[key] = given
+    if not value.get("group") or not value.get("until"):
+        raise ValueError("A murmur needs a group and the passage where it ends")
+    if value.get("shape", "steady") not in MURMUR_SHAPES or value.get("level", "low") not in MURMUR_LEVELS:
+        raise ValueError("Unknown murmur shape or level")
+    result["murmur"] = dict(value, basis="user")
+    return result
+
+
 def edit_simultaneous_mode(segment, mode):
     """Return a line said by named characters together, entering ``mode`` (unison clears it)."""
     from .ensembles import SIMULTANEOUS_MODES

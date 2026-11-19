@@ -32,7 +32,7 @@ from .tui_widgets import (
 
 PASSAGE_CHARACTERS = 300
 CHAPTER_TITLE_CHARACTERS = 28
-_FIELD_KEYS = {"speaker": "e", "direction": "d", "voices": "v", "review": "r", "takes": "t"}
+_FIELD_KEYS = {"speaker": "e", "direction": "d", "voices": "v", "murmur": "m", "review": "r", "takes": "t"}
 _TROUBLE = ("Save failed", "Ignore save failed", "Could not", "Playback failed", "Checkpoint archive failed")
 
 
@@ -65,6 +65,7 @@ class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
         Binding("r,f4", "review", "Review flag", tooltip="Turn the passage's review flag on or off"),
         Binding("v", "voices", "Voices",
                 tooltip="For a group's line or a line said together: how its several voices speak"),
+        Binding("m", "murmur", "Murmur", tooltip="Add, change or remove a group's murmur under passages from here"),
         Binding("p", "play", "Play", tooltip="Play the passage's accepted take"),
         Binding("space", "stop", "Stop", show=False, tooltip="Stop playback"),
         Binding("greater_than_sign", "speed", "Speed",
@@ -364,6 +365,49 @@ class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
             else:
                 self.refresh_all(controller.set_line_voices(mode=mode))
         self.push_screen(ChoiceScreen("How do this line's voices speak?", modes, filterable=False), moded)
+
+    def action_murmur(self):
+        if self._passage() is None:
+            return
+        controller = self.controller
+        current = controller.murmur_here()
+        groups = controller.murmur_groups()
+        if not groups:
+            self._log("No character is a group yet; a group is proposed by analysis or set up in the cast screen.",
+                      "warning")
+            return
+        shapes = [("steady", "steady"), ("swell", "swell: it grows"), ("fade", "fade: it dies away"),
+                  ("swell_fade", "swell, then fade")]
+        levels = [("low", "low (about 24 dB under speech)"), ("medium", "medium (about 18 dB under speech)")]
+
+        def ended(group):
+            def chosen(until):
+                if until is None:
+                    return
+                self.push_screen(ChoiceScreen("How does it sound over the span?", shapes, filterable=False),
+                                 lambda shape: shape is not None and self.refresh_all(
+                                     controller.set_murmur(group=group, until=until, shape=shape)))
+            self.push_screen(ChoiceScreen("Where does the murmur end?", controller.murmur_ends()), chosen)
+
+        if current is None:
+            self.push_screen(ChoiceScreen("Whose murmur is heard from this passage?", groups, filterable=False),
+                             lambda group: group is not None and ended(group))
+            return
+        options = [("end", "Change where it ends"), ("shape", "Change how it sounds"), ("level", "Change its level"),
+                   ("remove", "Remove it")]
+
+        def chosen(action):
+            if action == "remove":
+                self.refresh_all(controller.set_murmur(remove=True))
+            elif action == "end":
+                ended(current["group"])
+            elif action == "shape":
+                self.push_screen(ChoiceScreen("How does it sound?", shapes, filterable=False),
+                                 lambda shape: shape is not None and self.refresh_all(controller.set_murmur(shape=shape)))
+            elif action == "level":
+                self.push_screen(ChoiceScreen("How loud is it?", levels, filterable=False),
+                                 lambda level: level is not None and self.refresh_all(controller.set_murmur(level=level)))
+        self.push_screen(ChoiceScreen(controller.murmur_text(), options, filterable=False), chosen)
 
     def action_review(self):
         if self._passage() is not None:

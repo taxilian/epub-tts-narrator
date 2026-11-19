@@ -542,6 +542,9 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
     chapter_label = f"{metadata.get('number', ordinal)} / {total}"
     identity = {"context": deepcopy(context), "chapter": metadata, "book": deepcopy(book),
                 "settings": settings, "clips": clip_identity, "ordinal": ordinal, "total_chapters": total}
+    if chapter.get("murmurs"):
+        # Crowd murmur beds (``murmur``): path-free keys and audio hashes.
+        identity["murmurs"] = deepcopy(chapter["murmurs"])
     key = digest(identity)
     folder = directory / key
     if folder.exists() or folder.is_symlink():
@@ -565,6 +568,11 @@ def prepare_chapter(chapter, clips, directory, *, book, render_settings, context
             normalize_take_pauses=settings["normalize_take_pauses"], take_timings=take_timings,
             level_takes=settings["level_takes"], take_level_tolerance_db=settings["take_level_tolerance_db"])
         composed.update(metadata)
+        if chapter.get("murmurs") and composed["frames"]:
+            from .murmur import apply_beds
+            notify(f"Mixing the crowd murmur under chapter {chapter_label}")
+            apply_beds(composed["wav_path"], composed["segments"], chapter["murmurs"], directory.parent,
+                       settings["sample_rate"])
         normalization = _normalize(Path(composed["wav_path"]), settings)
         encoded = None
         if composed["frames"]:

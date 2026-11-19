@@ -2099,6 +2099,23 @@ def _chapter_context(bundle, chapter, config, voices, engine_identity, verifier_
     }
 
 
+def _attach_murmurs(plan, voices, engine, verifier, config, work, *, notify=print):
+    """Make (render) or find (assemble) each planned murmur bed and attach it to its chapter.
+
+    A remote chapter service composes chapters without beds, so they are
+    attached only for local composition.
+    """
+    spans = [chapter for chapter in plan["chapters"] if chapter.get("murmur_spans") and not chapter.get("ignored")]
+    if not spans:
+        return
+    if (config.get("remote_chapters") or {}).get("url"):
+        notify("Crowd murmurs are mixed only in local chapter composition; this remote render leaves them out.")
+        return
+    from .murmur import prepare_chapter_murmurs
+    for chapter in spans:
+        prepare_chapter_murmurs(chapter, voices, engine, verifier, config, work, notify=notify)
+
+
 def _tagged_chapter(bundle, chapter):
     """The chapter with its track tag: ``N / total``, the spoken ending as the last track of its own total."""
     return dict(chapter, _ordinal=chapter["number"],
@@ -3400,6 +3417,7 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
         voice_lock.rmdir()
         voice_lock = None
         stop_if_requested()
+        _attach_murmurs(plan, voices, engine, verifier, config, work, notify=notify)
         if on_synthesis_ready is not None and chapter_coordinators is None:
             on_synthesis_ready()
         rendered, acceptance = [], []
@@ -3785,6 +3803,8 @@ def assemble(bundle, config, *, notify=print, chapters_only=False, alignment_ver
         ending = None  # the spoken ending, when it must be rendered first
         from .speech_cache import SpeechCache
         speech_cache = SpeechCache(work, voices)
+        # Murmur beds the render made are reused as they are; assemble records no new speech.
+        _attach_murmurs(plan, voices, None, None, config, work, notify=notify)
         for chapter, record in zip(plan["chapters"], records):
             if is_ending(chapter) and record is None:
                 ending = chapter
