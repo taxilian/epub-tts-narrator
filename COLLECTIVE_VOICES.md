@@ -1,6 +1,6 @@
 # Collective voices — design
 
-Status: **approved design (2026-11-19), not implemented.** The phases in §8 are the implementation plan; §9 lists the questions still open.
+Status: **approved design (2026-11-19), partly implemented** (see §10). The phases in §8 are the implementation plan; §9 lists the questions still open.
 
 A *collective voice* is one cast role heard as two or more voices: a chorus, a pair of twins, a crowd, a hive mind. This document surveys how the analyzed books under `runs/` present such speakers, what the project does today, and proposes a representation, an analysis rule set, review tools, a renderer recipe, and guards.
 
@@ -377,3 +377,25 @@ Analysis may *propose* group identity and per-line cues from evidence, just as i
    *Proposed: whole line only.* It is rare in the survey (one hive-mind passage).
 7. **Legend register** ("the elders said"). Should analysis propose a collective sound there?
    *Proposed: only when the tag itself says they speak together* ("in unison", "chorused").
+
+## 10. Implementation status (branch `claude/collective-voices`)
+
+Done:
+- **Mixing** (phase 1): lane recipes `tight/loose/crowd/swell/babble/echo/lead` (`renderer/lane_mix.py`), onset alignment, loudness matching under a peak ceiling, censorship over offset lanes. Version-1 mixes restore exactly and are re-mixed from cached takes on the next render.
+- **Format and renderer** (phase 2): `group`, `ensemble`, `member_of`, segment `ensemble`, `simultaneous_mode` (`ensembles.py`, `FORMAT.md`). `renderer/ensemble_plan.py` resolves every mode in `make_plan`, with performers in chunk identity. The chapter service checks resolutions without the cast.
+- **Casting and readiness**: casting offers and auditions member voices; pool voices follow the group's accent; `plan` reports `collective_voices`; `render` names uncast proposals.
+- **Cast screen** `C`: voice count, mode, mix, named members, decline. Published through revision scope `ensembles`; new pool voices are described separately and designed like any voice.
+- **Guards** (§6.1): `group_cues.py` flags `plural_tag`, `singular_tag` and `invented_member`. They appear as narrator-read issues and in `verify-attribution`'s risk set.
+- **Analysis proposals** (§5.2), made from tags without a model call (`group_proposals.py`): group, size, scale, voice count, mode, and line `lanes`/`mode`/`slot`. They run in fresh narrator reads, and on rerun through revision scope `group-proposals`.
+- **Series**: ensemble, member and group IDs are remapped; a later book carries an inherited ensemble's pool voices.
+
+Differs from the plan above:
+- Proposals come from speaker tags in code (like `speech_cues`), not from a ledger `kind: group` plus a model group check.
+- A single tag on a one-person name stays a flag, never a proposal.
+
+Not done yet:
+- the crowd murmur bed (§5.7);
+- `review-ui` per-line mode, member and lanes edits, and `simultaneous_mode` editing;
+- per-lane takes in the run shell `TakesScreen`;
+- a model-backed group check for groups whose tags are ambiguous;
+- promotion of a pool voice to a named character.

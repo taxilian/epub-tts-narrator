@@ -31,7 +31,7 @@ epub-tts-narrator/
 ├── RENDERER.md               # renderer manual (config, casting, locks, caching)
 ├── REMOTE_RENDERING.md       # remote/distributed rendering manual
 ├── TUI_DESIGN.md             # phased plan for full-screen terminal UIs (casting and render shell done)
-└── COLLECTIVE_VOICES.md      # approved design, not implemented: group roles heard as several voices (ensembles, crowd murmur)
+└── COLLECTIVE_VOICES.md      # approved design + status (§10): group roles heard as several voices (ensembles, crowd murmur)
 ```
 
 ## WHERE TO LOOK
