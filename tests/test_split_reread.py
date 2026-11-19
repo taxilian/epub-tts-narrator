@@ -201,6 +201,30 @@ class ReReadTests(unittest.TestCase):
                          set())
         self.assertEqual((self.book / "manifest.json").read_bytes(), published)
 
+    def test_a_reread_naming_a_new_speaker_in_a_continued_book_keeps_the_saved_lines(self):
+        from epub_tts_narrator.book_update import merge_update, reread_comparison
+        saved = self.misread_book()
+        reasons = misread_blocks(saved)
+        broken = next(iter(reasons))
+        comparison = reread_comparison(saved["source"], reasons)
+        # The re-read gives the paragraph to someone the book's cast lacks; a later book
+        # continues from this one, so the cast must stay exactly as saved.
+        delta = deepcopy(saved)
+        newcomer = {"id": "role_newcomer", "kind": "dialogue", "character_id": "char_newcomer",
+                    "voice_id": "voice_newcomer"}
+        delta["cast"]["characters"].append({**deepcopy(delta["cast"]["characters"][0]),
+                                            "id": "char_newcomer", "name": "Newcomer", "voice_id": "voice_newcomer"})
+        delta["cast"]["roles"].append(newcomer)
+        delta["cast"]["voices"].append({**deepcopy(delta["cast"]["voices"][0]), "id": "voice_newcomer"})
+        delta["issues"] = []
+        for row in delta["segments"]:
+            if row["block_id"] == broken and row.get("role_id") is not None and row["kind"] == "dialogue":
+                row["role_id"], row["voice_id"] = newcomer["id"], newcomer["voice_id"]
+        merged = merge_update(saved, delta, comparison, keep_cast=True)
+        self.assertEqual([row for row in merged["segments"] if row["block_id"] == broken],
+                         [row for row in saved["segments"] if row["block_id"] == broken])
+        self.assertEqual(merged["cast"]["roles"], saved["cast"]["roles"])
+
     def misread_book(self):
         epub = make_serial_epub(self.root / "book.epub", "Tide", "book-tide", [("One", self.PARAGRAPHS)])
         with patch.dict(quote_spans._FINDERS, {"double": old_double_quotes}):

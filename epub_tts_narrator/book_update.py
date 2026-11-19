@@ -402,7 +402,10 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None, keep_cast=False)
     cast["characters"].extend(appended_characters)
     cast["roles"].extend(appended_roles)
     cast["voices"].extend(appended_voices)
-    role_voice = {role["id"]: role["voice_id"] for role in cast["roles"]}
+    # A delta role the cast lacks (only with ``keep_cast``) keeps its own voice here, so its
+    # paragraph is found below and keeps its saved segments.
+    role_voice = {**{role["id"]: role["voice_id"] for role in new_cast["roles"]},
+                  **{role["id"]: role["voice_id"] for role in cast["roles"]}}
 
     chapter_ids = {block["id"]: block["chapter_id"] for block in source["blocks"]}
     changed = set(comparison["changed_blocks"])
