@@ -66,6 +66,15 @@ class GroupProposalTests(unittest.TestCase):
             [("“Korodullin,” ", "nobles"), ("they replied.", None)]])
         self.assertIn("nobles", groups)
 
+    def test_a_band_named_after_its_leader_is_proposed_from_one_plural_tag(self):
+        # "band", "troop", "retinue" name several people; "those behind Mara" is several of them speaking.
+        _, groups, _, _ = proposed([("mara", "Mara", ()), ("band", "Mara's band", ())], [
+            [("“The Hills!” ", "band"), ("those behind Mara exclaimed.", None)],
+            [("“To war! To war!”", "band")],
+            [("“Hail,” ", "mara"), ("Mara said.", None)]])
+        self.assertEqual(set(groups), {"band"})
+        self.assertEqual(groups["band"]["evidence"][0]["quote"], "those behind Mara exclaimed.")
+
     def test_a_person_or_an_earlier_proposal_is_never_overwritten_and_it_is_idempotent(self):
         document = build("groups", "Groups", [("chorus", "eunuch chorus", ())],
                          [[("“Welcome,” ", "chorus"), ("the chorus replied.", None)]])

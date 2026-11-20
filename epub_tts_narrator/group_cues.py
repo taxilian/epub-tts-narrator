@@ -33,14 +33,15 @@ _INVERTED = re.compile(rf"^(?:{SPEECH_VERBS}|{_GROUP_VERBS})\s+", re.IGNORECASE)
 _WORD = re.compile(r"[^\W\d_][\w'’-]*")
 _JOINT = re.compile(r"\b(?:in unison|as one|in chorus|together|all at once|simultaneously)\b", re.IGNORECASE)
 _PLURAL_START = re.compile(
-    r"^(?:they|we|both|all|everyone|everybody|several|many|some of|a few|half of|the others|the rest|"
+    r"^(?:they|we|those|these|both|all|everyone|everybody|several|many|some of|a few|half of|the others|the rest|"
     r"the (?:two|three|four|five|six|seven|eight|nine|ten|dozen|pair|twins?|whole|assembled|gathered))(?=[\s,.;:!?]|$)",
     re.IGNORECASE)
 _MEMBER_START = re.compile(r"^(?:one of|another|someone|somebody|a voice|one\b|the (?:first|second|third|other)\b)",
                            re.IGNORECASE)
 _SINGULAR_PRONOUN = re.compile(r"^(?:he|she|i)\b", re.IGNORECASE)
 COLLECTIVE_NOUNS = frozenset("""crowd throng chorus choir council assembly mob congregation company group gathering
-audience herd flock pack legion legions men women people children folk crew guards soldiers""".split())
+audience herd flock pack legion legions men women people children folk crew guards soldiers band troop troupe
+horde squad retinue entourage""".split())
 _ARTICLES = frozenset({"the", "a", "an"})
 
 
