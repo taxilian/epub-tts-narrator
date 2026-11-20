@@ -182,7 +182,8 @@ def detail_sections(row, rows, status, note):
         ("Status", status + (f" — {note}" if note else ""), ""),
         ("Voice ID", row["voice_id"], ""),
         ("Characters", ", ".join(row.get("characters", [])) or "—", ""),
-        ("Your notes", notes_text, "" if derived else "n"),
+        ("Your notes", "(the group's notes: add them to the group)" if row.get("member_of") else notes_text,
+         "" if derived or row.get("member_of") else "n"),
         ("Pronunciations", "; ".join(f"{word}: {reading}" for word, reading in (row.get("pronunciations") or {}).items())
          or "(no names to pronounce: w types a word)", "w"),
         *([("Check", conflict, "")] if conflict else []),
@@ -213,6 +214,22 @@ MODE_WORDS = {
     "staggered": "the same words, voices entering one after another",
     "layered": "one clear voice with the others under it",
 }
+
+
+def group_note(row, rows_by_id):
+    """The list's short note for a group: its voices once set up, else that it is proposed (C sets it up)."""
+    chosen, group = row.get("ensemble"), row.get("group")
+    if row.get("member_of"):
+        lead = rows_by_id.get(row["member_of"])
+        return f"one of {label(lead) if lead else 'a group'}'s voices"
+    if chosen:
+        if chosen.get("mode") == "single":
+            return ""
+        return f"group of {1 + len(chosen.get('members', []))} voices, {chosen.get('mode')}"
+    if group:
+        count = group.get("proposed_voices")
+        return f"proposed group{f' of {count}' if count else ''}: C sets up its voices"
+    return ""
 
 
 def ensemble_text(row, rows_by_id):
@@ -348,12 +365,27 @@ class CastController:
         return voice_status(row, self.jobs.active_scopes("voice"))
 
     def visible(self):
+        """``[(row, status, note)]`` as the list shows them: a group's voices right after the group."""
         active = self.jobs.active_scopes("voice")
-        result = [(row, *voice_status(row, active)) for row in self._rows]
+        by_id = {row["voice_id"]: row for row in self._rows}
+        result = []
+        for row in self._rows:
+            status, note = voice_status(row, active)
+            result.append((row, status, "; ".join(part for part in (group_note(row, by_id), note) if part)))
         result = [item for item in result if self.filter.matches(item[0], item[1])]
         if self.filter.by_status:
             result.sort(key=lambda item: (STATUSES.index(item[1]), label(item[0]).casefold()))
-        return result
+            return result
+        shown = {item[0]["voice_id"] for item in result}
+        members = {}
+        for item in result:
+            if item[0].get("member_of") in shown:
+                members.setdefault(item[0]["member_of"], []).append(item)
+        ordered = []
+        for item in result:
+            if item[0].get("member_of") not in shown:
+                ordered += [item, *members.get(item[0]["voice_id"], [])]
+        return ordered
 
     def counts(self):
         active = self.jobs.active_scopes("voice")
@@ -582,6 +614,10 @@ class CastController:
         """The cast character whose own voice this row is; merging needs one."""
         found = next((character for character in self.session.bundle["cast"]["characters"]
                       if character["voice_id"] == row["voice_id"]), None)
+        if found is None and row.get("member_of"):
+            lead = self.row(row["member_of"])
+            raise ValueError(f"{label(row)} is one of {label(lead) if lead else 'a group'}'s voices, not a character: "
+                             "choose the group to merge or rename it, or C to change its voices")
         if found is None:
             raise ValueError(f"{label(row)} is not a character's own voice (narration or a changed-voice state), "
                              "so it cannot be merged or renamed")
@@ -675,14 +711,27 @@ class CastController:
         return self.jobs.submit(f"Hear {label(row)}'s " + ("murmur" if murmur else "voices"), run,
                                 scope={"voice": [row["voice_id"]]})
 
+    def session_for(self, directory):
+        """A casting session on the saved book at ``directory`` (after a change this screen published)."""
+        from .bundle import load_bundle
+        from .casting import CastingSession
+        return CastingSession(load_bundle(directory), self.session.config, notify=self.log)
+
     def save_ensemble(self, plan):
         """Publish a person's ensemble choice; the cast reopens with its voices to cast."""
         if any(job.active for job in self.jobs.jobs()):
             raise ValueError("Wait for the running and queued jobs to finish before changing a group's voices")
 
         def run():
-            from .ensemble_command import apply
+            from .ensemble_command import apply, describe_new_voices
             apply(plan, progress=self.log)
+            if plan.added:
+                # New voices start as the group's voice with one small variation; the model tells them apart.
+                fresh = self.session_for(plan.path)
+                try:
+                    describe_new_voices(plan, fresh, config_path=self.config_path, progress=self.log)
+                finally:
+                    fresh.close()
             self.reopen = True
             self.log(f"Saved {plan.summary}; reopening the cast")
         return self.jobs.submit(f"Several voices for {plan.name}", run, scope={"voice": []})

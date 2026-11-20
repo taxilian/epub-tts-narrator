@@ -43,3 +43,13 @@ Do not imitate shouting, repeated-letter hissing, sobbing or other extreme deliv
 These invented scripts will never enter the audiobook or be claimed as quotations.
 Return exactly {"scripts":[{"text":"speech only","reason":"brief casting rationale"}]}.
 """
+
+
+# Added only for a group's pool voice (``group_voice`` in the request), so other requests keep their identity.
+GROUP_MEMBER = """
+This voice is one unnamed member of a group character (group_voice: the group's
+name, this voice's number and how many voices the group has; characters, roles
+and short_speech_examples describe the group). Write what one member of that
+group could naturally say on their own, in the first person singular, in the
+group's setting and speech style. Do not speak for the whole group.
+"""

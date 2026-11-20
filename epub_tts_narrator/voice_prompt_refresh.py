@@ -7,8 +7,9 @@ import unicodedata
 from .analysis_progress import analysis_cache_directory
 from .attribution_review import _bounded_map
 from .pipeline import CachedRequests, fingerprint
+from .ensembles import pool_member
 from .voice_contrast import contrast_findings
-from .voice_refresh_prompts import LISTENER_NOTES, SYSTEM
+from .voice_refresh_prompts import GROUP_VOICE, LISTENER_NOTES, SYSTEM
 
 
 VERSION = 1
@@ -107,9 +108,12 @@ def refresh_voice_descriptions(bundle, requests, *, canonical_id=lambda value: v
         primary = target if target in profiles else voices[0]
         profile = _record_context(profiles[primary], blocks)
         profile["id"] = target
+        # A group's pool voice has no character of its own: its group stands behind it.
+        member = pool_member(bundle["cast"], primary)
+        context = [*aliases, member["group"]] if member is not None else aliases
         characters = [_record_context(character, blocks) for character in bundle["cast"]["characters"]
-                      if character["voice_id"] in aliases]
-        roles = [deepcopy(role) for role in bundle["cast"]["roles"] if role["voice_id"] in aliases]
+                      if character["voice_id"] in context]
+        roles = [deepcopy(role) for role in bundle["cast"]["roles"] if role["voice_id"] in context]
         prior = current_prompts.get(target)
         if prior is None:
             prior = next((current_prompts[alias] for alias in aliases if alias in current_prompts),
@@ -124,6 +128,12 @@ def refresh_voice_descriptions(bundle, requests, *, canonical_id=lambda value: v
                                                      if any(voice in aliases for voice in finding["voice_ids"])]),
                       "current_prompt": prior, "source_evidence": evidence,
                       "source_fingerprint": bundle["manifest"]["source_fingerprint"]})
+        if member is not None:
+            # The group's other voices as they are described now, so this one is told apart from them.
+            tasks[-1]["group_voice"] = {
+                "group": member["character"]["name"], "voice": member["number"], "voices": member["voices"],
+                "other_voices": [current_prompts.get(other) or profiles[other]["description"]
+                                 for other in member["others"] if other in profiles]}
         notes = next((listener_notes[voice] for voice in [target, *aliases] if listener_notes.get(voice)), None)
         if notes:
             tasks[-1]["listener_notes"] = deepcopy(notes)
@@ -132,6 +142,8 @@ def refresh_voice_descriptions(bundle, requests, *, canonical_id=lambda value: v
 
     def refresh(payload, cancelled):
         system = SYSTEM + LISTENER_NOTES if "listener_notes" in payload else SYSTEM
+        if "group_voice" in payload:
+            system += GROUP_VOICE
         value = requests.run(system, payload, validate_description, cancelled=cancelled)
         progress(f"Refreshed voice prompt: {payload['voice']['id']}")
         return payload["voice"]["id"], value

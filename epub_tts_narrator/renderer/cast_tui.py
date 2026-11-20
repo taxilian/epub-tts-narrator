@@ -317,7 +317,10 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
             summary += " · playing (space stops)"
         summary += " · " + playback_speed.help_text(controller.player)
         self.sub_title = summary
-        visible = [(row, label(row), status, note.splitlines()[0] if note else "")
+        # A group's voices are listed under it, indented (sorted by status, each stands alone).
+        indent = "" if controller.filter.by_status else "  └ "
+        visible = [(row, (indent if row.get("member_of") else "") + label(row), status,
+                    note.splitlines()[0] if note else "")
                    for row, status, note in controller.visible()]
         table = self.query_one("#voices", DataTable)
         # Long names (a changed-voice state) and notes are cut to the table's own width, so it stays
@@ -565,6 +568,11 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         if row.get("derived_from"):
             self.notify("A changed voice shares its main voice's notes; add notes to the main voice",
                         severity="warning")
+            return
+        if row.get("member_of"):
+            lead = self.controller.row(row["member_of"])
+            self.notify(f"Notes are about a character: add them to {label(lead) if lead else 'the group'}. "
+                        "To change how this one voice sounds, edit its description (e)", severity="warning")
             return
         current = self.controller.notes_text(row)
         help_text = ("What you know about this character, even beyond what this book has revealed so far. "

@@ -8,7 +8,7 @@ import unicodedata
 
 from .analysis_progress import analysis_cache_directory
 from .attribution_review import _bounded_map
-from .audition_prompts import EXTRA_PROMPT_VERSION, EXTRA_SYSTEM, PROMPT_VERSION, SYSTEM
+from .audition_prompts import EXTRA_PROMPT_VERSION, EXTRA_SYSTEM, GROUP_MEMBER, PROMPT_VERSION, SYSTEM
 from .pipeline import CachedRequests, fingerprint, write_json
 from .provider import ProviderError
 
@@ -87,7 +87,14 @@ def _saved_extras(bundle):
 
 
 def _voice_context(bundle, aliases):
-    """The characters, roles and short attributed lines behind one voice group."""
+    """The characters, roles and short attributed lines behind one voice group.
+
+    A group's pool voice has no character of its own: its group's character,
+    roles and lines stand behind it (it is one of that group's members).
+    """
+    from .ensembles import pool_member
+    members = [pool_member(bundle["cast"], voice) for voice in aliases]
+    aliases = [*aliases, *[member["group"] for member in members if member is not None]]
     people = [character for character in bundle["cast"]["characters"] if character["voice_id"] in aliases]
     roles = [role for role in bundle["cast"]["roles"] if role["voice_id"] in aliases]
     examples = []
@@ -122,7 +129,20 @@ def audition_preparation_pending(document):
     return bool(_pending({"cast": document["cast"], "manifest": {"provenance": document["provenance"]}}))
 
 
-def _voice_name(people, roles, voice):
+def _group_voice(bundle, voice):
+    """``{"group", "voice", "voices"}`` for a group's pool voice (sent with its requests), else None."""
+    from .ensembles import pool_member
+    member = pool_member(bundle["cast"], voice)
+    if member is None:
+        return None
+    return {"group": member["character"]["name"], "voice": member["number"], "voices": member["voices"]}
+
+
+def _voice_name(people, roles, voice, bundle=None):
+    from .ensembles import pool_label
+    pool = pool_label(bundle["cast"], voice) if bundle is not None else None
+    if pool is not None:
+        return pool[:160]
     names = list(dict.fromkeys(person["name"] for person in people if person.get("name")))
     label = ", ".join(names) if names else ("Narrator" if any(role.get("kind") == "narration" for role in roles) else voice)
     return "".join(" " if unicodedata.category(char).startswith("C") else char for char in label)[:160]
@@ -221,11 +241,15 @@ def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice
                    "book": bundle["source"]["book"], "voice": profile,
                    "characters": people, "roles": roles, "short_speech_examples": examples,
                    "source_fingerprint": bundle["manifest"]["source_fingerprint"]}
-        tasks.append((aliases, payload, _voice_name(people, roles, voice)))
+        group_voice = _group_voice(bundle, voice)
+        if group_voice is not None:
+            payload["group_voice"] = group_voice
+        tasks.append((aliases, payload, _voice_name(people, roles, voice, bundle)))
     def create(task, cancelled):
         aliases, payload, name = task
         try:
-            script = requests.run(SYSTEM, payload, validate_script, cancelled=cancelled)
+            system = SYSTEM + GROUP_MEMBER if "group_voice" in payload else SYSTEM
+            script = requests.run(system, payload, validate_script, cancelled=cancelled)
         except (ProviderError, ValueError) as error:
             if not allow_incomplete:
                 raise
@@ -301,7 +325,10 @@ def _prepare_extras(working, requests, groups, profiles, pending, extras, count,
                    "characters": people, "roles": roles, "short_speech_examples": examples,
                    "existing_scripts": existing, "count": missing,
                    "source_fingerprint": working["manifest"]["source_fingerprint"]}
-        tasks.append((aliases, payload, _voice_name(people, roles, voice)))
+        group_voice = _group_voice(working, voice)
+        if group_voice is not None:
+            payload["group_voice"] = group_voice
+        tasks.append((aliases, payload, _voice_name(people, roles, voice, working)))
     if not tasks:
         return extras
     if requests is None:
@@ -314,7 +341,8 @@ def _prepare_extras(working, requests, groups, profiles, pending, extras, count,
         def validate(value):
             return validate_extra_scripts(value, count=payload["count"], existing=payload["existing_scripts"])
         try:
-            created = requests.run(EXTRA_SYSTEM, payload, validate, cancelled=cancelled)
+            system = EXTRA_SYSTEM + GROUP_MEMBER if "group_voice" in payload else EXTRA_SYSTEM
+            created = requests.run(system, payload, validate, cancelled=cancelled)
         except (ProviderError, ValueError) as error:
             detail = str(error)[:2000] or type(error).__name__
             progress(f"Extra reference scripts not prepared for {name}; its voice will have fewer clips: {detail}")

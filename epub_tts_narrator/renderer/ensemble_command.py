@@ -44,6 +44,7 @@ class EnsemblePlan:
     candidate: dict
     name: str
     summary: str
+    added: tuple = ()  # new pool voices, described properly once saved (``describe_new_voices``)
 
 
 def _load(bundle):
@@ -152,7 +153,8 @@ def plan_ensemble(bundle, voice_id, *, voices, mode, mix=None, named=()):
     candidate = _with_ensemble(document, voice_id, members, mode, mix)
     summary = (f"{character['name']}: {voices} voices ({len(named)} named, {len(pool)} pool), {mode}"
                + (f", mixed {mix}" if mix else ""))
-    return EnsemblePlan(path, receipt, candidate, character["name"], summary)
+    added = tuple(member for member, _ in pool if member not in by_id)
+    return EnsemblePlan(path, receipt, candidate, character["name"], summary, added)
 
 
 def plan_decline(bundle, voice_id):
@@ -166,6 +168,27 @@ def plan_decline(bundle, voice_id):
     candidate["cast"]["voices"] = [voice for voice in voices if voice.get("member_of") != voice_id]
     return EnsemblePlan(path, receipt, candidate, character["name"],
                         f"{character['name']}: one voice (the group's own); not proposed again")
+
+
+def describe_new_voices(plan, session, *, config_path=None, progress=print):
+    """Have the analysis model describe a saved plan's new pool voices so they sound apart.
+
+    ``session`` is a casting session on the saved book. Each new voice gets its
+    group's context and the other voices' descriptions (``voice_prompt_refresh``
+    ``group_voice``) and a fresh audition script. Without a usable analysis
+    model the simple variations stay; ``r`` rewrites a voice later. True when
+    they were described.
+    """
+    from ..provider import ProviderError
+    if not plan.added:
+        return False
+    try:
+        session.refresh_prompts(voice_ids=list(plan.added), config_path=config_path)
+    except (ProviderError, ValueError, OSError) as error:
+        progress(f"Kept simple descriptions for {plan.name}'s new voices ({error}); r rewrites one with the model")
+        return False
+    progress(f"Described {len(plan.added)} new voice(s) for {plan.name} so they sound apart; e edits one")
+    return True
 
 
 def apply(plan, *, progress=print):

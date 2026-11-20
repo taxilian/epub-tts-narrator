@@ -59,6 +59,34 @@ def lanes_of(voice: dict[str, Any]) -> list[str]:
     return [voice["id"], *value.get("members", [])]
 
 
+def pool_member(cast: dict[str, Any], voice_id: str) -> dict[str, Any] | None:
+    """What a pool voice belongs to: ``{group, character, number, voices, others}``, else None.
+
+    ``group`` is the group's own voice (voice 1), ``character`` the group's
+    cast entry, ``number`` this voice's place (2 onward, as the cast screen
+    names it: "the chorus, voice 2"), ``voices`` the ensemble's size and
+    ``others`` the ensemble's other voice IDs, lead first.
+    """
+    voices = {voice.get("id"): voice for voice in cast.get("voices", []) if isinstance(voice, dict)}
+    lead_id = (voices.get(voice_id) or {}).get("member_of")
+    character = next((item for item in cast.get("characters", []) if item.get("voice_id") == lead_id), None)
+    if not lead_id or character is None:
+        return None
+    members = list((ensemble(voices.get(lead_id)) or {}).get("members", []))
+    return {"group": lead_id, "character": character,
+            "number": members.index(voice_id) + 2 if voice_id in members else None,
+            "voices": 1 + len(members),
+            "others": [lead_id, *[member for member in members if member != voice_id]]}
+
+
+def pool_label(cast: dict[str, Any], voice_id: str) -> str | None:
+    """"the chorus, voice 2" for a pool voice, else None."""
+    member = pool_member(cast, voice_id)
+    if member is None:
+        return None
+    return f"{member['character']['name']}, voice {member['number'] or '?'}"
+
+
 def _positive(value: Any) -> bool:
     return type(value) is int and value > 0
 

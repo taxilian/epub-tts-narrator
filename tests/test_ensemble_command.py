@@ -81,6 +81,14 @@ class EnsembleCommandTests(unittest.TestCase):
                                                            "mix": "swell", "basis": "user"})
         self.assertNotIn(first[2], {voice["id"] for voice in document["cast"]["voices"]})
 
+    def test_a_plan_names_only_the_voices_it_adds(self):
+        first = plan_ensemble(load_bundle(self.path), self.chorus, voices=3, mode="pool")
+        self.assertEqual(first.added, (f"{self.chorus}-pool-2", f"{self.chorus}-pool-3"))
+        apply(first, progress=lambda _: None)
+        self.assertEqual(plan_ensemble(load_bundle(self.path), self.chorus, voices=3, mode="unison").added, ())
+        self.assertEqual(plan_ensemble(load_bundle(self.path), self.chorus, voices=4, mode="pool").added,
+                         (f"{self.chorus}-pool-4",))
+
     def test_a_named_character_can_be_one_of_the_voices(self):
         apply(plan_ensemble(load_bundle(self.path), self.chorus, voices=3, mode="alternate", named=[self.mara]),
               progress=lambda _: None)
@@ -172,6 +180,95 @@ class EnsembleDetailsTests(unittest.TestCase):
         self.assertEqual(ensemble_text({}, rows), "")
 
 
+class NewVoiceDescriptionTests(unittest.TestCase):
+    """Saving a group's new voices has the model describe them apart; without a model the simple ones stay."""
+
+    def setUp(self):
+        from types import SimpleNamespace
+        from cast_tui_fixtures import FakePlayer, FakeSession
+        from epub_tts_narrator.renderer.cast_tui_model import CastController
+        self.controller = CastController(FakeSession(), FakePlayer(), describe_error=str)
+        self.addCleanup(self.controller.close)
+        self.refreshed, self.closed, self.fail = [], [], None
+        test = self
+
+        class Session:
+            def refresh_prompts(self, *, voice_ids, config_path=None):
+                if test.fail:
+                    raise test.fail
+                test.refreshed.append(voice_ids)
+
+            def close(self):
+                test.closed.append(True)
+        self.controller.session_for = lambda directory: Session()
+        self.plan = SimpleNamespace(name="the chorus", summary="the chorus: 3 voices", path="book", hashes={},
+                                    candidate={}, added=("v-pool-2", "v-pool-3"))
+
+    def save(self):
+        from unittest.mock import patch
+        with patch("epub_tts_narrator.renderer.ensemble_command.apply"):
+            self.controller.save_ensemble(self.plan)
+            self.controller.jobs.wait_idle(5)
+        return " ".join(text for _, _, text in self.controller.messages)
+
+    def test_new_voices_are_described_by_the_model_once_saved(self):
+        log = self.save()
+        self.assertEqual(self.refreshed, [["v-pool-2", "v-pool-3"]])
+        self.assertEqual(self.closed, [True])
+        self.assertIn("Described 2 new voice(s) for the chorus so they sound apart", log)
+        self.assertTrue(self.controller.reopen)
+
+    def test_without_a_model_the_group_is_still_saved_with_simple_descriptions(self):
+        self.fail = ValueError("Voice prompt refresh needs the configured analysis model")
+        log = self.save()
+        self.assertIn("Kept simple descriptions for the chorus's new voices", log)
+        self.assertTrue(self.controller.reopen)
+
+    def test_a_change_that_adds_no_voices_asks_nothing(self):
+        self.plan.added = ()
+        self.save()
+        self.assertEqual((self.refreshed, self.closed), ([], []))
+
+
+class GroupListTests(unittest.TestCase):
+    """The cast list shows a group's voices under it, and which groups are proposed."""
+
+    def setUp(self):
+        from cast_tui_fixtures import FakePlayer, FakeSession, voice_row
+        from epub_tts_narrator.renderer.cast_tui_model import CastController
+        chorus = voice_row("v-chorus", "the chorus") | {
+            "ensemble": {"members": ["v-pool-2", "v-pool-3"], "mode": "pool", "basis": "user"}}
+        crowd = voice_row("v-crowd", "the crowd") | {"group": {"proposed_voices": 5, "proposed_mode": "unison"}}
+        pool = [voice_row(voice, f"the chorus, voice {voice[-1]}") | {"member_of": "v-chorus", "characters": []}
+                for voice in ("v-pool-2", "v-pool-3")]
+        session = FakeSession(rows=[chorus, voice_row("v-mara", "Mara"), crowd, *pool])
+        session.bundle = {"cast": {"characters": [{"id": "c-chorus", "name": "the chorus",
+                                                   "voice_id": "v-chorus"}]}}
+        self.controller = CastController(session, FakePlayer(), describe_error=str)
+        self.addCleanup(self.controller.close)
+        self.controller.refresh()
+
+    def listed(self):
+        return [(row["voice_id"], note) for row, _, note in self.controller.visible()]
+
+    def test_a_groups_voices_follow_it_and_each_says_whose_it_is(self):
+        self.assertEqual(self.listed(), [
+            ("v-chorus", "group of 3 voices, pool; no voice yet; g generates one"),
+            ("v-pool-2", "one of the chorus's voices; no voice yet; g generates one"),
+            ("v-pool-3", "one of the chorus's voices; no voice yet; g generates one"),
+            ("v-mara", "no voice yet; g generates one"),
+            ("v-crowd", "proposed group of 5: C sets up its voices; no voice yet; g generates one")])
+
+    def test_sorting_by_status_lists_every_voice_on_its_own(self):
+        self.controller.filter.by_status = True
+        self.assertEqual(len(self.listed()), 5)
+
+    def test_merging_or_renaming_a_groups_voice_points_to_the_group(self):
+        row = self.controller.row("v-pool-2")
+        with self.assertRaisesRegex(ValueError, "is one of the chorus's voices, not a character: choose the group"):
+            self.controller.character(row)
+
+
 class EnsembleCastScreenTests(unittest.IsolatedAsyncioTestCase):
     async def test_shift_c_asks_how_many_voices_how_they_speak_and_saves_after_confirmation(self):
         import asyncio
@@ -197,7 +294,7 @@ class EnsembleCastScreenTests(unittest.IsolatedAsyncioTestCase):
         def plan(row, **choice):
             asked.append(choice)
             return SimpleNamespace(name="the chorus", summary="the chorus: 4 voices", path=None, hashes={},
-                                   candidate={})
+                                   candidate={}, added=())
         controller.ensemble_plan = plan
         app = CastApp(controller, title="Fixture Book", startup=False)
         with patch("epub_tts_narrator.renderer.ensemble_command.apply") as apply:
@@ -221,6 +318,36 @@ class EnsembleCastScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(asked, [{"voices": 4, "mode": "unison", "mix": "crowd", "named": []}])
         self.assertTrue(apply.called)
         self.assertTrue(controller.reopen)
+
+
+    async def test_a_groups_voices_are_listed_under_it_and_notes_go_to_the_group(self):
+        import asyncio
+        from cast_tui_fixtures import FakePlayer, FakeSession, voice_row
+        from epub_tts_narrator.renderer.cast_tui import CastApp
+        from epub_tts_narrator.renderer.cast_tui_model import CastController
+        from textual.widgets import DataTable
+        asyncio.get_running_loop().slow_callback_duration = 10
+        chorus = voice_row("v-chorus", "the chorus") | {
+            "ensemble": {"members": ["v-pool-2"], "mode": "pool", "basis": "user"}}
+        pool = voice_row("v-pool-2", "the chorus, voice 2") | {"member_of": "v-chorus", "characters": []}
+        controller = CastController(FakeSession(rows=[chorus, voice_row("v-mara", "Mara"), pool]), FakePlayer(),
+                                    describe_error=str)
+        self.addCleanup(controller.close)
+        app = CastApp(controller, title="Fixture Book", startup=False)
+        warnings = []
+        notify = app.notify
+        app.notify = lambda message, **options: (warnings.append(message), notify(message, **options))[1]
+        async with app.run_test(size=(160, 45)) as pilot:
+            table = app.query_one("#voices", DataTable)
+            names = [str(table.get_row_at(index)[0]) for index in range(table.row_count)]
+            self.assertEqual(names, ["the chorus", "  └ the chorus, voice 2", "Mara"])
+            table.focus()
+            table.move_cursor(row=1)
+            await pilot.pause()
+            await pilot.press("n")
+            await pilot.pause()
+            self.assertIs(app.screen, app.screen_stack[0], "no notes editor opens for a group's voice")
+        self.assertTrue(any("add them to the chorus" in message for message in warnings))
 
 
 if __name__ == "__main__":

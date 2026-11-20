@@ -65,3 +65,19 @@ about this task or the output contract. The description must agree with it: foll
 says about how the character sounds or where they come from over the profile and source evidence. Express it in
 audible terms only; never put a name, a plot secret, or the notes' wording into the description.
 """
+
+
+# Added only for a group's pool voice (``group_voice`` in the request), so other refreshes keep their identity.
+GROUP_VOICE = """
+This voice is one unnamed member of a group character, heard alongside the
+group's other voices (group_voice: the group's name, this voice's number, how
+many voices the group has, and the other voices' current descriptions;
+characters and roles describe the group). Describe one individual member of
+that group, consistent with what the source says about who its members are.
+Make this voice clearly distinguishable from every description in
+group_voice.other_voices by sex (when the source leaves the group's makeup open
+or mixed), age, pitch, timbre and pace, so the voices are not heard as copies of
+one another. Keep the group's shared accent and setting. A description in
+current_prompt that only repeats the group's voice with one small variation is
+a placeholder: keep its variation as a starting point, not as a limit.
+"""

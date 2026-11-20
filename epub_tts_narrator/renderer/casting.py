@@ -526,15 +526,13 @@ class CastingSession:
                       if character.get("voice_id") == voice_id]
         roles = [role for role in cast["roles"] if role.get("voice_id") == voice_id]
         derived = profile.get("derived_from") if isinstance(profile.get("derived_from"), dict) else None
-        group = next((character for character in cast["characters"]
-                      if character.get("voice_id") == profile.get("member_of")), None)
+        from ..ensembles import pool_label
+        pool = pool_label(cast, voice_id)
         if characters:
             label = ", ".join(characters)
-        elif group is not None:
+        elif pool is not None:
             # A pool voice designed for one group: its lead is voice 1.
-            members = (self._profiles.get(profile["member_of"], {}).get("ensemble") or {}).get("members", [])
-            number = members.index(voice_id) + 2 if voice_id in members else "?"
-            label = f"{group['name']}, voice {number}"
+            label = pool
         elif derived:
             base_names = [character["name"] for character in cast["characters"]
                           if character.get("voice_id") == derived.get("voice_id")]
