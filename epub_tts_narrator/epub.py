@@ -395,20 +395,90 @@ class _Archive:
         return result
 
 
-def _body_blocks(root: ET.Element, href: str, warn, class_styles: dict) -> list[dict]:
+# Characters a book indents a paragraph with when it separates paragraphs by
+# line breaks instead of paragraph elements (NBSP, figure/en/em/ideographic space).
+_INDENT_CHARACTERS = "\u00a0\u2002\u2003\u2007\u3000"
+_WIDE_INDENTS = "\u2003\u3000"
+# A line at least this long is prose, not a verse line.
+_PROSE_LINE = 150
+
+
+def _indented(text: str) -> bool:
+    """True when a line opens with a typographic paragraph indent (source formatting whitespace ignored)."""
+    text = text.lstrip(" \t\r\n")
+    width = len(text) - len(text.lstrip(_INDENT_CHARACTERS))
+    return width >= 2 or (width == 1 and text[0] in _WIDE_INDENTS)
+
+
+def _line_break_paragraphs(chunks: list[tuple[str, frozenset]], breaks: list[int]) -> list[tuple[int, int]]:
+    """Chunk ranges of the paragraphs in one element whose paragraphs are separated by ``<br>``.
+
+    Some conversions put a whole chapter in one element and start each paragraph
+    with a line break followed by an indent. A break followed by an indent starts
+    a new paragraph when the element reads as indented prose: its first line is
+    indented too, or an indented line is prose-length. Other line breaks (verse
+    lines, a heading's two lines) stay inside their paragraph.
+    """
+    whole = [(0, len(chunks))]
+    if not breaks:
+        return whole
+    edges, marked = [0, *breaks, len(chunks)], set(breaks)
+    lines = ["".join(text for text, _ in chunks[start + (1 if start in marked else 0):end])
+             for start, end in zip(edges, edges[1:])]
+    starts = [index for index, line in zip(breaks, lines[1:]) if _indented(line)]
+    if not starts or not (_indented(lines[0]) or any(
+            _indented(line) and len(_normalize(line)) >= _PROSE_LINE for line in lines[1:])):
+        return whole
+    ranges, start = [], 0
+    for index in starts:
+        ranges.append((start, index))
+        start = index + 1
+    ranges.append((start, len(chunks)))
+    return ranges
+
+
+def _body_blocks(root: ET.Element, href: str, warn, class_styles: dict,
+                 anchors: frozenset[str] = frozenset(), found: dict[str, int] | None = None,
+                 report: dict | None = None) -> list[dict]:
+    """Rows of one XHTML body in DOM order.
+
+    ``found`` receives, for each element ID or ``<a name>`` in ``anchors``, the
+    index of the row it starts (navigation targets inside a resource). ``report``
+    gets ``line_break_paragraphs`` set when an element's ``<br>``-separated
+    paragraphs became separate rows.
+    """
     bodies = [node for node in root if _tag(node) == "body"]
     if _tag(root) != "html" or len(bodies) != 1:
         raise ValueError(f"XHTML resource must have one html/body element: {href}")
     body = bodies[0]
     rows: list[dict] = []
     chunks: list[tuple[str, frozenset]] = []
+    breaks: list[int] = []
+    marks: list[tuple[str, int]] = []
     pending_blank = False
 
     def flush(owner: ET.Element) -> None:
-        nonlocal pending_blank
-        text, spans = _normalized_spans(chunks)
-        chunks_copy = list(chunks)
+        ranges = _line_break_paragraphs(chunks, breaks) if _tag(owner) not in _HEADINGS else [(0, len(chunks))]
+        pieces = [chunks[start:end] for start, end in ranges]
+        emitted = []
+        for (start, end), piece in zip(ranges, pieces):
+            before = len(rows)
+            emit(owner, piece)
+            if len(rows) > before:
+                emitted.append((end, before))
+        if len(emitted) > 1 and report is not None:
+            report["line_break_paragraphs"] = True
+        if found is not None:
+            for name, position in marks:
+                found.setdefault(name, next((row for end, row in emitted if end > position), len(rows)))
         chunks.clear()
+        breaks.clear()
+        marks.clear()
+
+    def emit(owner: ET.Element, piece: list[tuple[str, frozenset]]) -> None:
+        nonlocal pending_blank
+        text, spans = _normalized_spans(piece)
+        chunks_copy = list(piece)
         if text:
             row = {"text": text, "source": {
                 "href": href,
@@ -447,6 +517,10 @@ def _body_blocks(root: ET.Element, href: str, warn, class_styles: dict) -> list[
 
     def walk(node: ET.Element, owner: ET.Element, inherited: frozenset) -> None:
         nonlocal pending_blank
+        if anchors:
+            names = {node.get("id"), node.get("{http://www.w3.org/XML/1998/namespace}id"),
+                     node.get("name") if _tag(node) == "a" else None}
+            marks.extend((name, len(chunks)) for name in sorted(names & anchors))
         cues = node_cues(node, inherited)
         if node.get("hidden") is not None or node.get("aria-hidden") == "true":
             warn(f"{href}: hidden/aria-hidden text is retained; visibility is not rendered.")
@@ -463,6 +537,7 @@ def _body_blocks(root: ET.Element, href: str, warn, class_styles: dict) -> list[
                 if tag not in {"img", "image", "embed"}:
                     walk(child, owner, cues)
             elif tag == "br":
+                breaks.append(len(chunks))
                 chunks.append(("\n", cues))
             elif tag in _BLOCK_TAGS:
                 flush(owner)
@@ -479,6 +554,30 @@ def _body_blocks(root: ET.Element, href: str, warn, class_styles: dict) -> list[
     walk(body, body, frozenset())
     flush(body)
     return rows
+
+
+def _navigation_parts(rows: list[dict], entries: list[tuple[str | None, str]],
+                      found: dict[str, int]) -> list[tuple[int, int, str | None]]:
+    """(first row, end row, table-of-contents label) for each chapter of one spine resource.
+
+    A resource whose table-of-contents entries start at two or more different
+    rows (a conversion that packed several chapters into one file, linked by
+    fragment anchors) becomes one chapter per entry, each named by its entry;
+    rows before the first entry stay a chapter of their own. A target that is
+    not in the resource is ignored, and an entry whose chapter would hold no
+    rows adds none. Otherwise the resource stays one chapter.
+    """
+    starts: dict[int, str] = {}
+    for fragment, label in entries:
+        start = 0 if fragment is None else found.get(fragment)
+        if start is not None and start < len(rows):
+            starts.setdefault(start, label)
+    if len(starts) < 2:
+        return [(0, len(rows), None)]
+    edges = sorted(starts)
+    parts = [(0, edges[0], None)] if edges[0] else []
+    parts += [(start, end, starts[start]) for start, end in zip(edges, [*edges[1:], len(rows)])]
+    return parts
 
 
 def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
@@ -592,8 +691,10 @@ def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
                 item_id = item["fallback"]
 
         # Lazy import avoids a module cycle: the helper shares the safe primitives above.
-        from .epub_navigation import navigation_titles
+        from .epub_navigation import navigation_entries, navigation_titles
         navigation_titles_by_path = navigation_titles(items, spine, xml)
+        navigation_entries_by_path = navigation_entries(items, spine, xml)
+        layout: dict = {}
 
         chapters: list[dict] = []
         blocks: list[dict] = []
@@ -634,21 +735,29 @@ def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
                 return resources.read(name)
 
             class_styles = _class_emphasis(root, href, read_stylesheet, warn)
-            rows = _body_blocks(root, href, warn, class_styles)
-            chapter_id = f"ch{len(chapters) + 1:04d}"
-            heading_row = next((row for row in rows if row["source"]["tag"] in _HEADINGS), None)
-            heading = heading_row["text"] if heading_row else None
+            entries = navigation_entries_by_path.get(href, [])
+            found: dict[str, int] = {}
+            rows = _body_blocks(root, href, warn, class_styles,
+                                frozenset(fragment for fragment, _ in entries if fragment), found, layout)
             document_title = next((_normalize("".join(node.itertext())) for node in root.iter()
                                    if _tag(node) == "title"), "")
-            chapter = {"id": chapter_id, "title": navigation_titles_by_path.get(href) or heading or document_title or PurePosixPath(href).stem,
-                       "source_href": href, "block_ids": []}
-            for row in rows:
-                block_id = f"b{len(blocks) + 1:06d}"
-                blocks.append({"id": block_id, "chapter_id": chapter_id, **row})
-                chapter["block_ids"].append(block_id)
-                if row is heading_row and href not in navigation_titles_by_path:
-                    heading_ids[chapter_id] = block_id
-            chapters.append(chapter)
+            for start, end, label in _navigation_parts(rows, entries, found):
+                part = rows[start:end]
+                chapter_id = f"ch{len(chapters) + 1:04d}"
+                heading_row = next((row for row in part if row["source"]["tag"] in _HEADINGS), None)
+                heading = heading_row["text"] if heading_row else None
+                titled = label if start or end < len(rows) else navigation_titles_by_path.get(href)
+                chapter = {"id": chapter_id, "title": titled or heading or document_title or PurePosixPath(href).stem,
+                           "source_href": href, "block_ids": []}
+                for row in part:
+                    block_id = f"b{len(blocks) + 1:06d}"
+                    blocks.append({"id": block_id, "chapter_id": chapter_id, **row})
+                    chapter["block_ids"].append(block_id)
+                    if row is heading_row and not titled:
+                        heading_ids[chapter_id] = block_id
+                chapters.append(chapter)
+                if end < len(rows) or start:
+                    layout["navigation_chapters"] = True
             if not rows:
                 warn(f"{href}: spine document contains no extractable body text.")
 
@@ -667,4 +776,7 @@ def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
                 "exclusions": exclusions, "warnings": warnings,
                 "extraction_policy": "spine-xhtml-dom-v1; whitespace=collapse; footnotes=retain; "
                 + ("auxiliary-spine=include" if include_auxiliary else "auxiliary-spine=exclude")
-                + "; inline-cues=source-v1; blank-paragraphs=mark"}
+                + "; inline-cues=source-v1; blank-paragraphs=mark"
+                # Named only when they changed this book, so books they leave alone keep their saved policy.
+                + ("; toc-anchor-chapters=split" if layout.get("navigation_chapters") else "")
+                + ("; line-break-paragraphs=indent" if layout.get("line_break_paragraphs") else "")}

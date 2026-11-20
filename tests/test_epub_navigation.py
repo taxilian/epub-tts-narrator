@@ -152,6 +152,69 @@ class EpubNavigationTests(unittest.TestCase):
                 self.assertEqual(result["chapters"][0]["title"], expected)
                 self.assertEqual(result["chapters"][0]["source_href"], "OPS/one.xhtml")
 
+    PACKED = ('<div><h2><a name="t0"/><i>Before</i><br/></h2>'
+              '<div>\u00a0\u00a0\u00a0<i>He was the youngest prince.</i><br/>\u00a0\u00a0\u00a0<i>Such were the times.</i><br/></div>'
+              '<h2><a name="t1"/><i>1.</i><br/><i>Solstice</i><br/></h2>'
+              '<div>\u00a0\u00a0\u00a0Cloudless sky soared overhead.<br/>'
+              '<i>Hist, my lambling, quiet now,</i><br/><i>Lest a waiting wingcat hear</i><br/>'
+              '\u00a0\u00a0\u00a0\u201cRun,\u201d said Jan.<br/>\u00a0\u00a0\u00a0Tek ran.<br/></div>'
+              '<h2><a name="t2"/><i>2.</i><br/><i>Summer</i><br/></h2>'
+              '<div>\u00a0\u00a0\u00a0Tek tossed her mane.<br/></div></div>')
+
+    def packed_book(self, points, body=None):
+        self.make_book(
+            documents={"OPS/split_0.html": xhtml(body or self.PACKED, "Dark Moon")},
+            manifest='<item id="one" href="split_0.html" media-type="application/xhtml+xml"/>'
+                     '<item id="ncx" href="toc.ncx" media-type="application/dtbncx+xml"/>',
+            spine='<itemref idref="one"/>', spine_attributes=' toc="ncx"',
+            extras={"OPS/toc.ncx": '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap>' + "".join(
+                f'<navPoint id="p{index}"><navLabel><text>{label}</text></navLabel><content src="{src}"/></navPoint>'
+                for index, (label, src) in enumerate(points)) + '</navMap></ncx>'})
+
+    def test_chapters_packed_into_one_file_are_split_at_their_toc_anchors(self):
+        """A conversion that packs chapters into one file links them by anchor; each becomes a chapter."""
+        self.packed_book([("Before", "split_0.html#t0"), ("1.", "split_0.html#t1"), ("2.", "split_0.html#t2")])
+
+        result = extract_epub(self.path)
+
+        texts = {block["id"]: block["text"] for block in result["blocks"]}
+        self.assertEqual([(chapter["title"], [texts[i] for i in chapter["block_ids"]]) for chapter in result["chapters"]], [
+            ("Before", ["Before", "He was the youngest prince.", "Such were the times."]),
+            ("1.", ["1. Solstice",
+                    # Unindented verse lines stay in the paragraph they follow.
+                    "Cloudless sky soared overhead. Hist, my lambling, quiet now, Lest a waiting wingcat hear",
+                    "\u201cRun,\u201d said Jan.", "Tek ran."]),
+            ("2.", ["2. Summer", "Tek tossed her mane."]),
+        ])
+        self.assertEqual({chapter["source_href"] for chapter in result["chapters"]}, {"OPS/split_0.html"})
+        italic = next(block for block in result["blocks"] if block["text"] == "Such were the times.")
+        self.assertEqual([(span["start"], span["end"], span["kind"]) for span in italic["inline_spans"]],
+                         [(0, 20, "emphasis")])
+        self.assertTrue(result["extraction_policy"].endswith(
+            "blank-paragraphs=mark; toc-anchor-chapters=split; line-break-paragraphs=indent"))
+
+    def test_text_before_the_first_anchor_and_unknown_targets(self):
+        """Rows before the first linked anchor stay a chapter; a target the file lacks is ignored."""
+        self.packed_book([("1.", "split_0.html#t1"), ("Missing", "split_0.html#nowhere"), ("2.", "split_0.html#t2")])
+
+        result = extract_epub(self.path)
+
+        self.assertEqual([(chapter["title"], len(chapter["block_ids"])) for chapter in result["chapters"]],
+                         [("Before", 3), ("1.", 4), ("2.", 2)])
+
+    def test_a_file_with_one_toc_start_and_plain_line_breaks_is_unchanged(self):
+        """One entry per file and line breaks without paragraph indents keep the earlier extraction."""
+        body = ('<h2><a name="t0"/>One<br/>The Beginning</h2>'
+                '<p>Roses are red,<br/>violets are blue,<br/>\u00a0\u00a0sugar is sweet.</p>')
+        self.packed_book([("One", "split_0.html#t0"), ("Also one", "split_0.html")], body)
+
+        result = extract_epub(self.path)
+
+        self.assertEqual([chapter["title"] for chapter in result["chapters"]], ["One"])
+        self.assertEqual([block["text"] for block in result["blocks"]],
+                         ["One The Beginning", "Roses are red, violets are blue, sugar is sweet."])
+        self.assertTrue(result["extraction_policy"].endswith("blank-paragraphs=mark"))
+
 
 if __name__ == "__main__":
     unittest.main()

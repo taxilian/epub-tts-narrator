@@ -91,8 +91,18 @@ def compare_sources(saved, current, *, preserve_citations_from=None):
     IDs) with a description of what changed.
     """
     if saved.get("extraction_policy") != current.get("extraction_policy"):
-        raise ValueError("The new EPUB was extracted with different extraction settings "
-                         "(extraction.include_auxiliary or the extractor version). " + _REFUSAL)
+        def parts(source):
+            policy = source.get("extraction_policy")
+            return {part.strip() for part in policy.split(";")} if isinstance(policy, str) else set()
+        added = sorted(parts(current) - parts(saved))
+        layout = {"toc-anchor-chapters=split": "chapters its table of contents links inside a file are now separate chapters",
+                  "line-break-paragraphs=indent": "paragraphs separated only by line breaks are now separate paragraphs"}
+        changes = [layout[part] for part in added if part in layout]
+        detail = (f"The extractor now reads this EPUB differently ({'; '.join(changes)}), so its chapters or paragraphs "
+                  "no longer line up with the saved book. " if changes else
+                  "The new EPUB was extracted with different extraction settings "
+                  "(extraction.include_auxiliary or the extractor version). ")
+        raise ValueError(detail + _REFUSAL)
     old_blocks = {block["id"]: block for block in saved["blocks"]}
     new_blocks = {block["id"]: block for block in current["blocks"]}
     old_chapters, new_chapters = saved["chapters"], current["chapters"]

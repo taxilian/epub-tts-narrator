@@ -1036,6 +1036,14 @@ class SourceComparisonTests(unittest.TestCase):
         self.assertEqual((comparison["appended_chapters"], comparison["edited_chapters"]), ([], []))
         self.assertEqual(comparison["changed_blocks"], [])
 
+    def test_a_book_the_extractor_now_lays_out_differently_is_refused_with_the_reason(self):
+        saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])
+        current = deepcopy(saved)
+        current["extraction_policy"] += "; toc-anchor-chapters=split"
+        with self.assertRaisesRegex(ValueError, "table of contents links inside a file are now separate chapters.*"
+                                                "separate output directory"):
+            compare_sources(saved, current)
+
     def test_removed_inserted_or_reordered_chapters_are_refused(self):
         saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])
         cases = {
