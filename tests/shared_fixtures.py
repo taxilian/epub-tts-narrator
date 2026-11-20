@@ -231,3 +231,18 @@ def skip_rerun_reviews(testcase):
         patcher = patch(target, return_value=False)
         patcher.start()
         testcase.addCleanup(patcher.stop)
+
+
+class ScreenHost:
+    """Stands in for the run shell's ``screen_host`` show: builds each screen, records it, answers in turn.
+
+    Use as ``with tui_support.screen_host(host): ...``; ``host.screens`` are
+    the screens a review opened (their ``view`` is what they would draw).
+    """
+
+    def __init__(self, *answers):
+        self.answers, self.screens = list(answers), []
+
+    def __call__(self, make_screen):
+        self.screens.append(make_screen())
+        return self.answers.pop(0)

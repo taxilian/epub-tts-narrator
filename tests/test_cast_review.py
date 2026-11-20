@@ -9,7 +9,9 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator import cast_review
+from epub_tts_narrator.tui_support import screen_host
 from epub_tts_narrator.config import DEFAULTS
+from shared_fixtures import ScreenHost
 from test_attribution_verification_cli import AttributionCLIHarness
 
 
@@ -130,6 +132,39 @@ class CastReviewTests(AttributionCLIHarness):
         self.assertTrue(changed, output)
         self.assertIn("your notes say the cowled shadow is also called Mara", output)
         self.assertEqual(len(self.cast()), 1)
+
+    def test_in_the_run_shell_the_question_opens_its_own_screen_with_both_entries(self):
+        self.make_book(risk=False, prepare=renamed("Mara Vell"))
+        host = ScreenHost("k")
+        with screen_host(host):
+            changed, output = self.review(ReviewClient(), voiced={"Mara"}, interactive=True)
+        self.assertFalse(changed)
+        self.assertNotIn("[M] merge them", output)
+        self.assertTrue((self.book / cast_review.REVIEW_FILENAME).is_file())
+        [screen] = host.screens
+        self.assertEqual(type(screen).__name__, "MergeScreen")
+        view = screen.view
+        self.assertEqual(view["title"], "Are these the same character?")
+        self.assertEqual(view["why"], "The book's text shows they are one person.")
+        kept, absorbed = view["entries"]
+        self.assertEqual((kept["name"], kept["voice"], absorbed["name"], absorbed["voice"]),
+                         ("Mara", "Accepted voice", "Mara Vell", "No accepted voice yet"))
+        self.assertTrue(kept["from"].startswith("New in "))
+        self.assertEqual((kept["lines"], absorbed["lines"]), (2, 0))
+        self.assertEqual(view["summary"], "Merging keeps Mara, because it already has an accepted voice. Mara Vell "
+                                          "has no lines in this book, so nothing is rendered again.")
+        # The raw IDs are only in the details the person may open.
+        character_ids = [row["id"] for row in json.loads((self.book / "analysis.json").read_text())["cast"]["characters"]]
+        shown = json.dumps({key: value for key, value in view.items() if key != "details"})
+        self.assertFalse(any(character_id in shown for character_id in character_ids))
+        self.assertTrue(all(character_id in view["details"] for character_id in character_ids))
+
+    def test_merging_on_the_run_shells_screen_merges(self):
+        self.make_book(risk=False, prepare=renamed("Mara Vell"))
+        with screen_host(ScreenHost("m")):
+            changed, output = self.review(ReviewClient(), voiced={"Mara"}, interactive=True)
+        self.assertTrue(changed, output)
+        self.assertEqual(self.cast(), ["Mara"])
 
     def test_an_unsure_pair_is_reported_and_left(self):
         self.make_book(risk=False, prepare=renamed("Mara Vell"))

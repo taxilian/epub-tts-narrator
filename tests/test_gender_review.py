@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from epub_tts_narrator import cast_review, gender_review
 from epub_tts_narrator.config import DEFAULTS
+from epub_tts_narrator.tui_support import screen_host
+from shared_fixtures import ScreenHost
 from test_attribution_verification_cli import AttributionCLIHarness
 from test_cast_review import Store
 
@@ -87,6 +89,30 @@ class GenderReviewTests(AttributionCLIHarness):
                                       answer="f\n")
         self.assertTrue(changed, output)
         self.assertTrue(self.description("Mara").startswith("Female"))
+
+    def test_in_the_run_shell_the_question_shows_the_description_before_and_after(self):
+        self.make_book(risk=False, prepare=male_mara)
+        host = ScreenHost("f")
+        with screen_host(host):
+            changed, output = self.review(GenderClient({"Mara": "Female"}), voiced={"Mara"}, interactive=True)
+        self.assertTrue(changed, output)
+        self.assertNotIn("[F] fix the description", output)
+        self.assertEqual(self.description("Mara"), "Female, warm and low, sounds about forty.")
+        [screen] = host.screens
+        self.assertEqual(type(screen).__name__, "GenderScreen")
+        view = screen.view
+        self.assertEqual((view["name"], view["current"], view["wanted"]), ("Mara", "Male", "Female"))
+        self.assertEqual((view["description"], view["fixed"]),
+                         ("Male, warm and low, sounds about forty.", "Female, warm and low, sounds about forty."))
+        self.assertTrue(view["why"].startswith("The book says: “"))
+
+    def test_leaving_it_on_the_run_shells_screen_changes_nothing(self):
+        self.make_book(risk=False, prepare=male_mara)
+        manifest = (self.book / "manifest.json").read_bytes()
+        with screen_host(ScreenHost("l")):
+            changed, _ = self.review(GenderClient({"Mara": "Female"}), voiced={"Mara"}, interactive=True)
+        self.assertFalse(changed)
+        self.assertEqual((self.book / "manifest.json").read_bytes(), manifest)
 
     def test_a_persons_notes_win_over_the_text(self):
         self.make_book(risk=False, prepare=male_mara)

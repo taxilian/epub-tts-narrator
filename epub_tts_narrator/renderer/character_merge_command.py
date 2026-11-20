@@ -70,6 +70,7 @@ class MergePlan:
     fixed: str = ""  # the earlier book the kept entry comes from, when the other is new: it cannot be swapped
     kept_first: str = ""
     absorbed_first: str = ""
+    origins: dict = field(default_factory=dict)  # {character ID: the earliest book with it}, for the two entries
 
     @property
     def names(self):
@@ -278,7 +279,8 @@ def plan_merge(bundle, config, first, second, *, keep=None, name=None, store=Non
                      reason=reason, kept_lines=lines[kept["id"]], absorbed_lines=lines[absorbed["id"]],
                      kept_voice=_describe_state(states[kept["id"]]),
                      absorbed_voice=_describe_state(states[absorbed["id"]]), books=books, earlier=earlier, fixed=fixed,
-                     kept_first=first_line(document, kept["id"]), absorbed_first=first_line(document, absorbed["id"]))
+                     kept_first=first_line(document, kept["id"]), absorbed_first=first_line(document, absorbed["id"]),
+                     origins={row["id"]: origins[row["id"]] for row in (kept, absorbed) if row["id"] in origins})
 
 
 def _describe_state(state):

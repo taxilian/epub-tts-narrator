@@ -17,7 +17,8 @@ from epub_tts_narrator.renderer.speech_traits import accent_cues
 from epub_tts_narrator.renderer.voice_bindings import linked_voices
 from epub_tts_narrator.analysis_revision import revise_directories
 from epub_tts_narrator.pipeline import fingerprint, write_json
-from shared_fixtures import skip_rerun_reviews
+from epub_tts_narrator.tui_support import screen_host
+from shared_fixtures import ScreenHost, skip_rerun_reviews
 from test_attribution_verification_cli import AttributionCLIHarness
 
 NOTES = "The point of view changes between scenes; each scene's narration follows one character."
@@ -142,6 +143,27 @@ class NarratorReviewTests(AttributionCLIHarness):
         changed, _ = self.review(PointOfViewClient(), answer="l\n")
         self.assertFalse(changed)
         self.assertEqual((self.book / "manifest.json").read_bytes(), manifest)
+
+    def test_in_the_run_shell_the_sections_and_readers_have_their_own_screen(self):
+        self.make_book(risk=False, prepare=two_scenes)
+        manifest = (self.book / "manifest.json").read_bytes()
+        host = ScreenHost("l")
+        with screen_host(host):
+            changed, output = self.review(PointOfViewClient(), answer="")
+        self.assertFalse(changed)
+        self.assertNotIn("[A] apply these narrators", output)
+        self.assertEqual((self.book / "manifest.json").read_bytes(), manifest)
+        [screen] = host.screens
+        self.assertEqual(type(screen).__name__, "NarratorScreen")
+        view = screen.view
+        self.assertEqual(view["notes"], NOTES)
+        self.assertEqual([(row["reader"], row["pov"]) for row in view["sections"]], [("Mara", True), ("Tom", True)])
+        self.assertEqual(view["moved"], sum(row["changed"] for row in view["sections"]))
+        self.assertGreater(view["moved"], 0)
+        self.assertTrue(all(row["quote"] for row in view["sections"]))
+        with screen_host(ScreenHost("a")):
+            changed, output = self.review(PointOfViewClient(), answer="")
+        self.assertTrue(changed, output)
 
     def test_the_narrators_scope_refuses_anything_but_moving_narration(self):
         self.make_book(risk=False, prepare=two_scenes)

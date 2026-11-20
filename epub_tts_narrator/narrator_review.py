@@ -11,8 +11,9 @@ narrator. The narration of a section that follows a character then becomes a
 narration role attached to that character and read in their voice
 (``narrator_<character id>``, appended to the cast); headings, the main
 narrator's sections and narration a person chose stay as they are. A terminal
-or the run shell shows every section and asks first; without one the result is
-only listed. The notes and each section's answer are kept in
+or the run shell shows every section and asks first (the run shell on its own
+screen, ``rerun_review_tui.NarratorScreen``); without one the result is only
+listed. The notes and each section's answer are kept in
 ``provenance.narrator_review``, so a later rerun checks only sections whose
 text changed (with the saved notes) and new ``--instructions`` check them all
 again. Publication goes through the ``narrators`` revision scope (backups,
@@ -282,6 +283,16 @@ def _ask(question):
         print("Please enter A or L.")
 
 
+def _decide(document, revised, book_sections, chosen, answers, notes):
+    """"a" or "l": on the run shell's own screen when one is open, else on the line."""
+    from .rerun_questions import NO_SCREEN, ask_on_screen, narrator_view
+    answer = ask_on_screen("NarratorScreen", narrator_view(document, revised, book_sections, chosen, answers, notes,
+                                                           label=_label, own_voices=bool(upgradable_roles(document))))
+    if answer is NO_SCREEN:
+        return _ask("[A] apply these narrators / [L] leave the narration as it is: ")
+    return answer if answer in {"a", "l"} else "l"
+
+
 def review_narrators(directory, config, client_factory, progress, *, instructions=None, interactive=None):
     """Read each section's narration in its point-of-view character's voice; True when the book changed."""
     from .analysis_directory import _completed_directory
@@ -342,7 +353,7 @@ def review_narrators(directory, config, client_factory, progress, *, instruction
     if wanted and moved and not interactive:
         print("Narrator check: nothing was saved; rerun analyze in a terminal to apply these narrators.")
         return False
-    if wanted and moved and _ask("[A] apply these narrators / [L] leave the narration as it is: ") != "a":
+    if wanted and moved and _decide(document, revised, book_sections, chosen, answers, notes) != "a":
         print("Narrator check: the narration was left as it is.")
         return False
     revised["provenance"]["narrator_review"] = {

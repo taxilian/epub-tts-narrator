@@ -9,7 +9,8 @@ fixed in the description at once when the character has no voice yet, so the
 voice is designed right. When a voice already exists the fix cannot change
 it: the mismatch is shown and, in a terminal or the run shell, the
 description may be fixed for the next recast ([F] fix the description /
-[L] leave it); without a terminal it is listed. Publication goes through the
+[L] leave it; the run shell shows the description before and after,
+``rerun_review_tui.GenderScreen``); without a terminal it is listed. Publication goes through the
 ``voice-profiles`` revision scope with backups (audition bindings follow).
 Answers are cached in the book's request cache.
 """
@@ -107,6 +108,16 @@ def _ask(question):
         print("Please enter F or L.")
 
 
+def _decide(row, description, current, wanted, why):
+    """"f" or "l": on the run shell's own screen when one is open, else on the line."""
+    from .rerun_questions import NO_SCREEN, ask_on_screen, gender_view
+    answer = ask_on_screen("GenderScreen", gender_view(row, description, current, wanted, why,
+                                                       with_gender(description, wanted)))
+    if answer is NO_SCREEN:
+        return _ask("[F] fix the description now (used when you recast) / [L] leave it: ")
+    return answer if answer in {"f", "l"} else "l"
+
+
 def review_genders(directory, config, config_path, client_factory, progress, *, interactive=None):
     """``analyze BOOK``: fix voice descriptions whose gender the book (or a person's notes) contradicts."""
     from .analysis_directory import _completed_directory
@@ -156,7 +167,7 @@ def review_genders(directory, config, config_path, client_factory, progress, *, 
             fixes[voice["id"]] = with_gender(voice["description"], wanted)
             continue
         print(message + " A voice already exists, so recast it (cast BOOK) to change how it sounds.")
-        if interactive and _ask("[F] fix the description now (used when you recast) / [L] leave it: ") == "f":
+        if interactive and _decide(row, voice["description"], current, wanted, why) == "f":
             fixes[voice["id"]] = with_gender(voice["description"], wanted)
     if not fixes:
         print("Gender check: every character's voice description agrees with the book.")

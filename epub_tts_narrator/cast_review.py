@@ -15,7 +15,8 @@ the earlier book's entry, else the one with a voice, else the one with more
 lines is kept; backups, later books follow) when neither entry has a voice
 yet. When either has a voice, or only a person's notes say so, the merge
 would change a voice a person has, so it is shown and asked about in a
-terminal or the run shell ([M] merge, [K] keep apart, [L] decide later);
+terminal or the run shell ([M] merge, [K] keep apart, [L] decide later; the
+run shell shows both entries side by side, ``rerun_review_tui.MergeScreen``);
 without a terminal it is listed and left. "Keep apart" is a person's
 decision, saved beside the book in ``cast-review.json`` and never asked
 again for those two entries. Model answers are cached in the book's request
@@ -225,6 +226,15 @@ def _ask(question):
         print("Please enter M, K or L.")
 
 
+def _decide(plan, why):
+    """"m", "k" or "l": on the run shell's own screen when one is open, else on the line."""
+    from .rerun_questions import NO_SCREEN, ask_on_screen, merge_view
+    answer = ask_on_screen("MergeScreen", merge_view(plan, why))
+    if answer is NO_SCREEN:
+        return _ask("[M] merge them / [K] keep them apart / [L] decide later: ")
+    return answer if answer in {"m", "k", "l"} else "l"
+
+
 def _renderer_context(directory, config_path):
     """``{"notes", "store"}``: the person's character notes and the book's voice store, or ``None`` when unreadable."""
     try:
@@ -302,7 +312,7 @@ def review_cast(directory, config, config_path, client_factory, progress, *, int
                 print(f"  Left as two entries: a voice would change. Rerun analyze in a terminal to decide, or run "
                       f"merge-characters {directory} {plan.absorbed['id']} {plan.kept['id']}.")
                 continue
-            answer = _ask("[M] merge them / [K] keep them apart / [L] decide later: ")
+            answer = _decide(plan, why)
             if answer == "k":
                 keep_apart(directory, a, b, [plan.kept["name"], plan.absorbed["name"]])
                 print(f"Kept {plan.kept['name']} and {plan.absorbed['name']} apart; this is not asked again.")
