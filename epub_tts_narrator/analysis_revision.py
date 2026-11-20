@@ -240,6 +240,22 @@ def appended_cast(before, after):
     return [voice["id"] for voice in after.get("voices", [])[len(before.get("voices", [])):]]
 
 
+def _uncited(value):
+    """``value`` with the paragraph each ``{block_id, quote}`` citation names left out.
+
+    A source edit moves a quotation's citation to the paragraph that now holds
+    it (an edited or split paragraph gets a new block ID); the record it
+    supports is otherwise unchanged.
+    """
+    if isinstance(value, list):
+        return [_uncited(item) for item in value]
+    if isinstance(value, dict):
+        if isinstance(value.get("block_id"), str) and isinstance(value.get("quote"), str):
+            return {key: _uncited(item) for key, item in value.items() if key != "block_id"}
+        return {key: _uncited(item) for key, item in value.items()}
+    return value
+
+
 def _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes):
     """A changed cast (new voices, or only new roles) changes the fingerprint the book's audition scripts are bound to."""
     sidecar = path / "audition-scripts.json"
@@ -394,7 +410,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
         elif scope == "source-edit":
             if path in revisions:
                 if (candidate["source"].get("book") != document["source"].get("book")
-                        or (added_voices := appended_cast(document["cast"], candidate["cast"])) is None
+                        or (added_voices := appended_cast(_uncited(document["cast"]), _uncited(candidate["cast"]))) is None
                         or candidate["provenance"].get("series") != document["provenance"].get("series")):
                     raise ValueError("Source-only updates must preserve book identity and series context, and may "
                                      "only add cast records after the saved ones")

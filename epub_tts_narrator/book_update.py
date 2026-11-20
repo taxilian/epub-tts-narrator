@@ -18,8 +18,11 @@ every existing cast record and voice ID are kept, and
 ``provenance.chunk_identity_source_fingerprint`` keeps the first publication's
 source identity so the renderer reuses all unchanged verified audio. Each
 update is recorded in ``provenance.book_updates`` with the chapters it added
-and edited and the new characters it introduced. Removed, inserted or
-reordered chapters are refused with their location.
+and edited and the new characters it introduced. New chapters may come
+between saved ones; a saved chapter or paragraph now divided into several (a
+newer extractor reading the EPUB's table of contents or line-break paragraphs)
+keeps its speakers without the model. Removed or reordered chapters are refused
+with their location.
 
 The update is resumable: progress is checkpointed in ``BOOK/.analysis-update``
 before the first model request and after each stage, and model responses come
@@ -50,9 +53,13 @@ UPDATE_VERSION = 2
 # Unchanged paragraphs on each side of an edit that the model reads again as
 # context. Their saved analysis is kept; disagreement becomes a review issue.
 CONTEXT_BLOCKS = 2
-_REFUSAL = ("A saved book can be updated with appended chapters and with edits inside its existing "
-            "chapters, but not with chapters removed, inserted or reordered. Analyze the new EPUB into a "
-            "separate output directory instead; the saved book was not changed")
+_REFUSAL = ("A saved book can be updated with new chapters (appended or between its chapters), with its "
+            "chapters or paragraphs split apart, and with edits inside its existing chapters, but not with "
+            "chapters removed or reordered. Analyze the new EPUB into a separate output directory instead; "
+            "the saved book was not changed")
+# Extraction rules that only change how a book divides into chapters and paragraphs: an
+# update may add (or drop) them, because the alignment below keeps the saved IDs anyway.
+LAYOUT_POLICY_PARTS = frozenset({"toc-anchor-chapters=split", "line-break-paragraphs=indent"})
 
 
 def _block_key(block):
@@ -72,53 +79,102 @@ def _matched(old_keys, new_keys):
     return sum(block.size for block in matcher.get_matching_blocks())
 
 
+def _policy_parts(source):
+    policy = source.get("extraction_policy")
+    return {part.strip() for part in policy.split(";")} if isinstance(policy, str) else set()
+
+
+def _check_policy(saved, current):
+    """Refuse a different extraction unless it differs only in layout rules."""
+    if saved.get("extraction_policy") == current.get("extraction_policy"):
+        return
+    old, new = _policy_parts(saved), _policy_parts(current)
+    if (isinstance(saved.get("extraction_policy"), str) and isinstance(current.get("extraction_policy"), str)
+            and (old ^ new) <= LAYOUT_POLICY_PARTS):
+        return
+    raise ValueError("The new EPUB was extracted with different extraction settings "
+                     "(extraction.include_auxiliary or the extractor version). " + _REFUSAL)
+
+
+def _splits(old_blocks, new_blocks):
+    """For a replaced run, old paragraphs that are now several consecutive new ones.
+
+    Returns ``{old position: [new positions]}`` within the run: an old
+    paragraph whose text is exactly its new paragraphs' texts joined by a
+    space (how the extractor joins a line break) was split, not edited.
+    """
+    found, j = {}, 0
+    for i, old in enumerate(old_blocks):
+        text, pieces, joined = old["text"], [], ""
+        for k in range(j, len(new_blocks)):
+            joined = new_blocks[k]["text"] if not pieces else f"{joined} {new_blocks[k]['text']}"
+            pieces.append(k)
+            if joined == text:
+                break
+            if not text.startswith(joined + " "):
+                pieces = []
+                break
+        if len(pieces) > 1 and joined == text:
+            found[i] = pieces
+            j = pieces[-1] + 1
+    return found
+
+
 def compare_sources(saved, current, *, preserve_citations_from=None):
     """Align ``current`` with a saved source by paragraph content.
 
     Every paragraph is keyed by its text and markup (not its position or EPUB
-    location), and each chapter's saved and new paragraphs are aligned with
+    location), and the whole book's saved and new paragraphs are aligned with
     ``difflib``. Unchanged paragraphs keep their saved block IDs, so their
     segments, speaker choices and rendered audio stay attached; edited,
     inserted and appended paragraphs get new IDs after the highest saved one,
-    and saved paragraphs no longer present are removed. A one-for-one replacement
-    cited by ``preserve_citations_from`` instead keeps its old block ID, leaving
-    that cast record intact while its changed text still gets a new chunk ID.
-    Chapters keep their saved IDs by position. A saved chapter with no paragraph
-    in common with its position, or that matches a neighbouring position better,
-    means chapters were removed, inserted or reordered, which is refused.
+    and saved paragraphs no longer present are removed. A saved paragraph that
+    is now several paragraphs whose text joins back to it exactly was split
+    (``split_blocks``): its pieces get new IDs and ``merge_update`` divides
+    its saved segments among them, with no model request. A one-for-one
+    replacement cited by ``preserve_citations_from`` instead keeps its old
+    block ID, leaving that cast record intact while its changed text still
+    gets a new chunk ID.
+
+    Each saved chapter keeps its ID on the first new chapter holding its
+    paragraphs; a saved chapter divided into several (``split_chapters``)
+    gives its later parts new IDs, and a chapter of only new paragraphs, at
+    the end or between saved chapters, is a new chapter (``appended_chapters``)
+    analyzed whole. A saved chapter with no paragraph left, joined into another
+    saved chapter, or now in a different order is refused with its location.
 
     Returns the merged ``source`` (saved book identity, new content, stable
     IDs) with a description of what changed.
     """
-    if saved.get("extraction_policy") != current.get("extraction_policy"):
-        def parts(source):
-            policy = source.get("extraction_policy")
-            return {part.strip() for part in policy.split(";")} if isinstance(policy, str) else set()
-        added = sorted(parts(current) - parts(saved))
-        layout = {"toc-anchor-chapters=split": "chapters its table of contents links inside a file are now separate chapters",
-                  "line-break-paragraphs=indent": "paragraphs separated only by line breaks are now separate paragraphs"}
-        changes = [layout[part] for part in added if part in layout]
-        detail = (f"The extractor now reads this EPUB differently ({'; '.join(changes)}), so its chapters or paragraphs "
-                  "no longer line up with the saved book. " if changes else
-                  "The new EPUB was extracted with different extraction settings "
-                  "(extraction.include_auxiliary or the extractor version). ")
-        raise ValueError(detail + _REFUSAL)
+    _check_policy(saved, current)
     old_blocks = {block["id"]: block for block in saved["blocks"]}
     new_blocks = {block["id"]: block for block in current["blocks"]}
     old_chapters, new_chapters = saved["chapters"], current["chapters"]
-    if len(new_chapters) < len(old_chapters):
-        missing = old_chapters[len(new_chapters)]
-        raise ValueError(f"Chapter {len(new_chapters) + 1} ({missing['title']!r}) is missing from the new EPUB. "
-                         + _REFUSAL)
+    old_order = [(index, identifier) for index, chapter in enumerate(old_chapters) for identifier in chapter["block_ids"]]
+    new_order = [(index, identifier) for index, chapter in enumerate(new_chapters) for identifier in chapter["block_ids"]]
 
-    def keys(chapter, blocks):
-        return [_block_key(blocks[identifier]) for identifier in chapter["block_ids"]]
+    def label(index):
+        return f"Chapter {index + 1} ({old_chapters[index]['title']!r})"
 
-    old_keys = [keys(chapter, old_blocks) for chapter in old_chapters]
-    new_keys = [keys(chapter, new_blocks) for chapter in new_chapters]
+    # A chapter moved elsewhere: compare each saved chapter with the new chapter sharing most of its paragraphs.
+    from collections import Counter
+    new_counts = [Counter(_block_key(new_blocks[identifier]) for identifier in chapter["block_ids"])
+                  for chapter in new_chapters]
+    best = {}
+    for index, chapter in enumerate(old_chapters):
+        counts = Counter(_block_key(old_blocks[identifier]) for identifier in chapter["block_ids"])
+        shares = [sum((counts & other).values()) for other in new_counts]
+        if counts and shares and max(shares) * 2 > sum(counts.values()):
+            best[index] = shares.index(max(shares))
+    placed = sorted(best)
+    for position, index in enumerate(placed):
+        if any(best[later] < best[index] for later in placed[position + 1:]):
+            raise ValueError(f"{label(index)} now appears at another position in the new EPUB. " + _REFUSAL)
+
+    old_keys = [_block_key(old_blocks[identifier]) for _, identifier in old_order]
+    new_keys = [_block_key(new_blocks[identifier]) for _, identifier in new_order]
     next_block = max((_number(identifier, "b") for identifier in old_blocks), default=0)
     next_chapter = max((_number(chapter["id"], "ch") for chapter in old_chapters), default=0)
-    chapters, blocks, edited, retitled, block_map, changed = [], [], [], [], {}, set()
     cited_blocks, pending, replaced = set(), [preserve_citations_from], set()
     while pending:
         item = pending.pop()
@@ -128,75 +184,159 @@ def compare_sources(saved, current, *, preserve_citations_from=None):
             pending.extend(item.values())
         elif isinstance(item, list):
             pending.extend(item)
+
+    identifiers = [None] * len(new_order)
+    origin = [None] * len(new_order)        # saved chapter a kept or split paragraph comes from
+    kind = [None] * len(new_order)          # "kept", "split" or "changed"
+    block_map, split_blocks, changed = {}, {}, set()
+    # Per new chapter: edited/inserted/removed/split paragraph counts.
+    counts = [{"edited_paragraphs": 0, "inserted_paragraphs": 0, "removed_paragraphs": 0, "split_paragraphs": 0}
+              for _ in new_chapters]
+
+    def fresh_block():
+        nonlocal next_block
+        next_block += 1
+        return f"b{next_block:06d}"
+
+    def chapter_at(position):
+        """The new chapter a removal at new ``position`` belongs to."""
+        if not new_order:
+            return None
+        return new_order[min(max(position, 0), len(new_order) - 1)][0]
+
+    for tag, i1, i2, j1, j2 in SequenceMatcher(None, old_keys, new_keys, autojunk=False).get_opcodes():
+        if tag == "equal":
+            for offset in range(i2 - i1):
+                identifiers[j1 + offset] = old_order[i1 + offset][1]
+                origin[j1 + offset] = old_order[i1 + offset][0]
+                kind[j1 + offset] = "kept"
+            continue
+        splits = _splits([old_blocks[old_order[i][1]] for i in range(i1, i2)],
+                         [new_blocks[new_order[j][1]] for j in range(j1, j2)]) if tag == "replace" else {}
+        for old_offset, pieces in splits.items():
+            old_index, old_id = old_order[i1 + old_offset]
+            fresh = []
+            for piece in pieces:
+                position = j1 + piece
+                identifiers[position], origin[position], kind[position] = fresh_block(), old_index, "split"
+                fresh.append(identifiers[position])
+            split_blocks[old_id] = fresh
+            block_map[old_id] = list(fresh)
+            counts[new_order[j1 + pieces[0]][0]]["split_paragraphs"] += 1
+        old_rest = [i for i in range(i1, i2) if i - i1 not in splits]
+        split_new = {j1 + piece for pieces in splits.values() for piece in pieces}
+        new_rest = [j for j in range(j1, j2) if j not in split_new]
+        if not old_rest and not new_rest:
+            continue
+        previous = [old_order[i][1] for i in old_rest] if tag == "replace" else []
+        fresh = []
+        for offset, position in enumerate(new_rest):
+            old_id = previous[offset] if len(previous) == len(new_rest) else None
+            if old_id in cited_blocks:
+                identifiers[position] = old_id
+                replaced.add(old_id)
+            else:
+                identifiers[position] = fresh_block()
+            kind[position] = "changed"
+            fresh.append(identifiers[position])
+            changed.add(identifiers[position])
+        for old_id in previous:
+            block_map[old_id] = list(fresh)
+        edited = min(len(old_rest), len(new_rest)) if tag == "replace" else 0
+        where = new_order[new_rest[0]][0] if new_rest else chapter_at(j1 - 1 if j1 else j1)
+        if where is not None:
+            counts[where]["edited_paragraphs"] += edited
+            counts[where]["inserted_paragraphs"] += len(new_rest) - edited
+            counts[where]["removed_paragraphs"] += len(old_rest) - edited
+
+    # Chapter IDs: the first new chapter holding a saved chapter's paragraphs keeps its ID.
+    sources = [set() for _ in new_chapters]
+    for position, (chapter_index, _) in enumerate(new_order):
+        if origin[position] is not None:
+            sources[chapter_index].add(origin[position])
+    chapter_ids, taken, owner = [None] * len(new_chapters), set(), {}
+    for index, found in enumerate(sources):
+        if found and min(found) not in taken:
+            chapter_ids[index] = old_chapters[min(found)]["id"]
+            taken.add(min(found))
+            owner[min(found)] = index
+    # A saved chapter with no paragraphs (a cover) keeps its ID on an empty new chapter in the same place.
+    for old_index, chapter in enumerate(old_chapters):
+        if chapter["block_ids"]:
+            continue
+        low = max((owner[i] for i in owner if i < old_index), default=-1)
+        high = min((owner[i] for i in owner if i > old_index), default=len(new_chapters))
+        empty = [index for index in range(low + 1, high) if not new_chapters[index]["block_ids"]
+                 and chapter_ids[index] is None]
+        same = [index for index in empty if new_chapters[index]["title"] == chapter["title"]]
+        if same or len(empty) == 1:
+            chapter_ids[(same or empty)[0]] = chapter["id"]
+            taken.add(old_index)
+            owner[old_index] = (same or empty)[0]
+    for old_index, chapter in enumerate(old_chapters):
+        if old_index in taken:
+            continue
+        if any(old_index in found for found in sources):
+            raise ValueError(f"{label(old_index)} is now part of another chapter in the new EPUB. " + _REFUSAL)
+        if chapter["block_ids"] and len(new_chapters) >= len(old_chapters):
+            raise ValueError(f"{label(old_index)} has no paragraph in common with the new EPUB. " + _REFUSAL)
+        raise ValueError(f"{label(old_index)} is missing from the new EPUB. " + _REFUSAL)
+    order = [owner[index] for index in sorted(owner)]
+    if order != sorted(order):
+        first = next(index for index in sorted(owner) if any(owner[later] < owner[index] for later in owner if later > index))
+        raise ValueError(f"{label(first)} now appears at another position in the new EPUB. " + _REFUSAL)
+
+    chapters, blocks, edited, retitled, split_chapters, appended, derived = [], [], [], [], [], [], {}
+    old_by_id = {chapter["id"]: chapter for chapter in old_chapters}
     for index, chapter in enumerate(new_chapters):
         record = deepcopy(chapter)
-        old = old_chapters[index] if index < len(old_chapters) else None
-        if old is not None:
-            label = f"Chapter {index + 1} ({old['title']!r})"
-            own = _matched(old_keys[index], new_keys[index])
-            if old_keys[index] and new_keys[index] and own == 0:
-                raise ValueError(f"{label} has no paragraph in common with chapter {index + 1} of the new EPUB "
-                                 f"({chapter['title']!r}). " + _REFUSAL)
-            for other in (index - 1, index + 1):
-                if 0 <= other < len(new_chapters) and _matched(old_keys[index], new_keys[other]) > own:
-                    raise ValueError(f"{label} now appears at another position in the new EPUB. " + _REFUSAL)
-            record["id"] = old["id"]
-            opcodes = SequenceMatcher(None, old_keys[index], new_keys[index], autojunk=False).get_opcodes()
-        else:
+        if chapter_ids[index] is None:
             next_chapter += 1
-            record["id"] = f"ch{next_chapter:04d}"
-            opcodes = [("insert", 0, 0, 0, len(chapter["block_ids"]))]
-        identifiers = [None] * len(chapter["block_ids"])
-        summary = {"edited_paragraphs": 0, "inserted_paragraphs": 0, "removed_paragraphs": 0}
-        for tag, i1, i2, j1, j2 in opcodes:
-            if tag == "equal":
-                for offset in range(i2 - i1):
-                    identifiers[j1 + offset] = old["block_ids"][i1 + offset]
-                continue
-            fresh = []
-            previous = old["block_ids"][i1:i2] if tag == "replace" else []
-            for offset, position in enumerate(range(j1, j2)):
-                old_id = previous[offset] if len(previous) == j2 - j1 else None
-                if old_id in cited_blocks:
-                    identifiers[position] = old_id
-                    replaced.add(old_id)
-                else:
-                    next_block += 1
-                    identifiers[position] = f"b{next_block:06d}"
-                fresh.append(identifiers[position])
-                changed.add(identifiers[position])
-            if tag == "replace":
-                summary["edited_paragraphs"] += min(i2 - i1, j2 - j1)
-                summary["inserted_paragraphs"] += max(0, (j2 - j1) - (i2 - i1))
-                summary["removed_paragraphs"] += max(0, (i2 - i1) - (j2 - j1))
-                for old_id in previous:
-                    block_map[old_id] = list(fresh)
-            elif tag == "insert":
-                summary["inserted_paragraphs"] += j2 - j1
-            else:
-                summary["removed_paragraphs"] += i2 - i1
-        for position, identifier in enumerate(chapter["block_ids"]):
-            block = deepcopy(new_blocks[identifier])
+            chapter_ids[index] = f"ch{next_chapter:04d}"
+        record["id"] = chapter_ids[index]
+        positions = [position for position, (owner_index, _) in enumerate(new_order) if owner_index == index]
+        record["block_ids"] = [identifiers[position] for position in positions]
+        for position in positions:
+            block = deepcopy(new_blocks[new_order[position][1]])
             block.update(id=identifiers[position], chapter_id=record["id"])
             blocks.append(block)
-        record["block_ids"] = identifiers
         chapters.append(record)
-        if old is not None and old["title"] != record["title"]:
-            retitled.append({"id": record["id"], "number": index + 1,
+        old = old_by_id.get(record["id"])
+        number = index + 1
+        summary = counts[index]
+        if old is None and not sources[index]:
+            appended.append(deepcopy(record))
+            continue
+        if old is None:
+            derived[index] = old_chapters[min(sources[index])]["id"]
+        elif old["title"] != record["title"]:
+            retitled.append({"id": record["id"], "number": number,
                              "previous_title": old["title"], "title": record["title"]})
-        if old is not None and any(summary.values()):
-            edited.append({"id": record["id"], "title": record["title"], "number": index + 1, **summary})
-    kept = {block["id"] for block in blocks}
-    shared = sum(1 for identifier in old_blocks if identifier in kept)
+        edits = {key: summary[key] for key in ("edited_paragraphs", "inserted_paragraphs", "removed_paragraphs")}
+        if any(edits.values()):
+            edited.append({"id": record["id"], "title": record["title"], "number": number, **edits})
+    # Layout changed by splitting: chapters split off a saved one, the saved chapter they left,
+    # and chapters whose paragraphs were split.
+    donors = set(derived.values())
+    for index, record in enumerate(chapters):
+        if index in derived or record["id"] in donors or (counts[index]["split_paragraphs"]
+                                                          and record["id"] in old_by_id):
+            split_chapters.append({"id": record["id"], "title": record["title"], "number": index + 1,
+                                   "from": derived.get(index, record["id"]),
+                                   "split_paragraphs": counts[index]["split_paragraphs"]})
+    kept_ids = {block["id"] for block in blocks}
+    shared = sum(1 for identifier in old_blocks if identifier in kept_ids or identifier in split_blocks)
     if old_blocks and shared * 2 < len(old_blocks):
         # Shared chapter headings alone must not make another book an edit.
         raise ValueError(f"The new EPUB keeps only {shared} of the saved book's {len(old_blocks)} paragraphs; "
                          "it looks like a different book or a wholesale rewrite. " + _REFUSAL)
-    changed_chapters = {chapter["id"] for chapter in [*edited, *retitled]}
+    changed_chapters = {chapter["id"] for chapter in [*edited, *retitled, *split_chapters]} & {c["id"] for c in old_chapters}
     return {"unchanged_chapters": len(old_chapters) - len(changed_chapters),
-            "appended_chapters": deepcopy(chapters[len(old_chapters):]), "edited_chapters": edited,
-            "retitled_chapters": retitled, "changed_blocks": sorted(changed),
-            "removed_blocks": [identifier for identifier in old_blocks if identifier not in kept or identifier in replaced],
+            "appended_chapters": appended, "edited_chapters": edited,
+            "retitled_chapters": retitled, "split_chapters": split_chapters,
+            "split_blocks": split_blocks, "changed_blocks": sorted(changed),
+            "removed_blocks": [identifier for identifier in old_blocks
+                               if identifier not in kept_ids or identifier in replaced],
             "block_map": block_map, "source": _source_like(saved, current, chapters, blocks)}
 
 
@@ -215,14 +355,73 @@ def reread_comparison(saved, reasons):
     reread = [{"id": chapter["id"], "title": chapter["title"], "number": number, "reread_paragraphs": counts[chapter["id"]]}
               for number, chapter in enumerate(saved["chapters"], 1) if chapter["id"] in counts]
     return {"unchanged_chapters": len(saved["chapters"]) - len(reread), "appended_chapters": [],
-            "edited_chapters": [], "retitled_chapters": [], "reread_chapters": reread,
+            "edited_chapters": [], "retitled_chapters": [], "split_chapters": [], "split_blocks": {},
+            "reread_chapters": reread,
             "reread_reasons": dict(sorted(reasons.items())), "changed_blocks": sorted(reasons),
             "removed_blocks": [], "block_map": {}, "source": deepcopy(saved)}
 
 
 def has_changes(comparison):
     return bool(comparison["appended_chapters"] or comparison["edited_chapters"]
-                or comparison["retitled_chapters"])
+                or comparison["retitled_chapters"] or comparison.get("split_chapters"))
+
+
+def _split_segments(rows, old_text, pieces):
+    """Divide a split paragraph's saved segments among its pieces ``[(block_id, text)]``.
+
+    The pieces joined by single spaces are ``old_text``. A segment inside one
+    piece moves there unchanged apart from its offsets and ID; a segment that
+    spans pieces (narration running across the new paragraph break) becomes
+    one segment per piece with the same speaker, keeping only the scoped
+    performance controls inside each part (``slice_performance``). Returns the new
+    segments, an ``{old segment ID: first new segment ID}`` map, and how many
+    controls or spoken-form edits a division dropped.
+    """
+    from .performance_plan import slice_performance
+    result, renamed, dropped = [], {}, 0
+    offset = 0
+    spans = []
+    for block_id, text in pieces:
+        spans.append((block_id, offset, offset + len(text)))
+        offset += len(text) + 1
+    for row in rows:
+        parts = [(block_id, max(row["start"], low), min(row["end"], high))
+                 for block_id, low, high in spans if row["start"] < high and row["end"] > low]
+        for number, (block_id, start, end) in enumerate(parts):
+            local_start = start - next(low for piece, low, _ in spans if piece == block_id)
+            local_end = local_start + (end - start)
+            moved = deepcopy(row)
+            moved.update(id=f"{block_id}:{local_start}:{local_end}", block_id=block_id,
+                         start=local_start, end=local_end, text=old_text[start:end])
+            if (start, end) != (row["start"], row["end"]):
+                # Divided, or trimmed of the space between two new paragraphs.
+                cut = start - row["start"]
+                respelled = False
+                for key in ("speech_normalization", "spoken_text", "performance"):
+                    if key in moved:
+                        dropped += key != "spoken_text"
+                        respelled = True
+                        moved.pop(key)
+                controls = moved.get("performance_controls")
+                if controls is not None and respelled:
+                    # Its control offsets are in the spoken form just dropped.
+                    dropped += len(controls["controls"])
+                    moved.pop("performance_controls")
+                elif controls is not None:
+                    try:
+                        sliced = slice_performance(controls, row["text"], cut, cut + (end - start))
+                    except ValueError:
+                        # A pronunciation the new break cuts through.
+                        dropped += len(controls["controls"])
+                        sliced = None
+                    if sliced is not None and sliced["controls"]:
+                        moved["performance_controls"] = sliced
+                    else:
+                        moved.pop("performance_controls")
+            if number == 0:
+                renamed[row["id"]] = moved["id"]
+            result.append(moved)
+    return result, renamed, dropped
 
 
 def _source_like(saved, current, chapters, blocks):
@@ -427,7 +626,21 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None, keep_cast=False)
         delta_rows.setdefault(row["block_id"], []).append(_remap_row(row, roles, role_voice, chapter_ids))
     segments, disagreements, kept_for_cast = [], [], []
     known_roles = {role["id"] for role in cast["roles"]}
+    old_texts = {block["id"]: block["text"] for block in saved["source"]["blocks"]}
+    new_texts = {block["id"]: block["text"] for block in source["blocks"]}
+    split_rows, renamed_segments, dropped_controls = {}, {}, 0
+    for old_id, pieces in comparison.get("split_blocks", {}).items():
+        rows = [rebind_citations(row, comparison, dropped=dropped) for row in saved_rows.get(old_id, [])]
+        divided, renamed, lost = _split_segments(rows, old_texts[old_id],
+                                                 [(piece, new_texts[piece]) for piece in pieces])
+        renamed_segments.update(renamed)
+        dropped_controls += lost
+        for row in divided:
+            split_rows.setdefault(row["block_id"], []).append(row)
     for block in source["blocks"]:
+        if block["id"] in split_rows:
+            segments.extend(split_rows[block["id"]])
+            continue
         if block["id"] in changed and keep_cast and any(
                 role_id not in known_roles for row in delta_rows[block["id"]]
                 for role_id in [row.get("role_id"), *(item["role_id"] for item in row.get("simultaneous_speakers", []))]
@@ -455,7 +668,9 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None, keep_cast=False)
 
     issues = []
     for issue in saved["issues"]:
-        if issue.get("target") in removed_segments or head(issue) in removed:
+        if issue.get("target") in renamed_segments:
+            issue = dict(issue, target=renamed_segments[issue["target"]])
+        elif issue.get("target") in removed_segments or head(issue) in removed:
             continue
         # Issues inherited from an earlier book cite that book's paragraphs.
         issues.append(deepcopy(issue) if "series_origin" in issue
@@ -519,6 +734,9 @@ def merge_update(saved, delta, comparison, *, epub_sha256=None, keep_cast=False)
                            for chapter in comparison["appended_chapters"]],
         "edited_chapters": deepcopy(comparison["edited_chapters"]),
         "retitled_chapters": deepcopy(comparison["retitled_chapters"]),
+        **({"split_chapters": deepcopy(comparison["split_chapters"]),
+            "split_paragraphs": len(comparison["split_blocks"]),
+            "split_dropped_controls": dropped_controls} if comparison.get("split_chapters") else {}),
         **({"reread_chapters": deepcopy(comparison["reread_chapters"]),
             "reread_paragraphs": deepcopy(comparison["reread_reasons"])} if comparison.get("reread_chapters") else {}),
         "new_characters": [character["id"] for character in appended_characters if status(character) != "reused"],
@@ -716,7 +934,8 @@ def publish_update(directory, document, *, expected_manifest_sha256, progress=pr
             raise ValueError("The edited chapters would divide the book into different chapter files; analyze "
                              "the new EPUB into a separate output directory instead")
         latest = document["provenance"]["book_updates"][-1]
-        edited = {chapter["id"] for chapter in [*latest.get("edited_chapters", []), *latest.get("reread_chapters", [])]}
+        edited = {chapter["id"] for chapter in [*latest.get("edited_chapters", []), *latest.get("reread_chapters", []),
+                                                *latest.get("split_chapters", [])]}
         before_rows, after_rows = _script_rows(directory, manifest), _script_rows(after, new_manifest)
         if any(after_rows.get(chapter) != rows for chapter, rows in before_rows.items() if chapter not in edited):
             raise ValueError("An update must keep every unchanged chapter's script rows unchanged")
@@ -782,14 +1001,24 @@ def describe_update(document):
     for chapter in update.get("retitled_chapters", []):
         lines.append(f"Retitled chapter {chapter['number']} ({chapter['previous_title']}): {chapter['title']}")
     if chapters:
+        numbers = {chapter["id"]: number for number, chapter in enumerate(document["source"]["chapters"], 1)}
         lines.append(f"Added {len(chapters)} chapter{'s' if len(chapters) != 1 else ''}: "
-                     + ", ".join(chapter["title"] for chapter in chapters))
+                     + ", ".join(f"{chapter['title']} (chapter {numbers[chapter['id']]})" if chapter["id"] in numbers
+                                 else chapter["title"] for chapter in chapters))
     for chapter in update.get("edited_chapters", []):
         counts = [f"{chapter[key]} {label}" for key, label in (
             ("edited_paragraphs", "edited"), ("inserted_paragraphs", "inserted"),
             ("removed_paragraphs", "removed")) if chapter[key]]
         lines.append(f"Edited chapter {chapter['number']} ({chapter['title']}): "
                      + ", ".join(counts) + " paragraph(s)")
+    split = update.get("split_chapters", [])
+    if split:
+        parts = sum(1 for chapter in split if chapter["from"] != chapter["id"])
+        lines.append(f"Divided the saved chapters differently, as the EPUB's table of contents and paragraphs do: "
+                     f"{parts} chapter(s) split off, {update.get('split_paragraphs', 0)} paragraph(s) split into "
+                     "several; their saved speakers and directions were kept"
+                     + (f" ({update['split_dropped_controls']} line control(s) that spanned a new break were dropped)"
+                        if update.get("split_dropped_controls") else "") + ".")
     for chapter in update.get("reread_chapters", []):
         lines.append(f"Read again chapter {chapter['number']} ({chapter['title']}): {chapter['reread_paragraphs']} "
                      "paragraph(s) whose saved split did not match their quotation marks")
@@ -870,7 +1099,8 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
         comparison = compare_sources(original["source"], source, preserve_citations_from=original["cast"])
     epub = Path(input_path) if input_path is not None and Path(input_path).suffix.lower() == ".epub" else None
     digest = epub_digest(epub) if epub is not None and not reread else None
-    if comparison["retitled_chapters"] and not comparison["appended_chapters"] and not comparison["edited_chapters"]:
+    if (comparison["retitled_chapters"] and not comparison["appended_chapters"] and not comparison["edited_chapters"]
+            and not comparison["split_chapters"]):
         from .chapter_title_update import retitled_document, title_update_sidecars
         related = ensure_updatable(directory, comparison)
         expected = {str(path): _hash(path / "manifest.json") for path in related}
@@ -913,7 +1143,9 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
             "name-scoped pronunciation choices that depend on it are blocked until it is prepared again.")
     changes = (f"{len(reread)} paragraph(s) read again" if reread else
                f"{len(comparison['appended_chapters'])} new and "
-               f"{len(comparison['edited_chapters'])} edited chapter(s)")
+               f"{len(comparison['edited_chapters'])} edited chapter(s)"
+               + (f", {len(comparison['split_chapters'])} chapter(s) divided differently"
+                  if comparison["split_chapters"] else ""))
     client = client_factory(**config["provider"]) if delta is not None else None
     if client is not None:
         log(f"Updating {directory} with {changes} using {client.model} at {client.base_url}"
@@ -921,7 +1153,7 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
             + ("those paragraphs" if reread else "the new chapters and the edited paragraphs")
             + " with their neighbours will be sent to this endpoint.")
     else:
-        log(f"Updating {directory} with {changes}; only paragraphs were removed, so no model is needed.")
+        log(f"Updating {directory} with {changes}; no paragraph is new or edited, so no model is needed.")
     model_cache = announce_cache(cache)
     # A narrator-read update never resumes a consensus update's checkpoints.
     update_fingerprint = fingerprint({"book_update": UPDATE_VERSION, "base_manifest_sha256": manifest_hash,
@@ -1033,12 +1265,13 @@ def plan_update(directory, source, config):
               "added_chapters": [{"id": chapter["id"], "title": chapter["title"]}
                                  for chapter in comparison["appended_chapters"]],
               "edited_chapters": deepcopy(comparison["edited_chapters"]),
-              "retitled_chapters": deepcopy(comparison["retitled_chapters"])}
+              "retitled_chapters": deepcopy(comparison["retitled_chapters"]),
+              "split_chapters": deepcopy(comparison["split_chapters"])}
     delta = delta_source(comparison)
     if delta is None:
         note = ("No new, edited, or retitled chapters" if not has_changes(comparison)
                 else "Only chapter titles changed" if comparison["retitled_chapters"] and not comparison["edited_chapters"]
-                else "Only paragraphs were removed") + "; analyze would make no model requests."
+                else "Only chapters or paragraphs were divided differently or removed") + "; analyze would make no model requests."
         return {"output_directory": str(directory), "book_update": update, "note": note}
     planned = plan_analysis(delta, config["analysis"], config["performance_policy"], registry)
     return {**planned, "output_directory": str(directory), "continue_from": None, "book_update": update}

@@ -92,6 +92,38 @@ def rename_chapter_resource(epub, old_name, new_name):
     return epub
 
 
+def make_packed_epub(path, identifier, chapters, *, anchors, line_breaks):
+    """One spine file holding every chapter, as some conversions pack them.
+
+    With ``anchors`` the table of contents links each chapter's heading by
+    ``<a name>``; with ``line_breaks`` a chapter's paragraphs are one element
+    separated by line breaks and indents. Without either, the file reads as
+    the earlier extractor read such an EPUB: one chapter whose paragraphs are
+    joined into one.
+    """
+    body, points = [], []
+    for number, (heading, paragraphs) in enumerate(chapters, 1):
+        body.append(f'<h2><a name="toc{number}"/>{heading}</h2>')
+        if line_breaks:
+            body.append("<div>" + "".join(f"\u00a0\u00a0\u00a0{paragraph}<br/>" for paragraph in paragraphs) + "</div>")
+        else:
+            body.append("<div>" + " ".join(paragraphs) + "</div>")
+        points.append(f'<navPoint id="n{number}"><navLabel><text>{escape(heading)}</text></navLabel>'
+                      f'<content src="book.xhtml{f"#toc{number}" if anchors else ""}"/></navPoint>')
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr("META-INF/container.xml", '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>')
+        archive.writestr("content.opf", '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>The Serial</dc:title>'
+                         f'<dc:identifier id="id">{identifier}</dc:identifier><dc:language>en</dc:language></metadata><manifest>'
+                         '<item id="book" href="book.xhtml" media-type="application/xhtml+xml"/><item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+                         '</manifest><spine toc="ncx"><itemref idref="book"/></spine></package>')
+        archive.writestr("book.xhtml", '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>The Serial</title></head><body>'
+                         + "".join(body) + "</body></html>")
+        archive.writestr("toc.ncx", '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap>' + "".join(points[:1] if not anchors else points)
+                         + "</navMap></ncx>")
+    return path
+
+
 def publication_snapshot(directory):
     """Book payload, excluding revision journals and retained lock ownership."""
     return {name: data for name, data in snapshot(directory).items()
@@ -349,6 +381,88 @@ class BookUpdateTests(unittest.TestCase):
         self.assertIn("Saved analysis is complete", stdout)
         self.assertIsNotNone(first)
 
+    def test_a_chapter_inserted_between_saved_chapters_is_analyzed_alone(self):
+        self.seed()
+        original = read_json(self.book / "analysis.json")
+        calls_before = len(self.model_payloads())
+        updated = self.epub("serial-v2", [CHAPTER_ONE, CHAPTER_THREE, CHAPTER_TWO], "download-2")
+
+        status, stdout, stderr = self.analyze(updated)
+
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("Added 1 chapter: Three (chapter 2)", stdout)
+        document = read_json(self.book / "analysis.json")
+        self.assertEqual([(chapter["id"], chapter["title"]) for chapter in document["source"]["chapters"]],
+                         [("ch0001", "One"), ("ch0003", "Three"), ("ch0002", "Two")])
+        # Saved chapters keep their paragraphs, segments and speakers.
+        kept = {row["id"]: row for row in document["segments"]}
+        for row in original["segments"]:
+            self.assertEqual(kept[row["id"]], row)
+        self.assertEqual(len(load_bundle(self.book)["chapters"]), 3)
+        sent = self.model_payloads()[calls_before:]
+        self.assertTrue(any("Wait for me" in payload for payload in sent))
+        self.assertFalse(any("The lamp is lit" in payload for payload in sent))
+        self.assertEqual([chapter["title"] for chapter in document["provenance"]["book_updates"][-1]["added_chapters"]],
+                         ["Three"])
+
+    def test_a_book_imported_before_packed_chapters_were_split_is_divided_without_the_model(self):
+        chapters = [CHAPTER_ONE, ("Two", ["Mara said, “The lamp is lit.”", "Night fell."])]
+        old = make_packed_epub(self.root / "packed-v1.epub", "packed", chapters, anchors=False, line_breaks=False)
+        status, _, stderr = self.analyze(old, fresh=True)
+        self.assertEqual(status, 0, stderr)
+        original = read_json(self.book / "analysis.json")
+        self.assertEqual(len(original["source"]["chapters"]), 1)
+        hello = next(row for row in original["segments"] if row["text"] == "“Hello.”")
+        calls_before = len(self.model_payloads())
+        new = make_packed_epub(self.root / "packed-v2.epub", "packed", chapters, anchors=True, line_breaks=True)
+
+        status, stdout, stderr = self.analyze(new)
+
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("1 chapter(s) split off, 2 paragraph(s) split into several", stdout)
+        self.assertEqual(self.model_payloads()[calls_before:], [])
+        document = read_json(self.book / "analysis.json")
+        texts = {block["id"]: block["text"] for block in document["source"]["blocks"]}
+        self.assertEqual([(chapter["id"], chapter["title"], [texts[i] for i in chapter["block_ids"]])
+                          for chapter in document["source"]["chapters"]], [
+            ("ch0001", "One", ["One", "Mara, the lighthouse keeper, said softly, “Hello.”", "They left."]),
+            ("ch0002", "Two", ["Two", "Mara said, “The lamp is lit.”", "Night fell."]),
+        ])
+        moved = next(row for row in document["segments"] if row["text"] == "“Hello.”")
+        self.assertEqual((moved["role_id"], moved["voice_id"], moved["delivery"]),
+                         (hello["role_id"], hello["voice_id"], hello["delivery"]))
+        # Same cast; only its quotations now cite the paragraphs they were split into.
+        for key in ("characters", "roles", "voices"):
+            self.assertEqual([row["id"] for row in document["cast"][key]], [row["id"] for row in original["cast"][key]])
+        quotes = [(entry["block_id"], entry["quote"]) for entry in document["cast"]["characters"][0]["evidence"]]
+        self.assertTrue(quotes and all(quote in texts[block] for block, quote in quotes))
+        self.assertTrue(document["source"]["extraction_policy"].endswith(
+            "toc-anchor-chapters=split; line-break-paragraphs=indent"))
+        self.assertEqual(len(load_bundle(self.book)["chapters"]), 2)
+
+    def test_a_book_later_books_continue_from_can_have_its_paragraphs_split(self):
+        earlier = (self.root / "book-one").resolve()
+        joined = ("One", ["Mara, the lighthouse keeper, said softly, “Hello.” They left."])
+        status, _, stderr = self.run_cli("analyze", "--strategy", "consensus",
+                                         self.epub("book-one", [joined, CHAPTER_THREE], "book-one"), "-o", earlier)
+        self.assertEqual(status, 0, stderr)
+        morning = ("Four", ["Mara, the lighthouse keeper, said, “Morning.”"])
+        status, _, stderr = self.run_cli("analyze", self.epub("serial-v1", [morning], "serial-1"), "-o", self.book,
+                                         "--continue-from", earlier, "--strategy", "consensus")
+        self.assertEqual(status, 0, stderr)
+        calls_before = len(self.model_payloads())
+        split = ("One", ["\u00a0\u00a0\u00a0Mara, the lighthouse keeper, said softly, “Hello.”<br/>\u00a0\u00a0\u00a0They left."])
+
+        status, stdout, stderr = self.run_cli("analyze", self.epub("book-one-v2", [split, CHAPTER_THREE], "book-one"),
+                                              "-o", earlier)
+
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertEqual(self.model_payloads()[calls_before:], [])
+        document = read_json(earlier / "analysis.json")
+        self.assertIn("They left.", [block["text"] for block in document["source"]["blocks"]])
+        history = validate_registry(read_json(self.book / "series-cast.json"))["books"][0]
+        self.assertEqual(history["source_fingerprint"], fingerprint(document["source"]))
+
     def test_reordered_chapters_are_refused_with_their_location_and_book_unchanged(self):
         self.seed()
         before = snapshot(self.book)
@@ -357,7 +471,7 @@ class BookUpdateTests(unittest.TestCase):
         status, stdout, stderr = self.analyze(changed)
         self.assertEqual(status, 1)
         self.assertIn("Chapter 1 ('One')", stderr)
-        self.assertIn("removed, inserted or reordered", stderr)
+        self.assertIn("removed or reordered", stderr)
         self.assertEqual(snapshot(self.book), before)
         self.assertEqual(len(self.model_payloads()), calls)
 
@@ -1036,25 +1150,39 @@ class SourceComparisonTests(unittest.TestCase):
         self.assertEqual((comparison["appended_chapters"], comparison["edited_chapters"]), ([], []))
         self.assertEqual(comparison["changed_blocks"], [])
 
-    def test_a_book_the_extractor_now_lays_out_differently_is_refused_with_the_reason(self):
+    def test_extraction_layout_rules_alone_do_not_refuse_an_update(self):
         saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])
         current = deepcopy(saved)
-        current["extraction_policy"] += "; toc-anchor-chapters=split"
-        with self.assertRaisesRegex(ValueError, "table of contents links inside a file are now separate chapters.*"
-                                                "separate output directory"):
+        current["extraction_policy"] += "; toc-anchor-chapters=split; line-break-paragraphs=indent"
+        comparison = compare_sources(saved, current)
+        self.assertEqual(comparison["source"]["blocks"], saved["blocks"])
+        current["extraction_policy"] += "; footnotes=drop"
+        with self.assertRaisesRegex(ValueError, "different extraction settings"):
             compare_sources(saved, current)
 
     def test_removed_inserted_or_reordered_chapters_are_refused(self):
         saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])
         cases = {
-            "removed": [CHAPTER_ONE],
-            "reordered": [CHAPTER_TWO, CHAPTER_ONE, CHAPTER_THREE],
-            "inserted": [CHAPTER_ONE, CHAPTER_THREE, CHAPTER_TWO],
+            "removed": ([CHAPTER_ONE], "Chapter 2 \\('Two'\\) is missing"),
+            "removed in the middle": ([CHAPTER_ONE, CHAPTER_THREE], "Chapter 2 \\('Two'\\) has no paragraph in common"),
+            "reordered": ([CHAPTER_TWO, CHAPTER_ONE, CHAPTER_THREE], "Chapter 1 \\('One'\\) now appears at another position"),
         }
-        for label, chapters in cases.items():
+        for label, (chapters, message) in cases.items():
             with self.subTest(label):
-                with self.assertRaisesRegex(ValueError, "removed, inserted or reordered"):
-                    compare_sources(saved, self.source(label, chapters))
+                with self.assertRaisesRegex(ValueError, message + ".*removed or reordered"):
+                    compare_sources(saved, self.source(label.replace(" ", "-"), chapters))
+
+    def test_inserted_chapters_take_new_ids_between_saved_ones(self):
+        saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])
+        comparison = compare_sources(saved, self.source("inserted", [CHAPTER_THREE, CHAPTER_ONE, CORRECTED_THREE, CHAPTER_TWO]))
+        self.assertEqual([chapter["id"] for chapter in comparison["source"]["chapters"]],
+                         ["ch0003", "ch0001", "ch0004", "ch0002"])
+        self.assertEqual([chapter["title"] for chapter in comparison["appended_chapters"]], ["Three", "Three"])
+        self.assertEqual((comparison["edited_chapters"], comparison["split_chapters"]), ([], []))
+        old = {block["text"]: block["id"] for block in saved["blocks"]}
+        for block in comparison["source"]["blocks"]:
+            if block["chapter_id"] in {"ch0001", "ch0002"}:
+                self.assertEqual(block["id"], old[block["text"]])
 
     def test_edits_inside_saved_chapters_keep_every_unchanged_paragraph_id(self):
         saved = self.source("one", [CHAPTER_ONE, CHAPTER_TWO])
