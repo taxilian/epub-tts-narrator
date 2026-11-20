@@ -451,13 +451,20 @@ def compose_chapter(clips: Sequence[dict], output_wav: str | Path, *,
                     if (normalize_pauses and normalize_take_pauses and masked_lanes is None
                             and "speaker_lanes" not in clip
                             and not _interior_pause(record, clip["spoken_text"])):
-                        from .take_pauses import boundary_edits
+                        from .take_pauses import DELIBERATE_PAUSE_MS, boundary_edits, deliberate_spans
                         # Without word timings, long quiet is still capped.
                         timing_source = take_timings.get(
                             clip["chunk_id"], {"expected_text": clip["spoken_text"], "words": []})
+                        meant = deliberate_spans(clip, record)
+                        if timing_source["expected_text"] != clip["spoken_text"]:
+                            # Spans are offsets in the spoken text; only a whole-take span carries over.
+                            meant = ([(0, len(timing_source["expected_text"]))]
+                                     if (0, len(clip["spoken_text"])) in meant else [])
                         pause_edits, _ = boundary_edits(
                             source, timing_source["expected_text"], timing_source["words"],
-                            sentence_frames=sentence_frames, clause_frames=clause_frames)
+                            sentence_frames=sentence_frames, clause_frames=clause_frames,
+                            deliberate=meant,
+                            deliberate_frames=_pause_frames(DELIBERATE_PAUSE_MS, sample_rate))
                         pause_edits = [edit for edit in pause_edits
                                        if edges["start"] <= edit["source_frame"] < edges["end"]
                                        and edit["source_frame"] + edit.get("remove_frames", 0) <= edges["end"]]

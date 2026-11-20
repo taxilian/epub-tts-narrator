@@ -5,14 +5,8 @@ import re
 import sys
 
 
-def activity(path):
-    """Return ``(rate, frames, window, audible)`` for 10ms peak windows.
-
-    This is the one quiet/audible definition for assembly: clip edges and the
-    pauses inside a take are measured the same way, so their targets agree.
-    A window is audible above -60 dBFS (or -40 dB below a very quiet clip's
-    loudest peak), which keeps breaths and soft consonants.
-    """
+def window_peaks(path):
+    """Return ``(rate, frames, window, peaks)``: the peak sample of every 10ms window."""
     from .stored_audio import open_wave
     with open_wave(path) as source:
         rate, frames = source.getframerate(), source.getnframes()
@@ -29,7 +23,24 @@ def activity(path):
             read += len(values)
         if read != frames:
             raise ValueError(f"Truncated PCM audio: {path}")
-    threshold = min(32768 * 10 ** (-60 / 20), max(peaks, default=0) * .01)
+    return rate, frames, window, peaks
+
+
+def audible_threshold(peaks):
+    """-60 dBFS, or -40 dB below a very quiet clip's loudest peak."""
+    return min(32768 * 10 ** (-60 / 20), max(peaks, default=0) * .01)
+
+
+def activity(path):
+    """Return ``(rate, frames, window, audible)`` for 10ms peak windows.
+
+    This is the quiet/audible definition for clip edges. A window is audible
+    above -60 dBFS (or -40 dB below a very quiet clip's loudest peak), which
+    keeps breaths and soft consonants. Pauses inside a take start from the
+    same windows (``take_pauses.quiet_windows``).
+    """
+    rate, frames, window, peaks = window_peaks(path)
+    threshold = audible_threshold(peaks)
     return rate, frames, window, [peak > threshold for peak in peaks]
 
 

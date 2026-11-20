@@ -60,6 +60,11 @@ def chapter_settings(render, *, censorship_policy=None):
         from .take_levels import VERSION as TAKE_LEVEL_VERSION
         if TAKE_LEVEL_VERSION != 1:
             settings["take_level_version"] = TAKE_LEVEL_VERSION
+    if settings.get("normalize_pauses") and settings.get("normalize_take_pauses"):
+        # Bound from version 2 on, so the first version's chapters kept their checkpoints.
+        from .take_pauses import TAKE_PAUSE_VERSION
+        if TAKE_PAUSE_VERSION != 1:
+            settings["take_pause_version"] = TAKE_PAUSE_VERSION
     if censorship_policy is not None:
         from .censorship import policy_identity
         policy = policy_identity(censorship_policy)

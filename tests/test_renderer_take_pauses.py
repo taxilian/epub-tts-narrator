@@ -203,5 +203,179 @@ class TimingSourceTests(unittest.TestCase):
             primary.transcribe.assert_called_once()
 
 
+
+# Real takes: speech peaks near -8 dBFS, pauses filled with a faint floor.
+SPEECH, FLOOR_HIGH, FLOOR_LOW, BREATH = 12000, 40, 25, 300
+
+
+def build_levels(path, spans):
+    """Write ``[(level, seconds)]``; a tuple level alternates per 10ms window."""
+    window, data = RATE // 100, []
+    for level, seconds in spans:
+        for index in range(round(seconds * 100)):
+            value = level[index % len(level)] if isinstance(level, tuple) else level
+            data += [value] * window
+    with wave.open(str(path), "wb") as stream:
+        stream.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+        stream.writeframes(array("h", data).tobytes())
+    return data
+
+
+def apply(samples, edits):
+    """The take as assembly writes it."""
+    result, position = [], 0
+    for edit in edits + [{"source_frame": len(samples)}]:
+        result += samples[position:edit["source_frame"]]
+        position = edit["source_frame"] + edit.get("remove_frames", 0)
+        result += [0] * edit.get("insert_frames", 0)
+    return result
+
+
+def pauses(samples, below=200):
+    """Interior quiet lengths in frames (anything under ``below`` is quiet)."""
+    runs, start = [], None
+    for index, value in enumerate(samples):
+        if value < below and start is None:
+            start = index
+        elif value >= below and start is not None:
+            if start:
+                runs.append(index - start)
+            start = None
+    return runs
+
+
+NOISE = (FLOOR_HIGH, FLOOR_LOW)
+# "One, two. Three four." with a 0.9s comma pause, a 0.6s sentence pause and
+# a 2s stall between "Three" and "four", all filled with a flickering floor.
+HESITANT_SPANS = [(0, .1), (SPEECH, .3), (NOISE, .9), (SPEECH, .3), (NOISE, .6),
+                  (SPEECH, .3), (NOISE, 2.0), (SPEECH, .3), (0, .1)]
+HESITANT_WORDS = [{"word": " One,", "start": .1, "end": .4}, {"word": " two.", "start": 1.3, "end": 1.6},
+                  {"word": " Three", "start": 2.2, "end": 2.5}, {"word": " four.", "start": 4.5, "end": 4.8}]
+DELIBERATE = 12000  # 1.2s at 10kHz
+
+
+class TakeRelativeQuietTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def edits(self, spans, text=TEXT, words=(), **options):
+        samples = build_levels(self.root / "take-with-faint-floor.wav", spans)
+        edits, summary = take_pauses.boundary_edits(
+            self.root / "take-with-faint-floor.wav", text, list(words),
+            sentence_frames=SENTENCE, clause_frames=CLAUSE, **options)
+        take_pauses.validate_edits(edits, 0, len(samples)) if edits else None
+        return samples, edits, summary
+
+    def test_a_stall_filled_with_a_flickering_floor_is_one_pause(self):
+        # The floor crosses -60 dBFS every 10ms; a fixed threshold saw no pause at all.
+        samples, edits, _ = self.edits([(0, .1), (SPEECH, .3), (NOISE, 2.5), (SPEECH, .3), (0, .1)],
+                                       text="One two.")
+        self.assertEqual(pauses(apply(samples, edits)), [SENTENCE])
+
+    def test_a_breath_inside_a_long_pause_is_kept_and_the_quiet_beside_it_is_shortened(self):
+        spans = [(0, .1), (SPEECH, .3), (NOISE, 1.5), (BREATH, .3), (NOISE, 1.5), (SPEECH, .3), (0, .1)]
+        samples, edits, _ = self.edits(spans, text="One two.")
+        result = apply(samples, edits)
+        self.assertEqual(result.count(BREATH), samples.count(BREATH))
+        self.assertEqual(pauses(result, below=BREATH), [SENTENCE, SENTENCE])
+
+    def test_clicks_in_a_pause_are_part_of_it(self):
+        spans = [(0, .1), (SPEECH, .3), (NOISE, 1.2), (2000, .01), (NOISE, .08), (2000, .02),
+                 (NOISE, .08), (2000, .01), (NOISE, 1.2), (SPEECH, .3), (0, .1)]
+        samples, edits, _ = self.edits(spans, text="One two.")
+        self.assertEqual(pauses(apply(samples, edits), below=2500), [SENTENCE])
+
+    def test_ordinary_lines_get_the_targets(self):
+        samples, edits, summary = self.edits(HESITANT_SPANS, words=HESITANT_WORDS)
+        self.assertEqual(pauses(apply(samples, edits)), [CLAUSE, SENTENCE, CLAUSE])
+        self.assertEqual(summary["deliberate"], 0)
+
+    def test_a_hesitant_line_keeps_its_pauses_up_to_the_limit(self):
+        samples, edits, summary = self.edits(HESITANT_SPANS, words=HESITANT_WORDS,
+                                             deliberate=[(0, len(TEXT))], deliberate_frames=DELIBERATE)
+        self.assertEqual(pauses(apply(samples, edits)), [9000, 6000, DELIBERATE])
+        self.assertEqual(summary["deliberate"], 2)
+
+    def test_a_meant_pause_longer_than_the_limit_is_shortened_to_it(self):
+        spans = list(HESITANT_SPANS)
+        spans[2] = (NOISE, 2.5)
+        words = [dict(word) for word in HESITANT_WORDS]
+        for word in words[1:]:
+            word.update(start=word["start"] + 1.6, end=word["end"] + 1.6)
+        samples, edits, _ = self.edits(spans, words=words, deliberate=[(0, len(TEXT))],
+                                       deliberate_frames=DELIBERATE)
+        self.assertEqual(pauses(apply(samples, edits))[0], DELIBERATE)
+
+    def test_only_the_hesitant_part_of_a_take_keeps_its_pauses(self):
+        # "One, two." is ordinary; "Three four." is directed slow.
+        samples, edits, _ = self.edits(HESITANT_SPANS, words=HESITANT_WORDS,
+                                       deliberate=[(10, len(TEXT))], deliberate_frames=DELIBERATE)
+        self.assertEqual(pauses(apply(samples, edits)), [CLAUSE, SENTENCE, DELIBERATE])
+
+    def test_an_ellipsis_or_a_stammered_restart_keeps_its_pause_but_a_parenthetical_dash_does_not(self):
+        spans = [(0, .1), (SPEECH, .3), (NOISE, .9), (SPEECH, .3), (0, .1)]
+        for text, first, second, kept in (("Well… yes.", " Well…", " yes.", True),
+                                          ("I— I said.", " I—", " I said.", True),
+                                          ("Then— later.", " Then—", " later.", False)):
+            with self.subTest(text=text):
+                words = [{"word": first, "start": .1, "end": .4}, {"word": second, "start": 1.3, "end": 1.6}]
+                samples, edits, _ = self.edits(spans, text=text, words=words, deliberate_frames=DELIBERATE)
+                self.assertEqual(pauses(apply(samples, edits)), [9000] if kept else [CLAUSE])
+
+
+class DeliberateSpanTests(unittest.TestCase):
+    def test_directions_controls_and_paragraph_members(self):
+        def row(direction):
+            return {"delivery": {"direction": direction, "evidence": []}}
+        self.assertEqual(take_pauses.deliberate_spans(
+            {"spoken_text": "Well, I suppose.", "segment": row("hesitant, quiet")}), [(0, 16)])
+        self.assertEqual(take_pauses.deliberate_spans(
+            {"spoken_text": "Well, I suppose.", "segment": row("cold, dismissive")}), [])
+        self.assertEqual(take_pauses.deliberate_spans(
+            {"spoken_text": "Go now. Please.", "segment": row("firm")},
+            {"controls": [{"kind": "delivery", "tag": "slow", "start": 8, "end": 15}]}), [(8, 15)])
+        turns = [{"spoken_text": "He waited. ", "segment": row("")},
+                 {"spoken_text": "Then, slowly, he spoke.", "segment": row("thoughtful, measured")}]
+        self.assertEqual(take_pauses.deliberate_spans(
+            {"spoken_text": "He waited. Then, slowly, he spoke.", "segment": row(""),
+             "paragraph_turns": turns}), [(11, 34)])
+
+    def test_hesitant_directions_are_delivery_words_not_any_word(self):
+        for direction in ("halting, afraid", "stammering", "breathless, urgent", "trailing off",
+                          "slow and deliberate", "absent, vague"):
+            self.assertTrue(take_pauses.hesitant_direction(direction), direction)
+        for direction in ("formal, flat", "silky, maliciously probing", "dry, faintly sarcastic", "", None):
+            self.assertFalse(take_pauses.hesitant_direction(direction), direction)
+
+
+class DirectedAssemblyTests(unittest.TestCase):
+    def test_a_hesitant_line_keeps_its_pauses_in_the_chapter(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "take-directed-hesitant.wav"
+            build_levels(source, HESITANT_SPANS)
+            timings = {"b1:0:6:0:21": {"expected_text": TEXT, "words": HESITANT_WORDS}}
+            results = []
+            for name, direction in (("chapter-hesitant.wav", "hesitant, unsure"),
+                                    ("chapter-ordinary.wav", "cold, dismissive")):
+                result = compose_chapter(
+                    [clip(source, text=TEXT, delivery={"direction": direction, "evidence": []})],
+                    root / name, sample_rate=RATE, sentence_pause_ms=400, clause_pause_ms=200,
+                    normalize_take_pauses=True, take_timings=timings)
+                with wave.open(result["wav_path"], "rb") as stream:
+                    samples = array("h")
+                    samples.frombytes(stream.readframes(stream.getnframes()))
+                results.append(pauses(list(samples))[:3])
+        self.assertEqual(results, [[9000, 6000, DELIBERATE], [CLAUSE, SENTENCE, CLAUSE]])
+
+    def test_the_rule_version_is_part_of_the_chapter_identity_only_when_used(self):
+        from epub_tts_narrator.renderer.chapter_cache import chapter_settings
+        self.assertEqual(chapter_settings({})["take_pause_version"], take_pauses.TAKE_PAUSE_VERSION)
+        self.assertNotIn("take_pause_version", chapter_settings({"normalize_take_pauses": False}))
+        self.assertNotIn("take_pause_version", chapter_settings({"normalize_pauses": False}))
+
+
 if __name__ == "__main__":
     unittest.main()

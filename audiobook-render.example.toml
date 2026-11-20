@@ -187,6 +187,8 @@ sample_rate = 44100
 normalize_pauses = true
 # Also apply the sentence/clause targets inside each take (long takes, paragraph
 # performances, recovery joins); other long quiet inside a take is only shortened.
+# Pauses a line's direction asks for (hesitant, halting, slow...), slow spans,
+# ellipses and stammered restarts keep the engine's length up to 1.2 seconds.
 normalize_take_pauses = true
 sentence_pause_ms = 500   # After . ! ? or an ellipsis
 clause_pause_ms = 250     # After a comma, semicolon, colon, or dash

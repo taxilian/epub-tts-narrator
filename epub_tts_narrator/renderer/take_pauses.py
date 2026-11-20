@@ -2,17 +2,32 @@
 
 Between clips, assembly already sets each sentence/clause gap to a total
 target. Inside one take the TTS model chooses its own pauses (often far longer
-than the target), and a sentence-split recovery joins its parts with almost
-none. This module measures the quiet stretch actually present at each interior
-punctuation boundary, using the same 10ms audible/quiet definition as clip
-edges (``pacing.activity``), and returns frame edits that make that whole
-stretch equal the same target. Accepted WAVs are never modified; the edits are
-applied while the chapter is written and recorded in its timing.
+than the target, and sometimes a stall of several seconds in the middle of a
+phrase), and a sentence-split recovery joins its parts with almost none. This
+module measures the quiet stretch actually present at each interior
+punctuation boundary and returns frame edits that make that whole stretch
+equal the same target. Accepted WAVs are never modified; the edits are applied
+while the chapter is written and recorded in its timing.
+
+Quiet is judged against the take itself (``quiet_windows``): the model often
+fills a pause with a faint noise floor that flickers around -60 dBFS, so a
+fixed threshold would see one long pause as many short sounds. A window is
+quiet when it is far below the take's speech; a faint sound that rises clearly
+above the take's own floor for 100ms or more (a breath, a soft consonant, a
+whispered word) stays audible, so the pause is trimmed beside it, never
+through it.
+
+Some pauses are meant (``deliberate_spans``): a line directed as hesitant,
+halting, stammering, slow, breathless and the like, a ``slow`` delivery
+control, an ellipsis, or a stammered restart across a dash ("I—I"). There the
+model's own pause is kept up to ``DELIBERATE_PAUSE_MS`` instead of being set to
+the target; only a longer one is shortened, to that limit.
 
 Boundaries are located only where the verifier's word timings align exactly
-with the expected words on both sides; anything uncertain stays as generated.
-Whisper stretches word timestamps across gaps, so timings only choose which
-quiet stretch belongs to a boundary; its length is always measured in audio.
+with the expected words on both sides; anything uncertain is only ever
+shortened. Whisper stretches word timestamps across gaps, so timings only
+choose which quiet stretch belongs to a boundary; its length is always
+measured in audio.
 """
 
 from __future__ import annotations
@@ -20,19 +35,42 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 import re
 
-from .pacing import activity
+from .pacing import audible_threshold, window_peaks
 
 
-TAKE_PAUSE_VERSION = 1
+TAKE_PAUSE_VERSION = 2
+# A meant pause (see the module docstring) keeps the model's length up to this.
+DELIBERATE_PAUSE_MS = 1200
 # A quiet stretch shorter than this is a stop closure or a join, not a pause
 # that can be located safely. A boundary with none is left untouched.
 _MIN_QUIET_MS = 30
 # Inside the neighbouring words, only this much of each edge is searched.
 _WORD_EDGE_SECONDS = 0.1
+# Quiet: this far below the take's speech peaks, and never louder than
+# ``_QUIET_CEILING_DBFS``; a clip's own -60 dBFS quiet always counts.
+_BELOW_SPEECH_DB = 40
+_QUIET_CEILING_DBFS = -45
+# A sound this far above the take's quiet floor, lasting this long, is kept.
+_SOUND_ABOVE_FLOOR_DB = 10
+_SOUND_MS = 100
+# A click this short between two quiet stretches at least this long is part of the pause;
+# a word's own release burst sits beside speech, never between two quiet stretches.
+_BLIP_MS = 20
+_BLIP_NEIGHBOUR_MS = 50
 _BOUNDARY = re.compile(
     r"(?P<sentence>(?:[.!?…]+))[\"'”’»)\]}]*(?=\s)"
     r"|(?P<clause>[,;:])[\"'”’»)\]}]*(?=\s)"
     r"|(?P<dash>(?<=\D)\s*[—–]\s*(?=\D)|\s*—\s*)")
+_CLOSING = "\"'”’»)]} \t\n"
+# Directions whose speaker is meant to pause: hesitation, slowness, broken
+# breath or attention. General delivery vocabulary, never book words.
+_HESITANT = re.compile(
+    r"\b(?:hesita\w*|halting\w*|falter\w*|stammer\w*|stutter\w*|stumbl\w*|tentative\w*"
+    r"|trail\w*|paus\w*|slow\w*|deliberat\w*|measured|drawl\w*|dazed|groggy|drowsy|sleepy"
+    r"|dreamy|dreamily|absent\w*|distracted\w*|vague\w*|breathless\w*|gasp\w*|pant\w*|sob\w*"
+    r"|weep\w*|tearful\w*|exhausted|weak\w*|feebl\w*|dying|drunk\w*|slurr\w*"
+    r"|thoughtful\w*|musing\w*|ponder\w*|reflective\w*|uncertain\w*|unsure|reluctant\w*"
+    r"|grudging\w*|awkward\w*|groping|searching)\b", re.I)
 
 
 def _period_can_end(text, index):
@@ -60,6 +98,54 @@ def text_boundaries(text):
     return found
 
 
+def hesitant_direction(direction):
+    """Whether a delivery direction asks the speaker to pause."""
+    return isinstance(direction, str) and _HESITANT.search(direction) is not None
+
+
+def _meant_punctuation(text, offset):
+    """An ellipsis, or a dash between a word and its stammered restart ("I—I")."""
+    before = text[:offset].rstrip(_CLOSING)
+    if before.endswith(("…", "...")):
+        return True
+    if not before.endswith(("—", "–", "-")):
+        return False
+    left = re.search(r"(\w+)\W*$", before)
+    right = re.match(r"\W*(\w+)", text[offset:])
+    if not left or not right:
+        return False
+    first, second = left[1].lower(), right[1].lower()
+    return second.startswith(first) or first.startswith(second)
+
+
+def deliberate_spans(clip, performance=None):
+    """``[(start, end)]`` of ``clip["spoken_text"]`` whose pauses are meant.
+
+    A paragraph group's members keep their own directions; ``slow`` delivery
+    controls mark only their span.
+    """
+    text, spans = clip["spoken_text"], []
+
+    def direction(row):
+        delivery = row.get("delivery") if isinstance(row, dict) else None
+        return delivery.get("direction") if isinstance(delivery, dict) else delivery
+
+    turns = clip.get("paragraph_turns")
+    if isinstance(turns, list) and turns:
+        if "".join(turn.get("spoken_text", "") for turn in turns) == text:
+            cursor = 0
+            for turn in turns:
+                if hesitant_direction(direction(turn.get("segment"))):
+                    spans.append((cursor, cursor + len(turn["spoken_text"])))
+                cursor += len(turn["spoken_text"])
+    elif hesitant_direction(direction(clip.get("segment"))):
+        spans.append((0, len(text)))
+    for control in (performance or {}).get("controls", ()):
+        if control.get("kind") == "delivery" and control.get("tag") == "slow":
+            spans.append((control["start"], control["end"]))
+    return sorted(spans)
+
+
 def _timed_tokens(words):
     from .quality import normalize_words
     tokens = []
@@ -72,65 +158,130 @@ def _timed_tokens(words):
     return tokens
 
 
+def _stretches(flags, value):
+    """Maximal ``(start, end)`` runs of ``value`` in ``flags``."""
+    runs, start = [], None
+    for index, flag in enumerate(list(flags) + [not value]):
+        if flag == value and start is None:
+            start = index
+        elif flag != value and start is not None:
+            runs.append((start, index))
+            start = None
+    return runs
+
+
+def quiet_windows(wav_path):
+    """Return ``(rate, frames, window, audible)``, quiet judged against the take.
+
+    See the module docstring: far below the take's speech is quiet, a faint
+    sound clearly above the take's own quiet floor for ``_SOUND_MS`` stays
+    audible, and a click of ``_BLIP_MS`` inside a long pause is part of it.
+    """
+    rate, frames, window, peaks = window_peaks(wav_path)
+    if not peaks:
+        return rate, frames, window, []
+    strict = audible_threshold(peaks)
+    ordered = sorted(peaks)
+    speech = ordered[int(.9 * (len(ordered) - 1))]
+    loose = max(strict, min(32768 * 10 ** (_QUIET_CEILING_DBFS / 20),
+                            speech * 10 ** (-_BELOW_SPEECH_DB / 20)))
+    below = sorted(peak for peak in peaks if peak <= loose)
+    floor = below[len(below) // 4] if below else 0
+    sound = max(strict, floor * 10 ** (_SOUND_ABOVE_FLOOR_DB / 20))
+    audible = [peak > loose for peak in peaks]
+    longest = max(1, round(_SOUND_MS / 10))
+    faint = [not loud and peak > sound for loud, peak in zip(audible, peaks)]
+    for start, end in _stretches(faint, True):
+        if end - start >= longest:
+            audible[start:end] = [True] * (end - start)
+    blip, neighbour = max(1, round(_BLIP_MS / 10)), round(_BLIP_NEIGHBOUR_MS / 10)
+    quiet = _stretches(audible, False)
+    if quiet:
+        # Merged left to right, so a stall broken by several clicks becomes one pause.
+        current = quiet[0]
+        for following in quiet[1:]:
+            if (following[0] - current[1] <= blip and current[1] - current[0] >= neighbour
+                    and following[1] - following[0] >= neighbour):
+                audible[current[1]:following[0]] = [False] * (following[0] - current[1])
+                current = (current[0], following[1])
+            else:
+                current = following
+    return rate, frames, window, audible
+
+
 def _quiet_runs(audible):
     """Maximal interior quiet runs as ``(first_window, end_window)``."""
-    runs, start = [], None
-    for index, loud in enumerate(audible):
-        if not loud and start is None:
-            start = index
-        elif loud and start is not None:
-            if start > 0:
-                runs.append((start, index))
-            start = None
-    return runs  # A run reaching the end of the take is an outer edge, not a pause.
+    # A run reaching either end of the take is an outer edge, not a pause.
+    return [run for run in _stretches(audible, False) if run[0] > 0 and run[1] < len(audible)]
 
 
-def boundary_edits(wav_path, text, words, *, sentence_frames, clause_frames):
+def boundary_edits(wav_path, text, words, *, sentence_frames, clause_frames,
+                   deliberate=(), deliberate_frames=0):
     """Return ``(edits, summary)`` that set interior boundary pauses to targets.
 
     Each edit is ``{"source_frame": F, "remove_frames": N}`` or
     ``{"source_frame": F, "insert_frames": N}`` in the accepted WAV's frames,
     sorted and nonoverlapping. A target of zero leaves that boundary kind as
-    generated. The measured quiet stretch includes everything below the quiet
-    threshold between the two words, so the result is a total, never the
-    model's pause plus an added one.
+    generated. The measured quiet stretch includes everything quiet between
+    the two words, so the result is a total, never the model's pause plus an
+    added one.
 
     Any other interior quiet stretch is only ever shortened, never
     lengthened: with usable word timings a stall in the middle of a phrase is
     capped at the clause target (the sentence target when clause pauses are
     disabled); without timings, every stretch is capped at the longer target.
+
+    ``deliberate`` lists ``(start, end)`` spans of ``text`` whose pauses are
+    meant (``deliberate_spans``). A boundary inside one, or at an ellipsis or a
+    stammered dash, keeps its pause between its target and
+    ``deliberate_frames``; a stall inside one is capped at
+    ``deliberate_frames``.
     """
     from .quality import normalize_words
     summary = {"version": TAKE_PAUSE_VERSION, "boundaries": 0, "adjusted": 0,
-               "unchanged": 0, "unlocated": 0, "capped": 0}
+               "unchanged": 0, "unlocated": 0, "capped": 0, "deliberate": 0}
     targets = {"sentence": sentence_frames, "clause": clause_frames}
     cap = max(sentence_frames, clause_frames)
     if cap <= 0:
         return [], summary
-    rate, frames, window, audible = activity(wav_path)
+    rate, frames, window, audible = quiet_windows(wav_path)
     runs = _quiet_runs(audible)
     used, edits = set(), []
+    allowance = max(cap, deliberate_frames) if deliberate else cap
 
-    def set_length(run, target):
+    def set_length(run, target, *, ceiling=None):
         start, end = run[0] * window, min(frames, run[1] * window)
         length = end - start
-        if abs(length - target) < window:
+        if ceiling is not None and target <= length <= ceiling:
             return False
-        if length > target:
-            edits.append({"source_frame": start + target // 2, "remove_frames": length - target})
+        goal = ceiling if ceiling is not None and length > ceiling else target
+        if abs(length - goal) < window:
+            return False
+        if length > goal:
+            edits.append({"source_frame": start + goal // 2, "remove_frames": length - goal})
         else:
-            edits.append({"source_frame": start + length // 2, "insert_frames": target - length})
+            edits.append({"source_frame": start + length // 2, "insert_frames": goal - length})
         return True
 
+    def meant(offset):
+        return any(start <= offset <= end for start, end in deliberate)
+
+    expected = normalize_words(text)
+    # Expected-token index -> whether a pause before that word is meant.
+    meant_tokens = set()
+    for start, end in deliberate:
+        meant_tokens.update(range(len(normalize_words(text[:start])) + 1,
+                                  len(normalize_words(text[:end])) + 1))
+    whole = bool(expected) and set(range(1, len(expected))) <= meant_tokens
     boundaries = [(offset, kind) for offset, kind in text_boundaries(text) if targets[kind] > 0]
-    expected = normalize_words(text) if boundaries else []
     timed = _timed_tokens(words) if isinstance(words, list) and words else None
-    timed_word = {}
+    timed_word, token_of_word = {}, {}
     if timed and expected:
         matcher = SequenceMatcher(None, expected, [token for token, _ in timed], autojunk=False)
         for block in matcher.get_matching_blocks():
             for offset in range(block.size):
                 timed_word[block.a + offset] = timed[block.b + offset][1]
+                token_of_word.setdefault(timed[block.b + offset][1], block.a + offset)
     minimum = max(1, -(-round(rate * _MIN_QUIET_MS / 1000) // window))
     for offset, kind in boundaries:
         before = normalize_words(text[:offset])
@@ -154,12 +305,31 @@ def boundary_edits(wav_path, text, words, *, sentence_frames, clause_frames):
             continue
         run = max(candidates, key=lambda item: (item[1] - item[0], -item[0]))
         used.add(run)
-        summary["adjusted" if set_length(run, targets[kind]) else "unchanged"] += 1
+        if (meant(offset) or _meant_punctuation(text, offset)) and deliberate_frames > targets[kind]:
+            summary["deliberate"] += 1
+            changed = set_length(run, targets[kind], ceiling=deliberate_frames)
+        else:
+            changed = set_length(run, targets[kind])
+        summary["adjusted" if changed else "unchanged"] += 1
     if timed_word and clause_frames > 0:
         cap = clause_frames
+    starts = sorted((word["start"], index) for index, word in enumerate(words or ())
+                    if index in token_of_word)
     for run in runs:
-        if run not in used and (run[1] - run[0]) * window > cap + window:
-            set_length(run, cap)
+        if run in used:
+            continue
+        limit = cap
+        if deliberate:
+            if whole:
+                limit = max(cap, allowance)
+            elif starts:
+                # The first aligned word starting after the pause begins says where it is.
+                at = run[0] * window / rate
+                following = next((index for start, index in starts if start >= at), None)
+                if following is not None and token_of_word[following] in meant_tokens:
+                    limit = max(cap, allowance)
+        if (run[1] - run[0]) * window > limit + window:
+            set_length(run, limit)
             summary["capped"] += 1
     edits.sort(key=lambda edit: edit["source_frame"])
     return edits, summary
