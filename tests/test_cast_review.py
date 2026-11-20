@@ -18,16 +18,19 @@ from test_attribution_verification_cli import AttributionCLIHarness
 class ReviewClient:
     """Answers the whole-cast request with ``pairs`` (cast labels) and every same-person check with ``verdict``."""
 
-    def __init__(self, pairs=(), verdict="y"):
+    def __init__(self, pairs=(), verdict="y", same=(), apart=()):
         self.model, self.base_url = "test-model", "https://example.invalid"
         self.identity = {"model": self.model, "base_url": self.base_url}
         self.pairs, self.verdict = [list(pair) for pair in pairs], verdict
+        self.same, self.apart = [list(pair) for pair in same], [list(pair) for pair in apart]
         self.calls, self.lock = [], Lock()
 
     def complete(self, system, payload):
         with self.lock:
             self.calls.append(deepcopy(payload))
         if payload["mode"] == "cast_review_nominate":
+            if "instructions" in payload:
+                return {"r": self.pairs, "same": self.same, "apart": self.apart}
             return {"r": self.pairs}
         if payload["mode"] == "narrator_duplicate_check":
             return {"r": [[item["id"], self.verdict] for item in payload["items"]]}
@@ -57,7 +60,7 @@ def renamed(name):
 
 
 class CastReviewTests(AttributionCLIHarness):
-    def review(self, client, *, voiced=(), notes=None, interactive=False, answer=""):
+    def review(self, client, *, voiced=(), notes=None, interactive=False, answer="", instructions=None):
         config = {"analysis": deepcopy(DEFAULTS["analysis"]),
                   "provider": {"model": "test-model", "base_url": "https://example.invalid"}}
         output = io.StringIO()
@@ -69,7 +72,8 @@ class CastReviewTests(AttributionCLIHarness):
               patch("sys.stdin", io.StringIO(answer)),
               contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO())):
             changed = cast_review.review_cast(self.book, config, None, lambda settings: client,
-                                              lambda message: None, interactive=interactive)
+                                              lambda message: None, interactive=interactive,
+                                              instructions=instructions)
         return changed, output.getvalue()
 
     def cast(self):
@@ -132,6 +136,32 @@ class CastReviewTests(AttributionCLIHarness):
         self.assertTrue(changed, output)
         self.assertIn("your notes say the cowled shadow is also called Mara", output)
         self.assertEqual(len(self.cast()), 1)
+
+    def test_analyze_notes_saying_two_entries_are_one_person_are_asked_about(self):
+        self.make_book(risk=False)
+        client = ReviewClient(verdict="?", same=[["c1", "c2"]])
+        changed, output = self.review(client, voiced={"Mara", "Tom"}, interactive=True, answer="m\n",
+                                      instructions="Tom and Mara are the same person.")
+        self.assertTrue(changed, output)
+        self.assertIn("your notes say Mara and Tom are one person", output)
+        self.assertEqual(len(self.cast()), 1)
+        nominate = next(call for call in client.calls if call["mode"] == "cast_review_nominate")
+        self.assertEqual(nominate["instructions"], "Tom and Mara are the same person.")
+
+    def test_analyze_notes_saying_two_entries_are_different_people_keep_them_apart(self):
+        self.make_book(risk=False, prepare=renamed("Mara Vell"))
+        client = ReviewClient(apart=[["c1", "c2"]])
+        changed, output = self.review(client, instructions="Mara and Mara Vell are different people.")
+        self.assertFalse(changed, output)
+        self.assertIn("your notes say Mara and Mara Vell are different people", output)
+        self.assertEqual(len(self.cast()), 2)
+
+    def test_without_analyze_notes_the_whole_cast_request_is_unchanged(self):
+        self.make_book(risk=False)
+        client = ReviewClient()
+        self.review(client)
+        nominate = next(call for call in client.calls if call["mode"] == "cast_review_nominate")
+        self.assertNotIn("instructions", nominate)
 
     def test_in_the_run_shell_the_question_opens_its_own_screen_with_both_entries(self):
         self.make_book(risk=False, prepare=renamed("Mara Vell"))

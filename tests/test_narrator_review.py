@@ -27,14 +27,19 @@ NOTES = "The point of view changes between scenes; each scene's narration follow
 class PointOfViewClient:
     """Names Mara for a section that mentions her and Tom for one that mentions him."""
 
-    def __init__(self):
+    def __init__(self, asks="y"):
         self.model, self.base_url = "test-model", "https://example.invalid"
         self.identity = {"model": self.model, "base_url": self.base_url}
-        self.calls, self.lock = [], Lock()
+        self.calls, self.lock, self.asks = [], Lock(), asks
+
+    def sections_checked(self):
+        return [call for call in self.calls if call["mode"] == "narrator_review"]
 
     def complete(self, system, payload):
         with self.lock:
             self.calls.append(deepcopy(payload))
+        if payload["mode"] == "narrator_notes":
+            return {"r": self.asks}
         assert payload["mode"] == "narrator_review", payload["mode"]
         ids = {line.split("|")[1]: line.split("|")[0] for line in payload["cast"]}
         answers = []
@@ -129,6 +134,45 @@ class NarratorReviewTests(AttributionCLIHarness):
         self.assertFalse(self.review(client, instructions=None)[0])
         self.assertEqual(client.calls, [])
 
+    def test_notes_about_the_cast_leave_the_books_narrator(self):
+        # Close third person whose point of view moves (Eddings) keeps its one storyteller.
+        self.make_book(risk=False, prepare=two_scenes)
+        manifest = (self.book / "manifest.json").read_bytes()
+        client = PointOfViewClient(asks="n")
+        changed, output = self.review(client, instructions="Velvet and Liselle are the same person.")
+        self.assertFalse(changed, output)
+        self.assertEqual(client.sections_checked(), [])
+        self.assertIn("stays with the book's narrator", output)
+        self.assertEqual((self.book / "manifest.json").read_bytes(), manifest)
+
+    def test_unclear_notes_ask_the_person_first(self):
+        self.make_book(risk=False, prepare=two_scenes)
+        manifest = (self.book / "manifest.json").read_bytes()
+        for interactive, answer in ((True, "k\n"), (False, "")):
+            client = PointOfViewClient(asks="?")
+            changed, output = self.review(client, interactive=interactive, answer=answer)
+            self.assertFalse(changed, output)
+            self.assertEqual(client.sections_checked(), [])
+            self.assertEqual("[P] read each section's narration" in output, interactive)
+        self.assertEqual((self.book / "manifest.json").read_bytes(), manifest)
+        client = PointOfViewClient(asks="?")
+        changed, output = self.review(client, answer="p\na\n")
+        self.assertTrue(changed, output)
+        self.assertIn("[P] read each section's narration", output)
+
+    def test_later_notes_about_something_else_keep_the_saved_narrators(self):
+        # ECHO: its saved point-of-view notes stay in force when a later rerun's notes are about the cast.
+        self.make_book(risk=False, prepare=two_scenes)
+        self.review(PointOfViewClient())
+        readers, manifest = self.readers(), (self.book / "manifest.json").read_bytes()
+        client = PointOfViewClient(asks="n")
+        changed, output = self.review(client, instructions="Tom and Mara are different people.")
+        self.assertFalse(changed, output)
+        self.assertEqual(client.sections_checked(), [])
+        self.assertIn("stays with its saved narrators", output)
+        self.assertEqual((self.readers(), (self.book / "manifest.json").read_bytes()), (readers, manifest))
+        self.assertEqual(self.analysis()["provenance"]["narrator_review"]["notes"], NOTES)
+
     def test_without_a_terminal_the_narrators_are_only_listed(self):
         self.make_book(risk=False, prepare=two_scenes)
         manifest = (self.book / "manifest.json").read_bytes()
@@ -197,7 +241,8 @@ class NarratorReviewTests(AttributionCLIHarness):
               contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors)):
             code = main(["analyze", str(self.book), "--instructions", NOTES])
         self.assertIn(code, (0, 2), errors.getvalue() + output.getvalue())
-        self.assertEqual([call["notes"] for call in client.calls], [NOTES])
+        self.assertEqual([(call["mode"], call["notes"]) for call in client.calls],
+                         [("narrator_notes", NOTES), ("narrator_review", NOTES)])
         self.assertIn("Narrator check: whose point of view", output.getvalue())
 
     def test_a_first_person_narrator_has_its_own_voice_linked_to_the_character(self):

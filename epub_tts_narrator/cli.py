@@ -234,9 +234,10 @@ def parser():
                           "Narrator uses one sequential prep read, then terse chapter markup. "
                           "Updating a saved book from a new EPUB defaults to the strategy it was analyzed with")
     run.add_argument("--instructions",
-                     help="Notes on how the book's narration works, such as which characters' points of view it "
-                          "follows (1-2000 characters). Each section's narration is then read in the voice of the "
-                          "character whose point of view it follows; the notes are saved with the book")
+                     help="Your notes about the book for the reviews a rerun makes (1-2000 characters): which cast "
+                          "entries are one person or different people, or, only when you ask for it, that each "
+                          "section's narration is read in the voice of the character whose point of view it "
+                          "follows (those notes are saved with the book)")
     passage_review = input_command("review-attribution", "Review an existing script with source evidence and three-way consensus")
     output_options(passage_review)
     verification = commands.add_parser(
@@ -509,7 +510,8 @@ def main(argv=None, *, in_shell=False):
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Cast entries that are one person are merged (asked first when a voice would change).
             from .cast_review import review_cast
-            if review_cast(directory, config, args.config, provider_client, progress):
+            if review_cast(directory, config, args.config, provider_client, progress,
+                           instructions=args.instructions):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A voice description whose gender the book (or a person's notes) contradicts is fixed.

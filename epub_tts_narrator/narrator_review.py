@@ -2,7 +2,14 @@
 
 A book told in the third person often follows different characters in
 different chapters or scenes. A person's notes about how the narration works
-(``--instructions``) start this review: the book is split into sections at
+(``--instructions``) start this review, but only notes that ask for it: most
+books keep one narrator even when their point of view moves between characters
+(a storyteller reading close third person), and notes are often about something
+else (who is who in the cast). So new notes first go to one check
+(``rerun_review_prompts.NARRATOR_NOTES_CHECK``) of whether they ask for the
+narration to be read by its point-of-view characters; "n" leaves the narration
+as it is (and any saved notes in force), and "?" asks the person in a terminal.
+Then the book is split into sections at
 chapters, headings and scene breaks (a paragraph without letters, such as
 ``#`` or ``* * *``), and each section's opening goes to one check
 (``rerun_review_prompts.NARRATOR_CHECK``) that names the cast entry whose point
@@ -283,6 +290,41 @@ def _ask(question):
         print("Please enter A or L.")
 
 
+def notes_ask_for_narrators(requests, notes):
+    """"y", "n" or "?": whether a person's notes ask for narration read by its point-of-view characters."""
+    from .rerun_review_prompts import NARRATOR_NOTES_CHECK, NARRATOR_NOTES_VERSION
+
+    def validate(response):
+        answer = response.get("r") if isinstance(response, dict) else None
+        if isinstance(answer, list) and len(answer) == 1:
+            answer = answer[0]
+        if answer not in {"y", "n", "?"}:
+            raise ValueError('response must be {"r":"y"|"n"|"?"}')
+        return answer
+    return requests.run(NARRATOR_NOTES_CHECK, {"mode": "narrator_notes", "v": NARRATOR_NOTES_VERSION,
+                                               "notes": notes}, validate)
+
+
+def _ask_wanted(notes):
+    """A person says whether unclear notes ask for point-of-view narrators; without an answer they do not."""
+    print("Narrator check: your notes do not say clearly whether the narration should be read by the character "
+          "whose point of view each section follows:\n  " + notes)
+    while True:
+        print("[P] read each section's narration in its point-of-view character's voice / "
+              "[K] keep the book's narrator: ", end="", flush=True)
+        try:
+            answer = sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt, OSError):
+            answer = ""
+        if answer == "":
+            print()
+            return False
+        answer = answer.strip().casefold()[:1]
+        if answer in {"p", "k"}:
+            return answer == "p"
+        print("Please enter P or K.")
+
+
 def _decide(document, revised, book_sections, chosen, answers, notes):
     """"a" or "l": on the run shell's own screen when one is open, else on the line."""
     from .rerun_questions import NO_SCREEN, ask_on_screen, narrator_view
@@ -305,32 +347,51 @@ def review_narrators(directory, config, client_factory, progress, *, instruction
     original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
     document, _, _ = _completed_directory(directory)
     saved = document["provenance"].get("narrator_review") or {}
-    notes = (instructions or "").strip() or saved.get("notes", "")
+    given = (instructions or "").strip()
+    if given and not 1 <= len(given) <= 2000:
+        raise ValueError("--instructions must be 1-2000 characters")
+    notes = given or saved.get("notes", "")
     if not notes:
         return False
-    if not 1 <= len(notes) <= 2000:
-        raise ValueError("--instructions must be 1-2000 characters")
     if not document["cast"]["characters"]:
         print("Narrator check: the book has no cast characters to narrate.")
         return False
+    requests = None
+
+    def model_requests():
+        nonlocal requests
+        if requests is None:
+            if not config["provider"]["model"]:
+                raise ValueError("The narrator check needs a model; set provider.model in epub-tts-narrator.toml, "
+                                 "or select a TOML file with --config")
+            settings = config["analysis"]
+            client = client_factory(config["provider"])
+            print(f"Narrator check with {client.model} at {client.base_url}; your notes and the opening of each "
+                  f"section it checks will be sent to this endpoint.", file=sys.stderr)
+            requests = CachedRequests(client, analysis_cache_directory(directory, settings["cache_dir"]),
+                                      repair_attempts=settings["repair_attempts"],
+                                      max_request_chars=settings["max_request_chars"], progress=progress)
+        return requests
+    if given and given != saved.get("notes"):
+        # New notes start the check only when they ask for point-of-view narrators.
+        verdict = notes_ask_for_narrators(model_requests(), given)
+        wanted_narrators = verdict == "y" or (verdict == "?" and interactive and _ask_wanted(given))
+        if not wanted_narrators:
+            notes = saved.get("notes", "")
+            print("Narrator check: your notes do not ask for narration read by point-of-view characters, so the "
+                  "narration stays with " + ("its saved narrators." if notes else "the book's narrator."))
+            if not notes:
+                return False
     known = ({row["key"]: row["narrator"] for row in saved.get("sections", [])}
              if saved.get("notes") == notes and saved.get("version") == NARRATOR_REVIEW_VERSION else {})
     book_sections = sections(document)
     wanted = [section for section in book_sections if section["key"] not in known]
     answers = {}
     if wanted:
-        if not config["provider"]["model"]:
-            raise ValueError("The narrator check needs a model; set provider.model in epub-tts-narrator.toml, "
-                             "or select a TOML file with --config")
         settings = config["analysis"]
-        client = client_factory(config["provider"])
-        print(f"Checking whose point of view {len(wanted)} section(s) follow with {client.model} at "
-              f"{client.base_url}; the opening of each section and your notes will be sent to this endpoint.",
-              file=sys.stderr)
-        requests = CachedRequests(client, analysis_cache_directory(directory, settings["cache_dir"]),
-                                  repair_attempts=settings["repair_attempts"],
-                                  max_request_chars=settings["max_request_chars"], progress=progress)
-        answers = check_narrators(document, requests, notes, wanted, workers=min(5, settings["attribution_workers"]))
+        print(f"Checking whose point of view {len(wanted)} section(s) follow.", file=sys.stderr)
+        answers = check_narrators(document, model_requests(), notes, wanted,
+                                  workers=min(5, settings["attribution_workers"]))
     chosen = {section["key"]: known[section["key"]] if section["key"] in known
               else (answers[section["key"]][0] if answers[section["key"]] else None) for section in book_sections}
     revised = apply_narrators(document, chosen)

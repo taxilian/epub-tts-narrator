@@ -5,7 +5,10 @@ shared name, a shared first name, one name inside the other), one whole-cast
 request asking which entries may be one person under different names (an
 epithet before a reveal, a title, a disguise), and a person's character notes
 (``renderer/character_notes``) giving a later name that another entry has.
-Each pair is checked against the book's text with the first analysis's
+Notes given with ``analyze BOOK --instructions`` join that whole-cast request
+(``rerun_review_prompts.NOMINATE_WITH_INSTRUCTIONS``): pairs they say are one
+person are asked about like a character note's, and pairs they say are
+different people are not merged in this run. Each pair is checked against the book's text with the first analysis's
 same-person check (``narrator_prompts.MERGE_CHECK``: "y" only when the text
 shows they are one person).
 
@@ -104,13 +107,16 @@ def _context(document, row, other, numbers):
     return sorted(unique, key=lambda block: numbers[block["id"]])
 
 
-def nominate(document, requests, notes):
-    """The whole-cast request: pairs of entry IDs that may be one person."""
-    from .rerun_review_prompts import CAST_REVIEW_VERSION, NOMINATE
+def nominate(document, requests, notes, instructions=None):
+    """The whole-cast request: pairs of entry IDs that may be one person.
+
+    With a person's ``instructions``: ``(pairs, same, apart)``, adding the pairs the notes say are one
+    person and the pairs they say are different people."""
+    from .rerun_review_prompts import CAST_REVIEW_VERSION, NOMINATE, NOMINATE_WITH_INSTRUCTIONS
     from .character_merge import first_line
     rows = document["cast"]["characters"]
     if len(rows) < 2:
-        return []
+        return ([], [], []) if instructions else []
     labels = {f"c{index}": row for index, row in enumerate(rows, 1)}
     label_of = {row["id"]: label for label, row in labels.items()}
     cast = "\n".join("|".join([label, row["name"], ";".join(row.get("aliases", [])), _sex(document, row),
@@ -127,11 +133,10 @@ def nominate(document, requests, notes):
                 lines.append("|".join([label_of[by_voice[voice_id]["id"]], ";".join(names), gender, origin, text]))
         if lines:
             payload["notes"] = "\n".join(lines)
+    if instructions:
+        payload["instructions"] = instructions
 
-    def validate(response):
-        rows_ = response.get("r") if isinstance(response, dict) else None
-        if not isinstance(rows_, list):
-            raise ValueError('response must be {"r":[[id,id]]}')
+    def pairs_of(rows_):
         pairs = []
         for row in rows_:
             if not (isinstance(row, list) and len(row) >= 2):
@@ -142,7 +147,18 @@ def nominate(document, requests, notes):
                 raise ValueError("each pair must name two different cast ids from the request")
             pairs.append((labels[left]["id"], labels[right]["id"]))
         return pairs
-    return requests.run(NOMINATE, payload, validate)
+
+    def validate(response):
+        rows_ = response.get("r", [] if instructions else None) if isinstance(response, dict) else None
+        if not isinstance(rows_, list):
+            raise ValueError('response must be {"r":[[id,id]]}')
+        if not instructions:
+            return pairs_of(rows_)
+        extra = {key: response.get(key, []) for key in ("same", "apart")}
+        if not all(isinstance(value, list) for value in extra.values()):
+            raise ValueError('"same" and "apart" must be lists of [id,id] pairs')
+        return pairs_of(rows_), pairs_of(extra["same"]), pairs_of(extra["apart"])
+    return requests.run(NOMINATE_WITH_INSTRUCTIONS if instructions else NOMINATE, payload, validate)
 
 
 def check_pairs(document, requests, pairs, *, workers=1):
@@ -251,7 +267,7 @@ def _renderer_context(directory, config_path):
         return None
 
 
-def review_cast(directory, config, config_path, client_factory, progress, *, interactive=None):
+def review_cast(directory, config, config_path, client_factory, progress, *, interactive=None, instructions=None):
     """``analyze BOOK``: find and merge cast entries that are one person; True when the book changed."""
     from .analysis_directory import _completed_directory
     from .analysis_progress import analysis_cache_directory
@@ -277,9 +293,19 @@ def review_cast(directory, config, config_path, client_factory, progress, *, int
     requests = CachedRequests(client, cache, repair_attempts=settings["repair_attempts"],
                               max_request_chars=settings["max_request_chars"], progress=progress)
     from_notes = note_pairs(document, notes)
-    pairs = list(dict.fromkeys([*overlap_pairs(document, earlier), *nominate(document, requests, notes),
-                                *from_notes]))
-    apart = kept_apart(directory)
+    instructions = (instructions or "").strip() or None
+    nominated, said_apart = nominate(document, requests, notes, instructions), set()
+    if instructions:
+        nominated, same, different = nominated
+        names_ = {row["id"]: row["name"] for row in document["cast"]["characters"]}
+        for a, b in same:
+            from_notes.setdefault((a, b), f"your notes say {names_[a]} and {names_[b]} are one person")
+        said_apart = {_key(a, b) for a, b in different}
+        for a, b in different:
+            print(f"Cast review: your notes say {names_[a]} and {names_[b]} are different people; "
+                  f"they are not merged.")
+    pairs = list(dict.fromkeys([*overlap_pairs(document, earlier), *nominated, *from_notes]))
+    apart = kept_apart(directory) | said_apart
     pairs = [pair for pair in pairs if _key(*pair) not in apart and not (pair[0] in earlier and pair[1] in earlier)]
     unique = list({_key(*pair): pair for pair in pairs}.values())
     verdicts = check_pairs(document, requests, unique, workers=min(5, settings["attribution_workers"]))
