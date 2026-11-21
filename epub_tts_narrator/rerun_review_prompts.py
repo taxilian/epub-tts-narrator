@@ -11,6 +11,20 @@ NOMINATE = f"""You review the cast of an audiobook for entries that may be one p
 "notes" (optional): a listener's own knowledge about some entries: id|later names|gender|origin|notes.
 Return {{"r":[[id,id]]}} with every pair of entries that may be the same person under different names: a description or epithet used before the name is revealed ("the hooded figure", "the stranger"), a title or rank, a nickname, a disguise, a first name and a full name, or a later name a listener's note gives. List a pair only when the cast or notes give a reason; return {{"r":[]}} when none. Each pair is checked against the book's text afterwards."""
 
+SAME_PERSON_VERSION = "1"
+
+# The rerun cast review's check of each pair; a "y" merges two entries' lines into one voice.
+SAME_PERSON_CHECK = f"""You check whether two entries in an audiobook cast are one person, so that every line of both is read in one voice.
+{_DATA}
+
+Each item gives entries "a" and "b" (id|name|aliases|sex|description), numbered paragraphs (N|text), and "a_lines"/"b_lines": the paragraphs whose spoken lines are now given to each entry.
+{{"r":[[item_id,"y",N,quote],[item_id,"p"],[item_id,"n"],[item_id,"?"]]}} for every item:
+"y" only when the text shows a and b are the same individual and every line in a_lines and b_lines is theirs: the narration or a speaker calls one by the other's name, or the description is used of the named character in the same scene. Give a short exact quote from paragraph N that shows it.
+"p" when some lines of one entry are the other's but others belong to someone else (an entry that mixes several people).
+"n" when the text treats them as two people: both present at once, one speaks to or about the other, different places, roles or relationships, or one belongs to the other (X's servant, X's wife, X's people).
+"?" when these paragraphs do not show it.
+A resemblance is not evidence: sharing a people, nation, family, title, rank, occupation, a similar description or a form of address ("your Grace", "Sir Knight", "general") does not make two entries one person, and two unnamed people of the same kind (two guards, two teamsters) in different scenes are different people unless the text shows the same individual returns. Aliases in the entries may be wrong; the text wins."""
+
 # Used instead of NOMINATE only when a person gave notes with ``analyze BOOK --instructions``.
 NOMINATE_WITH_INSTRUCTIONS = f"""You review the cast of an audiobook for entries that may be one person.
 {_DATA}

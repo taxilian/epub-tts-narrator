@@ -8,9 +8,14 @@ epithet before a reveal, a title, a disguise), and a person's character notes
 Notes given with ``analyze BOOK --instructions`` join that whole-cast request
 (``rerun_review_prompts.NOMINATE_WITH_INSTRUCTIONS``): pairs they say are one
 person are asked about like a character note's, and pairs they say are
-different people are not merged in this run. Each pair is checked against the book's text with the first analysis's
-same-person check (``narrator_prompts.MERGE_CHECK``: "y" only when the text
-shows they are one person).
+different people are not merged in this run. Overlap means the same name or one name's words inside the other's; a form
+of address ("your Grace") or a name standing only as a word about someone
+else ("Silk's servant", "Cherek sleigh driver") is not one. Each pair is
+checked against the book's text (``rerun_review_prompts.SAME_PERSON_CHECK``),
+shown up to six of each entry's lines spread over the book: "y" needs an exact
+quote showing they are one person and every line being theirs, a resemblance
+(people, title, rank, occupation, description) is never evidence, and "p"
+(an entry that mixes several people) is reported, never merged.
 
 A pair the text shows is one person is merged at once through
 ``merge-characters``' plan and publication (``character_merge_command``:
@@ -35,6 +40,7 @@ import sys
 
 REVIEW_FILENAME = "cast-review.json"
 VERIFY_BATCH = 25
+BATCH_CHARS = 60000
 NO_VOICE = "no accepted voice yet"
 
 
@@ -48,22 +54,53 @@ def _sex(document, row):
     return first[0] if first and first[0] in {"Male", "Female", "Androgynous"} else ""
 
 
+# A form of address ("your Grace", "my Lord") is said to many people; it never names one.
+_ADDRESS = re.compile(r"^(?:your|her|his|my|our|their|thy|thine)\b", re.I)
+
+
+def _person_names(row):
+    return [name for name in _names(row) if not _ADDRESS.match(name.strip())]
+
+
+def _describes_another(longer, shorter):
+    """True when ``shorter`` (a name) stands in ``longer`` only as a word describing someone else.
+
+    A possessive ("Silk's servant", "Actas' wife") or a name followed by a lowercase noun ("Cherek sleigh
+    driver", "Temple guard") names another person: one belonging to, or from, the named one."""
+    words = re.findall(r"\w+", shorter)
+    if not words:
+        return False
+    match = re.search(r"\b" + r"\W+".join(map(re.escape, words)) + r"\b(['’]s?(?!\w))?", longer, re.I)
+    if match is None:
+        return False
+    if match.group(1):
+        return True
+    following = re.match(r"\W*(\w+)", longer[match.end():])
+    return bool(following and following.group(1)[:1].islower())
+
+
 def overlap_pairs(document, earlier):
-    """Pairs of entries whose names overlap; two different earlier-book characters are never paired."""
+    """Pairs of entries whose names overlap; two different earlier-book characters are never paired.
+
+    The same name, or one name's words inside the other's ("Mara" and "Mara Venn", "General Varana"), make
+    a pair; a form of address, or a name standing only as a word about someone else, does not."""
     from .narrator_ledger import _norm
     rows = document["cast"]["characters"]
     pairs = []
+
+    def overlap(x, y):
+        nx, ny = _norm(x), _norm(y)
+        if not nx or not ny:
+            return False
+        if nx == ny:
+            return True
+        small, large, large_raw = (nx, ny, y) if len(nx.split()) < len(ny.split()) else (ny, nx, x)
+        return set(small.split()) < set(large.split()) and not _describes_another(large_raw, small)
     for index, left in enumerate(rows):
         for right in rows[index + 1:]:
             if left["id"] in earlier and right["id"] in earlier:
                 continue
-            a = {_norm(name) for name in _names(left)} - {""}
-            b = {_norm(name) for name in _names(right)} - {""}
-            first = ({name.split()[0] for name in a if " " in name} & b
-                     or {name.split()[0] for name in b if " " in name} & a)
-            contained = any(set(x.split()) < set(y.split()) or set(y.split()) < set(x.split())
-                            for x in a for y in b)
-            if a & b or first or contained:
+            if any(overlap(x, y) for x in _person_names(left) for y in _person_names(right)):
                 pairs.append((left["id"], right["id"]))
     return pairs
 
@@ -85,9 +122,27 @@ def note_pairs(document, notes):
     return result
 
 
-def _context(document, row, other, numbers):
-    """Paragraphs naming each entry, paragraphs each speaks, and paragraphs naming both."""
+LINES_SHOWN = 6
+
+
+def _spread(values, count):
+    """Up to ``count`` of ``values`` spread from the first to the last."""
+    if len(values) <= count:
+        return list(values)
+    return [values[round(index * (len(values) - 1) / (count - 1))] for index in range(count)]
+
+
+def _spoken_blocks(document, row):
     from .character_merge import character_roles
+    roles = {role["id"] for role in character_roles(document, row["id"])}
+    return list(dict.fromkeys(segment["block_id"] for segment in document["segments"]
+                              if segment.get("role_id") in roles
+                              or any(member["role_id"] in roles
+                                     for member in segment.get("simultaneous_speakers", []))))
+
+
+def _context(document, row, other, numbers):
+    """Paragraphs naming each entry, paragraphs each speaks (spread over the book), and paragraphs naming both."""
     blocks = document["source"]["blocks"]
     by_id = {block["id"]: block for block in blocks}
     found = []
@@ -95,13 +150,9 @@ def _context(document, row, other, numbers):
     for entry in (row, other):
         pattern = re.compile(r"\b(?:" + "|".join(re.escape(name) for name in _names(entry)) + r")\b", re.I)
         patterns.append(pattern)
-        roles = {role["id"] for role in character_roles(document, entry["id"])}
-        spoken = list(dict.fromkeys(segment["block_id"] for segment in document["segments"]
-                                    if segment.get("role_id") in roles
-                                    or any(member["role_id"] in roles
-                                           for member in segment.get("simultaneous_speakers", []))))
+        spoken = _spoken_blocks(document, entry)
         found += [block for block in blocks if pattern.search(block["text"])][:2]
-        found += [by_id[block_id] for block_id in spoken[:2]]
+        found += [by_id[block_id] for block_id in _spread(spoken, LINES_SHOWN)]
     found += [block for block in blocks if all(pattern.search(block["text"]) for pattern in patterns)][:2]
     unique = list({block["id"]: block for block in found}.values())
     return sorted(unique, key=lambda block: numbers[block["id"]])
@@ -162,9 +213,10 @@ def nominate(document, requests, notes, instructions=None):
 
 
 def check_pairs(document, requests, pairs, *, workers=1):
-    """``{(a, b): "y"|"n"|"?"}`` from the first analysis's same-person check, with each pair's paragraphs."""
-    from .narrator_prompts import MERGE_CHECK
-    from .narrator_read import PROMPT_VERSION, _is, _item_row, _numbers, _parallel, _render_blocks, _unwrap
+    """``{(a, b): (verdict, quote)}``: "y" with the exact quote showing one person, "p" (an entry mixes
+    several people), "n" or "?", from ``rerun_review_prompts.SAME_PERSON_CHECK``."""
+    from .narrator_read import _is, _item_row, _numbers, _parallel, _render_blocks, _unwrap
+    from .rerun_review_prompts import SAME_PERSON_CHECK, SAME_PERSON_VERSION
     if not pairs:
         return {}
     numbers = _numbers(document["source"])
@@ -173,30 +225,56 @@ def check_pairs(document, requests, pairs, *, workers=1):
     def line(row):
         return "|".join([row["id"], row["name"], ";".join(row.get("aliases", [])), _sex(document, row),
                          " ".join(row.get("description", "").split())])
-    items = [{"id": f"m{index}", "a": line(rows[a]), "b": line(rows[b]),
-              "text": _render_blocks(_context(document, rows[a], rows[b], numbers), numbers), "_pair": (a, b)}
-             for index, (a, b) in enumerate(pairs, 1)]
-    batches = [items[start:start + VERIFY_BATCH] for start in range(0, len(items), VERIFY_BATCH)]
+    items = []
+    for index, (a, b) in enumerate(pairs, 1):
+        shown = _context(document, rows[a], rows[b], numbers)
+        shown_ids = {block["id"] for block in shown}
+        items.append({"id": f"m{index}", "a": line(rows[a]), "b": line(rows[b]),
+                      "text": _render_blocks(shown, numbers),
+                      "a_lines": [numbers[block_id] for block_id in _spoken_blocks(document, rows[a])
+                                  if block_id in shown_ids],
+                      "b_lines": [numbers[block_id] for block_id in _spoken_blocks(document, rows[b])
+                                  if block_id in shown_ids],
+                      "_pair": (a, b), "_text": {numbers[block["id"]]: block["text"] for block in shown}})
+    batches, batch, size = [], [], 0
+    for item in items:
+        if batch and (len(batch) >= VERIFY_BATCH or size + len(item["text"]) > BATCH_CHARS):
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append(item)
+        size += len(item["text"])
+    if batch:
+        batches.append(batch)
 
     def run(batch):
-        payload = {"mode": "narrator_duplicate_check", "v": PROMPT_VERSION,
+        payload = {"mode": "cast_review_same_person", "v": SAME_PERSON_VERSION,
                    "items": [{key: value for key, value in item.items() if not key.startswith("_")} for item in batch]}
-        expected = {item["id"] for item in batch}
+        by_id = {item["id"]: item for item in batch}
 
         def validate(response):
             answers = _unwrap(response.get("r")) if isinstance(response, dict) else None
             if not isinstance(answers, list):
-                raise ValueError('response must be {"r":[[item_id,"y"|"n"|"?"]]}')
+                raise ValueError('response must be {"r":[[item_id,"y",N,quote]|[item_id,"p"|"n"|"?"]]}')
             result = {}
             for row in answers:
                 row = _item_row(row, "m")
-                if isinstance(row, list) and len(row) >= 2 and _is(row[0], expected) and _is(row[1], {"y", "n", "?"}):
-                    result[row[0]] = row[1]
-            missing = sorted(expected - set(result))
+                if not (isinstance(row, list) and len(row) >= 2 and _is(row[0], set(by_id))
+                        and _is(row[1], {"y", "p", "n", "?"})):
+                    continue
+                if row[1] != "y":
+                    result[row[0]] = (row[1], "")
+                    continue
+                text = by_id[row[0]]["_text"].get(row[2]) if len(row) >= 4 and type(row[2]) is int else None
+                quote = row[3].strip() if len(row) >= 4 and isinstance(row[3], str) else ""
+                if text is None or not quote or quote not in text:
+                    raise ValueError(f'{row[0]}: "y" needs [item_id,"y",N,quote] with an exact quote from '
+                                     f"paragraph N that shows they are one person")
+                result[row[0]] = ("y", quote)
+            missing = sorted(set(by_id) - set(result), key=lambda name: int(name[1:]))
             if missing:
                 raise ValueError(f"missing or invalid verdicts for items: {', '.join(missing[:20])}")
             return result
-        return requests.run(MERGE_CHECK, payload, validate)
+        return requests.run(SAME_PERSON_CHECK, payload, validate)
     verdicts = {}
     for result in _parallel(run, batches, workers):
         verdicts.update(result)
@@ -311,12 +389,14 @@ def review_cast(directory, config, config_path, client_factory, progress, *, int
     verdicts = check_pairs(document, requests, unique, workers=min(5, settings["attribution_workers"]))
     reasons = {_key(*pair): text for pair, text in from_notes.items()}
     names = {row["id"]: row["name"] for row in document["cast"]["characters"]}
-    changed, gone, unsure = False, {}, []
+    changed, gone, unsure, mixed = False, {}, [], []
     for pair in unique:
-        verdict, note = verdicts[pair], reasons.get(_key(*pair))
+        (verdict, quote), note = verdicts[pair], reasons.get(_key(*pair))
         if verdict != "y" and note is None:
             if verdict == "?":
                 unsure.append(pair)
+            if verdict == "p":
+                mixed.append(pair)
             continue
         a, b = (gone.get(value, value) for value in pair)
         if a == b:
@@ -329,7 +409,7 @@ def review_cast(directory, config, config_path, client_factory, progress, *, int
             print(f"Cast review: {names.get(a, a)} and {names.get(b, b)} may be one person, but they cannot be "
                   f"merged here: {error}")
             continue
-        why = "the book's text shows they are one person" if verdict == "y" else note
+        why = f"the book's text shows they are one person: “{quote}”" if verdict == "y" else note
         automatic = (verdict == "y" and context is not None
                      and plan.kept_voice == NO_VOICE and plan.absorbed_voice == NO_VOICE)
         if not automatic:
@@ -355,6 +435,9 @@ def review_cast(directory, config, config_path, client_factory, progress, *, int
         gone = {key: (plan.kept["id"] if value == plan.absorbed["id"] else value) for key, value in gone.items()}
         gone[plan.absorbed["id"]] = plan.kept["id"]
         changed = True
+    for a, b in mixed:
+        print(f"Cast review: some lines of {names[a]} or {names[b]} may be the other's, but not all of them, so "
+              f"they are not merged. Check those lines with verify-attribution {directory} or review-ui.")
     for a, b in unsure:
         print(f"Cast review: {names[a]} and {names[b]} may be one person; the text does not say. To merge them: "
               f"merge-characters {directory} {a} {b}")

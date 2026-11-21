@@ -32,8 +32,14 @@ class ReviewClient:
             if "instructions" in payload:
                 return {"r": self.pairs, "same": self.same, "apart": self.apart}
             return {"r": self.pairs}
-        if payload["mode"] == "narrator_duplicate_check":
-            return {"r": [[item["id"], self.verdict] for item in payload["items"]]}
+        if payload["mode"] == "cast_review_same_person":
+            if self.verdict != "y":
+                return {"r": [[item["id"], self.verdict] for item in payload["items"]]}
+            answers = []
+            for item in payload["items"]:
+                number, text = item["text"].splitlines()[0].split("|", 1)
+                answers.append([item["id"], "y", int(number), text[:12]])
+            return {"r": answers}
         raise AssertionError(f"Unexpected request mode: {payload['mode']}")
 
     def modes(self):
@@ -127,7 +133,7 @@ class CastReviewTests(AttributionCLIHarness):
         changed, output = self.review(client, voiced={"Mara"}, interactive=True)
         self.assertFalse(changed)
         self.assertNotIn("[M] merge them", output)
-        self.assertNotIn("narrator_duplicate_check", client.modes())
+        self.assertNotIn("cast_review_same_person", client.modes())
 
     def test_a_later_name_in_a_persons_notes_is_asked_about_even_when_the_text_does_not_say(self):
         self.make_book(risk=False, prepare=renamed("the cowled shadow"))
@@ -175,7 +181,7 @@ class CastReviewTests(AttributionCLIHarness):
         self.assertEqual(type(screen).__name__, "MergeScreen")
         view = screen.view
         self.assertEqual(view["title"], "Are these the same character?")
-        self.assertEqual(view["why"], "The book's text shows they are one person.")
+        self.assertEqual(view["why"], "The book's text shows they are one person: “Mara said so”.")
         kept, absorbed = view["entries"]
         self.assertEqual((kept["name"], kept["voice"], absorbed["name"], absorbed["voice"]),
                          ("Mara", "Accepted voice", "Mara Vell", "No accepted voice yet"))
@@ -196,12 +202,53 @@ class CastReviewTests(AttributionCLIHarness):
         self.assertTrue(changed, output)
         self.assertEqual(self.cast(), ["Mara"])
 
+    def test_an_entry_mixing_several_people_is_reported_and_never_merged(self):
+        # Mallorean 5: "armored knight" holds Mandorallen's lines on the ship and another knight's at Perivor.
+        self.make_book(risk=False, prepare=renamed("Mara Vell"))
+        changed, output = self.review(ReviewClient(verdict="p"), voiced={"Mara"}, interactive=True, answer="m\n")
+        self.assertFalse(changed, output)
+        self.assertNotIn("[M] merge them", output)
+        self.assertIn("not merged", output)
+        self.assertEqual(len(self.cast()), 2)
+
+    def test_the_check_sees_lines_from_across_each_entry(self):
+        self.assertEqual(cast_review._spread(list(range(100)), 6), [0, 20, 40, 59, 79, 99])
+        self.assertEqual(cast_review._spread([1, 2], 6), [1, 2])
+
     def test_an_unsure_pair_is_reported_and_left(self):
         self.make_book(risk=False, prepare=renamed("Mara Vell"))
         changed, output = self.review(ReviewClient(verdict="?"))
         self.assertFalse(changed)
         self.assertIn("the text does not say", output)
         self.assertEqual(len(self.cast()), 2)
+
+
+class OverlapTests(unittest.TestCase):
+    """Which names make a pair worth checking; the check against the text decides the rest."""
+
+    def pairs(self, *entries):
+        document = {"cast": {"characters": [{"id": f"c{index}", "name": name, "aliases": list(aliases)}
+                                            for index, (name, *aliases) in enumerate(entries, 1)]}}
+        return [tuple(entries[int(value[1:]) - 1][0] for value in pair)
+                for pair in cast_review.overlap_pairs(document, set())]
+
+    def test_a_name_about_someone_else_makes_no_pair(self):
+        for other in ("Silk's liveried servant", "Actas' wife", "Faldor’s people", "Cherek sleigh driver",
+                      "Cherek guard"):
+            name = other.split()[0].rstrip("'’s").rstrip("’'")
+            with self.subTest(other):
+                self.assertEqual(self.pairs((name,), (other,)), [])
+
+    def test_a_shared_form_of_address_makes_no_pair(self):
+        self.assertEqual(self.pairs(("General Varana", "Your Grace"), ("Archduchess", "her Grace", "your Grace")),
+                         [])
+
+    def test_full_names_titles_and_epithets_still_pair(self):
+        self.assertEqual(self.pairs(("Mara",), ("Mara Venn",)), [("Mara", "Mara Venn")])
+        self.assertEqual(self.pairs(("Varana",), ("General Varana",)), [("Varana", "General Varana")])
+        self.assertEqual(self.pairs(("old Mara",), ("Mara",)), [("old Mara", "Mara")])
+        self.assertEqual(self.pairs(("Sendarian teamster", "teamster"), ("surly teamster",)),
+                         [("Sendarian teamster", "surly teamster")])
 
 
 if __name__ == "__main__":
