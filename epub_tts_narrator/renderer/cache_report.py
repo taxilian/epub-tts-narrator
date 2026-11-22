@@ -12,6 +12,8 @@ from .workflow import history_reuse_tolerant, make_render_plan, _paragraph_reque
 
 
 class _ReadOnlySpeechCache(SpeechCache):
+    saves_load_snapshot = False
+
     def _publish(self, key, entry):
         self._register(key, entry)
 

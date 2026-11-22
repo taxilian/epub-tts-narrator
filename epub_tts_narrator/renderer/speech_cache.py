@@ -9,7 +9,7 @@ import re
 from threading import RLock
 
 from .common import digest, file_hash, read_json, regular_file, write_json
-from .stored_audio import audio_hash, audio_present, regular_audio
+from .stored_audio import audio_files, audio_hash, audio_present, regular_audio
 from .speech_identity import generation_compatible, generation_identity, synthesis_engine_identity
 
 
@@ -120,33 +120,118 @@ class SpeechCache:
             validate_record(record)
         return path, audio, record
 
+    # Whether ``_load`` saves what it read for the next start (``file_snapshot``); read-only reports do not.
+    saves_load_snapshot = True
+    LOAD_SNAPSHOT = "speech-cache-load-snapshot.json"
+
+    def _index_keys(self, path, request_hash, audio_file):
+        """What an index record's result depends on: it, its take's acceptance, the take folder, and its audio."""
+        from .file_snapshot import stat_key
+        directory = self.work / "clips" / request_hash
+        return {"index": stat_key(path), "accepted": stat_key(directory / "accepted.json"),
+                "folder": (stat_key(directory) or [None])[0],
+                "audio": [stat_key(file) for file in audio_files(directory / audio_file)] if audio_file else None}
+
+    def _read_index_result(self, path):
+        """``{"indexed": hash or None}``, plus the entry, position and concrete lookup it registers; None when it may change (missing audio)."""
+        try:
+            entry = self._read_index(path)
+            saved = self._accepted(entry.get("request_hash"))
+        except ValueError:
+            return {"indexed": None}
+        if saved is None:
+            return None  # its acceptance or audio may yet appear; read it again next time
+        result = {"indexed": entry["request_hash"], "audio_file": saved[2]["audio_file"]}
+        if file_hash(saved[0]) != entry.get("accepted_sha256"):
+            return result
+        concrete = self._concrete_entry(entry, saved[2])
+        result.update(entry=entry, position=self._position_key(entry["identity"], saved[2].get("request")),
+                      concrete=None if concrete is None else [digest(concrete["identity"]), concrete])
+        return result
+
+    def _apply_index_result(self, key, result, indexed):
+        if result.get("indexed"):
+            indexed.add(result["indexed"])
+        if "entry" not in result:
+            return
+        self._register(key, result["entry"])
+        if result["position"] is not None:
+            self.positions.setdefault(result["position"], set()).add(key)
+        if result["concrete"] is not None and result["concrete"][0] not in self.entries:
+            # A persisted concrete lookup takes precedence over a derived one.
+            self._register(*result["concrete"])
+
+    @staticmethod
+    def _index_files(index):
+        """``sorted(index.glob("*.json"))``, listed without pathlib's per-name overhead."""
+        import os
+        try:
+            names = os.listdir(index)
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+        return [index / name for name in sorted(names) if name.endswith(".json") and not name.startswith(".")]
+
+    def _unindexed_acceptances(self, indexed):
+        """``clips/*/accepted.json`` of takes the index does not name, in the same order as globbing them."""
+        import os
+        clips = self.work / "clips"
+        try:
+            names = os.listdir(clips)
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+        paths = []
+        for name in sorted(names):
+            if name in indexed or name.startswith("."):
+                continue
+            path = clips / name / "accepted.json"
+            if path.exists() or path.is_symlink():
+                paths.append(path)
+        return paths
+
     def _load(self):
         if self.loaded:
             return
+        from . import file_snapshot
         index = self.work / "speech-cache"
         if index.is_symlink():
             raise ValueError("Speech cache index must not use symlinks")
         indexed = set()
+        # What the last start read, by each file's stat: an unchanged record
+        # gives its saved result instead of reading and hashing it again.
+        snapshot_path = self.work / self.LOAD_SNAPSHOT
+        previous = file_snapshot.load(snapshot_path, "speech-cache-load", None)
+        if (self.work / "clips").is_symlink():
+            previous = {}  # every take is then refused as it is read, as without a snapshot
+        current = {}
         # One unreadable or invalid take is left out of the index rather than
         # failing the whole load: a failed load is retried by every waiting
         # block, each rereading every take, so the render stalls.
-        for path in sorted(index.glob("*.json")):
-            try:
-                entry = self._read_index(path)
-                saved = self._accepted(entry.get("request_hash"))
-            except ValueError:
+        for path in self._index_files(index):
+            saved = previous.get(path.name)
+            result = None
+            if isinstance(saved, list) and len(saved) == 2 and isinstance(saved[1], dict):
+                keys, result = saved
+                request_hash = result.get("indexed") or path.stem
+                if keys != (self._index_keys(path, request_hash, result.get("audio_file"))
+                            if result.get("indexed") else {"index": file_snapshot.stat_key(path)}):
+                    result = None
+            if result is None:
+                before = file_snapshot.stat_key(path)
+                result = self._read_index_result(path)
+                if result is not None:
+                    keys = (self._index_keys(path, result["indexed"], result.get("audio_file"))
+                            if result["indexed"] else {"index": file_snapshot.stat_key(path)})
+                    if keys["index"] != before:
+                        keys = None  # it changed while it was read: do not vouch for it
+                    if keys is not None:
+                        current[path.name] = [keys, result]
+                    self._apply_index_result(path.stem, result, indexed)
                 continue
-            indexed.add(entry["request_hash"])
-            if saved is None or file_hash(saved[0]) != entry.get("accepted_sha256"):
-                continue
-            self._register(path.stem, entry)
-            self._register_position(path.stem, entry, saved[2])
-            self._register_concrete(entry, saved[2])
+            current[path.name] = saved
+            self._apply_index_result(path.stem, result, indexed)
         # Import successful legacy takes without copying audio or changing
         # their provenance. Unresolvable historical voices cannot be guessed.
-        for path in sorted((self.work / "clips").glob("*/accepted.json")):
-            if path.parent.name in indexed:
-                continue
+        for path in self._unindexed_acceptances(indexed):
             try:
                 saved = self._accepted(path.parent.name)
             except ValueError:
@@ -167,6 +252,8 @@ class SpeechCache:
                 self._register_position(key, entry, record)
             self._register_concrete(entry, record)
         self.loaded = True
+        if self.saves_load_snapshot and current != previous:
+            file_snapshot.save(snapshot_path, "speech-cache-load", None, current)
 
     @staticmethod
     def _read_index(path):

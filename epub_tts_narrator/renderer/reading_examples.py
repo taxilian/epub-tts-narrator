@@ -113,6 +113,111 @@ def _scan_parts(clips):
     return found
 
 
+CANDIDATE_SNAPSHOT = "reading-example-candidates-snapshot.json"
+
+
+class _WorkCandidates:
+    """The example candidates of one render work's accepted takes, read once and shared.
+
+    Every book of a render queue, and every chapter of each, looks in the
+    same earlier books, so each work's takes are read once per process; and
+    a stat-checked snapshot (``file_snapshot``) beside them means an
+    unchanged ``accepted.json`` is not read again on the next start.
+    """
+
+    def __init__(self, work):
+        self.work = Path(work)
+        self._found = None
+        self.version = 0
+        self._lock = threading.Lock()
+
+    def get(self):
+        with self._lock:
+            if self._found is None:
+                self._found = self._read()
+                self.version += 1
+            return self._found, self.version
+
+    def add(self, candidate):
+        with self._lock:
+            if self._found is None:
+                return  # read from disk on first use, which includes it
+            if not any(item["accepted"] == candidate["accepted"] and item["record_audio"] == candidate["record_audio"]
+                       for item in self._found):
+                self._found = [*self._found, candidate]
+                self.version += 1
+
+    def _paths(self):
+        import os
+        clips = self.work / "clips"
+        if not clips.is_dir() or clips.is_symlink():
+            return []
+        paths = []
+        for name in os.listdir(clips):
+            if not name.startswith("."):
+                paths.append(clips / name / "accepted.json")
+        for folders in _part_folders(self.work).get().values():
+            paths.extend(folder / "accepted.json" for folder in folders)
+        return sorted(paths)
+
+    def _read(self):
+        from . import file_snapshot
+        from .common import read_json
+        snapshot = self.work / CANDIDATE_SNAPSHOT
+        previous = file_snapshot.load(snapshot, "reading-example-candidates", None)
+        current, found = {}, []
+        for path in self._paths():
+            key = file_snapshot.stat_key(path)
+            if key is None:
+                continue
+            name = str(path.relative_to(self.work))
+            saved = previous.get(name)
+            if isinstance(saved, list) and len(saved) == 2 and saved[0] == key:
+                row = saved[1]
+                current[name] = saved
+            else:
+                row = None
+                try:
+                    if not path.is_symlink() and b'"cmu_arpabet"' in path.read_bytes():
+                        row = _saved_candidate(ReadingExamples._candidate(path, read_json(path)))
+                except (ValueError, OSError):
+                    continue  # unreadable now: read it again next time
+                if file_snapshot.stat_key(path) == key:  # unchanged while it was read
+                    current[name] = [key, row]
+            if row is not None:
+                found.append(dict(row, accepted=path, readings=frozenset(row["readings"])))
+        if current != previous:
+            file_snapshot.save(snapshot, "reading-example-candidates", None, current)
+        return found
+
+
+def _saved_candidate(candidate):
+    """A candidate as JSON (its path is the snapshot's key; readings sorted), or None."""
+    if candidate is None:
+        return None
+    row = {key: value for key, value in candidate.items() if key != "accepted"}
+    return dict(row, readings=sorted(candidate["readings"]))
+
+
+_CANDIDATES = {}
+
+
+def _work_candidates(work):
+    key = str(Path(work).resolve())
+    with _LOCK:
+        if key not in _CANDIDATES:
+            _CANDIDATES[key] = _WorkCandidates(work)
+        return _CANDIDATES[key]
+
+
+def forget():
+    """Drop every index this process has read (as a new process starts); the on-disk snapshots stay."""
+    with _LOCK:
+        _INDEXES.clear()
+        _CANDIDATES.clear()
+        _PARTS.clear()
+
+
 def note_part(folder):
     """Register a split-passage part folder (``clips/HASH/parts/PART``) the render is making."""
     folder = Path(folder)
@@ -184,42 +289,22 @@ class ReadingExamples:
         return [work for work in (Path(directory) / "render-work" for directory in earlier)
                 if (work / "clips").is_dir() and not (work / "clips").is_symlink()]
 
-    def _build(self):
-        from .common import read_json
-        candidates = []
-        for distance, work in enumerate([self.work, *self._earlier_works()]):
-            clips = work / "clips"
-            if not clips.is_dir() or clips.is_symlink():
-                continue
-            for path in sorted([*clips.glob("*/accepted.json"), *clips.glob("*/parts/*/accepted.json")]):
-                try:
-                    if path.is_symlink() or b'"cmu_arpabet"' not in path.read_bytes():
-                        continue
-                    candidate = self._candidate(path, read_json(path))
-                except (ValueError, OSError):
-                    continue
-                if candidate is not None:
-                    # How many books back it was spoken (0: this book).
-                    candidates.append(dict(candidate, book=distance))
-        return candidates
-
     def candidates(self):
+        """Every work's candidates, this book's first, each marked with how many books back it is (``book``)."""
+        works = [(distance, _work_candidates(work)) for distance, work in enumerate(self._works())]
+        found = [(distance, *shared.get()) for distance, shared in works]
+        versions = tuple((distance, version) for distance, _, version in found)
         with self._lock:
-            if self._candidates is None:
-                self._candidates = self._build()
-            return list(self._candidates)
+            if self._candidates is None or self._candidates[0] != versions:
+                self._candidates = (versions, [dict(candidate, book=distance)
+                                               for distance, rows, _ in found for candidate in rows])
+            return list(self._candidates[1])
 
     def add(self, audio_path, accepted):
         """Index a take this render just accepted into chapter history."""
         candidate = self._candidate(Path(audio_path).parent / "accepted.json", accepted)
-        if candidate is None:
-            return
-        with self._lock:
-            if self._candidates is None:
-                return  # built from disk on first use, which includes it
-            if not any(item["accepted"] == candidate["accepted"] and item["record_audio"] == candidate["record_audio"]
-                       for item in self._candidates):
-                self._candidates.append(candidate)
+        if candidate is not None:
+            _work_candidates(self.work).add(candidate)
 
     def kept(self, identity, speakers, readings, *, chapter, voices_by_asset):
         """The history entry for an example a line's saved take heard (``identity``), while it is on disk; else None.

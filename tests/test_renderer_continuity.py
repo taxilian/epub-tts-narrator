@@ -635,7 +635,7 @@ class OtherChapterExampleTests(unittest.TestCase):
 
     def run(self, result=None):
         from epub_tts_narrator.renderer import reading_examples
-        reading_examples._INDEXES.clear()
+        reading_examples.forget()
         return super().run(result)
 
     def render(self, chunks, number):
@@ -684,11 +684,11 @@ class OtherChapterExampleTests(unittest.TestCase):
                  if "objected" in read_json(path)["request"]["chunk"]["spoken_text"]]
         self.assertEqual(len(named), 2)
         made = len(self.model.calls)
-        build = reading_examples.ReadingExamples._build
+        read = reading_examples._WorkCandidates._read
         for order in (lambda rows: rows, lambda rows: rows[::-1]):
-            reading_examples._INDEXES.clear()  # a fresh render reads the index again
-            with patch.object(reading_examples.ReadingExamples, "_build",
-                              lambda index, order=order: order(build(index))):
+            reading_examples.forget()  # a fresh render reads the index again
+            with patch.object(reading_examples._WorkCandidates, "_read",
+                              lambda index, order=order: order(read(index))):
                 self.render(second, 2)
             self.assertEqual(len(self.model.calls), made)
 
@@ -711,7 +711,7 @@ class OtherChapterExampleTests(unittest.TestCase):
                      if "objected" in read_json(path)["request"]["chunk"]["spoken_text"]]
         record = read_json(example)
         retire_acceptance(example.parent, record, "name-shape", {"reason": "fixture"})
-        reading_examples._INDEXES.clear()
+        reading_examples.forget()
         made = len(self.model.calls)
         self.render(second, 2)
         self.assertEqual(len(self.model.calls), made)
@@ -721,7 +721,7 @@ class OtherChapterExampleTests(unittest.TestCase):
         self.assertIn("laughed", " ".join(histories(self.model)[-1]))
         # Marked bad by a person: the line that heard it renders again.
         record_verdict(self.root / "work", record["request_hash"], {"attempt": record["attempt"], "record": record}, "bad")
-        reading_examples._INDEXES.clear()
+        reading_examples.forget()
         made = len(self.model.calls)
         self.render(second, 2)
         self.assertGreater(len(self.model.calls), made)
@@ -738,10 +738,74 @@ class OtherChapterExampleTests(unittest.TestCase):
         first = self.chapter(["The road ran on.", "Ce’Nedra objected."], "ch1", 1, "b1")
         self.render(first, 1)
         self.render(self.chapter(["Garion rode ahead.", "Ce’Nedra laughed."], "ch2", 10, "b2"), 2)
-        reading_examples._INDEXES.clear()
+        reading_examples.forget()
         made = len(self.model.calls)
         self.render(first, 1)
         self.assertEqual(len(self.model.calls), made)
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg required")
+class StartupSnapshotTests(unittest.TestCase):
+    """A render's start reads each take's files once; the next start reads only what changed since."""
+
+    setUp = ContinuityTests.setUp
+    chapter, render = OtherChapterExampleTests.chapter, OtherChapterExampleTests.render
+
+    def run(self, result=None):
+        from epub_tts_narrator.renderer import reading_examples
+        reading_examples.forget()
+        return super().run(result)
+
+    def rendered(self):
+        self.model = self.engine._model = NameModel()
+        self.verifier = Verifier(self.model)
+        self.render(self.chapter(["The road ran on.", "Ce\u2019Nedra objected."], "ch1", 1, "b1"), 1)
+        self.render(self.chapter(["Garion rode ahead.", "Ce\u2019Nedra laughed."], "ch2", 10, "b2"), 2)
+        return self.root / "work"
+
+    def loaded(self, work):
+        from epub_tts_narrator.renderer.speech_cache import SpeechCache
+        cache = SpeechCache(work, self.voices)
+        cache._load()
+        return cache.entries, cache.positions, cache.performances
+
+    def test_an_unchanged_speech_cache_loads_from_its_snapshot_with_the_same_result(self):
+        from epub_tts_narrator.renderer.speech_cache import SpeechCache
+        work = self.rendered()
+        first = self.loaded(work)
+        self.assertTrue((work / SpeechCache.LOAD_SNAPSHOT).is_file())
+        with mock.patch.object(SpeechCache, "_read_index_result", side_effect=AssertionError("read again")):
+            self.assertEqual(self.loaded(work), first)
+
+    def test_a_changed_take_is_read_again_and_a_take_without_audio_drops_out(self):
+        from epub_tts_narrator.renderer.speech_cache import SpeechCache
+        from epub_tts_narrator.renderer.stored_audio import audio_files
+        work = self.rendered()
+        entries, _, _ = self.loaded(work)
+        read = SpeechCache._read_index_result
+        seen = []
+        accepted = sorted((work / "clips").glob("*/accepted.json"))
+        accepted[0].write_bytes(accepted[0].read_bytes())  # rewritten: a new modification time
+        with mock.patch.object(SpeechCache, "_read_index_result", autospec=True,
+                               side_effect=lambda cache, path: seen.append(path) or read(cache, path)):
+            self.assertEqual(self.loaded(work)[0], entries)
+        self.assertEqual([read_json(path)["request_hash"] for path in seen], [accepted[0].parent.name])
+        gone = read_json(accepted[1])
+        for file in audio_files(accepted[1].parent / gone["audio_file"]):
+            file.unlink()
+        self.assertNotIn(gone["request_hash"], {entry["request_hash"] for entry in self.loaded(work)[0].values()})
+
+    def test_example_candidates_are_read_once_and_kept_for_the_next_start(self):
+        from pathlib import Path as RealPath
+        from epub_tts_narrator.renderer import reading_examples
+        work = self.rendered()
+        reading_examples.forget()
+        first = reading_examples.for_work(work).candidates()
+        self.assertTrue(first)
+        self.assertTrue((work / reading_examples.CANDIDATE_SNAPSHOT).is_file())
+        reading_examples.forget()  # a new process
+        with mock.patch.object(RealPath, "read_bytes", side_effect=AssertionError("read again")):
+            self.assertEqual(reading_examples.for_work(work).candidates(), first)
 
 
 class ExampleChoiceTests(unittest.TestCase):
@@ -757,10 +821,11 @@ class ExampleChoiceTests(unittest.TestCase):
                     "marker": marker, "readings": frozenset(readings), "voices": ["v"], "sequence": sequence,
                     "chapter": "ch1"}
         examples = ReadingExamples("/fixture")
-        examples._candidates = [item("both", {"A", "B"}, 3), item("only", {"A"}, 5)]
+        rows = [item("both", {"A", "B"}, 3), item("only", {"A"}, 5)]
+        examples.candidates = lambda: rows
         saved = {str(row["accepted"]): {"audio_sha256": row["record_audio"],
                                         "engine_metadata": {"continuity_codes": row["marker"]}}
-                 for row in examples._candidates}
+                 for row in rows}
         with patch.object(common, "read_json", side_effect=lambda path: saved[str(path)]), \
                 patch.object(continuity_codes, "load_codes"), patch.object(name_phonemes, "judge", return_value=None):
             chosen = examples.example({"v"}, {"A"}, sequence=10, chapter="ch2", voices_by_asset={"v": {}},
@@ -785,7 +850,7 @@ class ExampleChoiceTests(unittest.TestCase):
         saved = {}
 
         def choose(rows):
-            examples._candidates = rows
+            examples.candidates = lambda: rows
             saved.update({str(row["accepted"]): {"audio_sha256": row["record_audio"],
                                                  "engine_metadata": {"continuity_codes": row["marker"]}}
                           for row in rows})
