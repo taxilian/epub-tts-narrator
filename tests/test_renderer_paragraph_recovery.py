@@ -101,12 +101,15 @@ class ParagraphRecoveryTests(unittest.TestCase):
         with mock.patch.object(paragraph_recovery, "read_json", side_effect=AssertionError("read again")):
             for _ in range(3):
                 self.assertEqual(paragraph_retry_episode(self.work, child), episode)
-        # A record written since is read.
+        # A record written since is read: the overlapping groups now share one episode.
         from epub_tts_narrator.renderer.paragraphs import _group
         shorter = deepcopy(self.request)
         shorter["chunk"] = _group(self.request["chunk"]["paragraph_turns"][:2])[0]
         record_paragraph_fallback(self.work, shorter)
-        self.assertEqual(paragraph_retry_episode(self.work, shorter["chunk"]), episode)
+        merged = paragraph_retry_episode(self.work, child)
+        self.assertNotEqual(merged, episode)
+        paragraph_recovery._RECORDS.clear()
+        self.assertEqual(paragraph_retry_episode(self.work, child), merged)
 
     def test_retry_episode_rejects_corrupt_saved_relationships(self):
         path = record_paragraph_fallback(self.work, self.request)
