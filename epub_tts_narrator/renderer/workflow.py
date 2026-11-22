@@ -1803,6 +1803,14 @@ def _reuse_inputs(chunk):
             json.dumps(performance_kwargs(chunk, voice), sort_keys=True))
 
 
+def _reuse_digest(chunk):
+    """``digest`` of ``_reuse_inputs`` (equal exactly when the inputs are), or None when it has none."""
+    try:
+        return digest(list(_reuse_inputs(chunk)))
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_paragraph=False, ending=True):
     """Group new paragraphs while preserving legacy accepted chunk boundaries.
 
@@ -1812,14 +1820,13 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
     """
     plan = make_plan(bundle, config)
     work = config["render"].get("work_dir")
-    requests = []
+    saved_takes = []
     if work:
-        from .incremental_identity import (accepted_requests, completed_chunks,
-                                           reanchor_export_sequences)
+        from .incremental_identity import accepted_plan_rows, completed_chunks, reanchor_export_sequences
         try:
-            requests = accepted_requests(work)
+            saved_takes = accepted_plan_rows(work)
             plan = reanchor_export_sequences(
-                plan, requests, completed=completed_chunks(
+                plan, anchors=[anchor for row in saved_takes for anchor in row["anchors"]], completed=completed_chunks(
                     # Ignored chapters are never read: a corrupt old checkpoint
                     # of an ignored chapter cannot block planning, and unignoring
                     # restores the ordinary integrity checks.
@@ -1863,14 +1870,9 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
     current = {chunk["chunk_id"]: chunk for chapter in plan["chapters"] for chunk in chapter["chunks"]
                if isinstance(chunk.get("chunk_id"), str)}
 
-    def unchanged(saved):
-        chunk = current.get(saved.get("chunk_id"))
-        if chunk is None:
-            return False
-        try:
-            return _reuse_inputs(saved) == _reuse_inputs(chunk)
-        except (ValueError, KeyError, TypeError):
-            return False
+    def unchanged(chunk_id, saved_digest):
+        chunk = current.get(chunk_id)
+        return chunk is not None and saved_digest is not None and _reuse_digest(chunk) == saved_digest
     if work:
         from .paragraph_recovery import load_paragraph_fallbacks
         try:
@@ -1878,24 +1880,19 @@ def make_render_plan(bundle, config, *, multi_speaker=True, single_speaker_parag
             preserved.update(fallback_members)
         except (ValueError, OSError) as exc:
             raise RenderBlocked(f"Invalid saved paragraph recovery: {exc}") from exc
-        for request in requests:
+        for row in saved_takes:
             # A deleted WAV still preserves its request boundary: only that
             # deliberately removed clip should need regeneration on resume.
-            if request.get("kind") == "speech":
-                chunk = request.get("chunk", {})
-                if isinstance(chunk, dict) and isinstance(chunk.get("chunk_id"), str) and unchanged(chunk):
-                    preserved.add(chunk["chunk_id"])
-            elif request.get("kind") == "paragraph_speech":
-                chunk = request.get("chunk", {})
-                turns = chunk.get("paragraph_turns", []) if isinstance(chunk, dict) else []
-                if isinstance(turns, list) and len(turns) >= 2 and all(isinstance(turn, dict)
-                        and isinstance(turn.get("chunk_id"), str) for turn in turns):
-                    members = [turn["chunk_id"] for turn in turns]
-                    # An older accepted performance can exist under a previous
-                    # voice/model. It must not re-form a group that failed with
-                    # the currently selected voices.
-                    if not fallback_members.intersection(members) and all(unchanged(turn) for turn in turns):
-                        preserved_groups.append(members)
+            if "speech" in row:
+                if unchanged(*row["speech"]):
+                    preserved.add(row["speech"][0])
+            elif "paragraph" in row:
+                members = [chunk_id for chunk_id, _ in row["paragraph"]]
+                # An older accepted performance can exist under a previous
+                # voice/model. It must not re-form a group that failed with
+                # the currently selected voices.
+                if not fallback_members.intersection(members) and all(unchanged(*turn) for turn in row["paragraph"]):
+                    preserved_groups.append(members)
     return group_paragraphs(plan, max_chars=config["render"].get("max_paragraph_chars", 1000),
                            preserved_chunk_ids=preserved, preserved_groups=preserved_groups)
 

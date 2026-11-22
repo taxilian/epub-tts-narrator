@@ -51,6 +51,23 @@ class ExportSequenceIdentityTests(unittest.TestCase):
         for chunk, original in zip(result["chapters"][0]["chunks"], requests):
             self.assertEqual(digest(self.request(chunk)), digest(original))
 
+    def test_saved_anchors_reanchor_like_the_requests_and_are_read_once(self):
+        from unittest import mock
+        from epub_tts_narrator.renderer import incremental_identity
+        from epub_tts_narrator.renderer.incremental_identity import accepted_plan_rows
+        grouped = group_paragraphs(plan(deepcopy(self.chunks)), max_chars=1000)["chapters"][0]["chunks"][0]
+        paragraph = {**self.request(grouped), "kind": "paragraph_speech"}
+        for request in [*(self.request(chunk) for chunk in self.chunks), paragraph]:
+            self.save_request(request)
+        rows = accepted_plan_rows(self.work)
+        anchors = [anchor for row in rows for anchor in row["anchors"]]
+        self.assertEqual(reanchor_export_sequences(self.shifted(), anchors=anchors),
+                         reanchor_export_sequences(self.shifted(), accepted_requests(self.work)))
+        self.assertEqual(reanchor_export_sequences(self.shifted(), anchors=anchors), plan(self.chunks))
+        self.assertEqual(sum("paragraph" in row for row in rows), 1)
+        with mock.patch.object(incremental_identity, "read_json", side_effect=AssertionError("read again")):
+            self.assertEqual(accepted_plan_rows(self.work), rows)
+
     def test_voice_source_direction_and_offset_changes_do_not_reuse_metadata(self):
         request = self.request(self.chunks[0])
         for field, value in (("voice_id", "different"), ("role_id", "other"),
