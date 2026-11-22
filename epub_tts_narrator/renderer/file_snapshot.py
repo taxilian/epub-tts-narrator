@@ -56,24 +56,28 @@ def code_fingerprint():
         return _fingerprint
 
 
-def load(path, kind, binding):
-    """The saved ``{name: [key, result]}`` for ``kind`` and ``binding`` (anything JSON), or ``{}``."""
+def load(path, kind, binding, *, code=True):
+    """The saved ``{name: [key, result]}`` for ``kind`` and ``binding`` (anything JSON), or ``{}``.
+
+    ``code=False`` for results that never depend on how this package derives
+    them (a file's own hash); ``binding`` then carries their format version.
+    """
     try:
         with open(path, "rb") as stream:
             saved = json.loads(stream.read())
     except (OSError, ValueError):
         return {}
     if (not isinstance(saved, dict) or saved.get("format") != FORMAT or saved.get("version") != VERSION
-            or saved.get("kind") != kind or saved.get("code") != code_fingerprint()
+            or saved.get("kind") != kind or saved.get("code") != (code_fingerprint() if code else None)
             or saved.get("binding") != binding or not isinstance(saved.get("files"), dict)):
         return {}
     return saved["files"]
 
 
-def save(path, kind, binding, files):
+def save(path, kind, binding, files, *, code=True):
     """Replace the snapshot atomically; a failure to write only loses the speed-up."""
     path = Path(path)
-    data = json.dumps({"format": FORMAT, "version": VERSION, "kind": kind, "code": code_fingerprint(),
+    data = json.dumps({"format": FORMAT, "version": VERSION, "kind": kind, "code": code_fingerprint() if code else None,
                        "binding": binding, "files": files}, ensure_ascii=False, separators=(",", ":"),
                       allow_nan=False)
     temporary = None

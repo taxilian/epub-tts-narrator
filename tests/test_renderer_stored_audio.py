@@ -203,3 +203,45 @@ class StoredAudioTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoredHashMemoTests(unittest.TestCase):
+    """A FLAC take's WAV hash is restored once and remembered by the file's stat, across processes."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.work = Path(temporary.name).resolve() / "render-work"
+        (self.work / "clips" / ("a" * 64)).mkdir(parents=True)
+        self.addCleanup(stored_audio._HASHES.clear)
+        stored_audio._HASHES.clear()
+
+    def take(self, seconds=0.5):
+        wav = tone(self.work / "clips" / ("a" * 64) / "attempt-001-take.wav", seconds=seconds)
+        checksum = file_hash(wav)
+        stored_audio.store(wav)
+        return wav, checksum
+
+    def test_an_unchanged_flac_is_not_restored_again_even_in_a_new_process(self):
+        wav, checksum = self.take()
+        self.assertEqual(stored_audio.audio_hash(wav), checksum)
+        stored_audio._save_stored_hashes()
+        stored_audio._HASHES.clear()  # a new process
+        with patch.object(stored_audio, "_restore", side_effect=AssertionError("restored again")):
+            self.assertEqual(stored_audio.audio_hash(wav), checksum)
+
+    def test_a_replaced_flac_is_restored_and_hashed_again(self):
+        wav, _ = self.take()
+        stored_audio.audio_hash(wav)
+        stored_audio.locate(wav).unlink()
+        wav, checksum = self.take(seconds=0.7)
+        self.assertEqual(stored_audio.audio_hash(wav), checksum)
+
+    def test_audio_outside_a_render_work_is_restored_every_time(self):
+        loose = Path(self.work.parent) / "loose"
+        loose.mkdir()
+        wav = tone(loose / "voice-sample-take.wav")
+        checksum = file_hash(wav)
+        stored_audio.store(wav)
+        self.assertEqual(stored_audio.audio_hash(wav), checksum)
+        self.assertEqual(stored_audio._HASHES, {})

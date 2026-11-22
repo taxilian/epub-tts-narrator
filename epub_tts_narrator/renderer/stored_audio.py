@@ -29,6 +29,7 @@ import os
 from pathlib import Path
 import struct
 import tempfile
+import threading
 import wave
 
 from .common import file_hash
@@ -277,6 +278,96 @@ def _iter_restored(path: Path, wrapper: dict) -> Iterator[bytes]:
     yield wrapper["trailer"]
 
 
+HASH_SNAPSHOT = "stored-audio-hash-snapshot.json"
+_HASH_SAVE_EVERY = 2000
+
+
+class _StoredHashes:
+    """The logical WAV hashes of one render work's stored FLACs, by each FLAC's stat (``file_snapshot``).
+
+    Restoring a FLAC to hash it costs milliseconds; a book restores tens of
+    thousands of takes each start. A FLAC whose stat is unchanged since it was
+    last restored has the same hash. Saved every ``_HASH_SAVE_EVERY`` new
+    hashes and at exit; a lost save only means restoring those files again.
+    """
+
+    def __init__(self, work: Path):
+        from . import file_snapshot
+        self.path = work / HASH_SNAPSHOT
+        self.files = file_snapshot.load(self.path, "stored-audio-hash", {"format": FORMAT, "version": VERSION},
+                                        code=False)
+        self.lock = threading.Lock()
+        self.unsaved = 0
+
+    def get(self, name: str, key):
+        with self.lock:
+            saved = self.files.get(name)
+        return saved[1] if isinstance(saved, list) and len(saved) == 2 and saved[0] == key else None
+
+    def put(self, name: str, key, digest: str):
+        with self.lock:
+            self.files[name] = [key, digest]
+            self.unsaved += 1
+            due = self.unsaved >= _HASH_SAVE_EVERY
+        if due:
+            self.save()
+
+    def save(self):
+        from . import file_snapshot
+        with self.lock:
+            if not self.unsaved:
+                return
+            files, self.unsaved = dict(self.files), 0
+        file_snapshot.save(self.path, "stored-audio-hash", {"format": FORMAT, "version": VERSION}, files,
+                           code=False)
+
+
+_HASHES: dict = {}
+_HASHES_LOCK = threading.Lock()
+
+
+def _stored_hashes(stored: Path):
+    """The hash memo of the render work holding ``stored`` (beside its ``clips``/``chapters``), or None."""
+    stored = Path(os.path.abspath(stored))
+    for parent in stored.parents:
+        if parent.name in {"clips", "chapters", "previews", "voice-previews"}:
+            work = parent.parent
+            break
+    else:
+        return None
+    key = str(work)
+    with _HASHES_LOCK:
+        if key not in _HASHES:
+            if not _HASHES:
+                import atexit
+                atexit.register(_save_stored_hashes)
+            _HASHES[key] = _StoredHashes(work)
+        return _HASHES[key], str(stored.relative_to(work))
+
+
+def _save_stored_hashes():
+    with _HASHES_LOCK:
+        memos = list(_HASHES.values())
+    for memo in memos:
+        memo.save()
+
+
+def _stored_hash(stored: Path) -> str:
+    """``_restore(stored, None)[0]``, remembered by the FLAC's stat."""
+    from .file_snapshot import stat_key
+    found = _stored_hashes(stored)
+    if found is None:
+        return _restore(stored, None)[0]
+    memo, name = found
+    key = stat_key(stored)
+    digest = memo.get(name, key) if key is not None else None
+    if digest is None:
+        digest = _restore(stored, None)[0]
+        if key is not None and stat_key(stored) == key:  # unchanged while it was restored
+            memo.put(name, key, digest)
+    return digest
+
+
 def audio_hash(path: str | Path) -> str:
     """SHA-256 of the logical WAV bytes, wherever they are stored; raise unless a regular file."""
     path = Path(path)
@@ -285,7 +376,7 @@ def audio_hash(path: str | Path) -> str:
         if located.is_symlink() or not located.is_file():
             raise ValueError("Expected a regular, nonsymlink file")
         if located != path:
-            return _restore(located, None)[0]
+            return _stored_hash(located)
         return file_hash(located)
     return _retry_missing(path, run)
 
