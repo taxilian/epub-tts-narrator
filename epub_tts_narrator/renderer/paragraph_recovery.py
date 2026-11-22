@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 
 from .common import digest, read_json, regular_file, write_json
 
@@ -115,14 +116,37 @@ def record_paragraph_fallback(work, request):
     return path
 
 
+_RECORDS = {}
+_RECORDS_LOCK = threading.Lock()
+
+
+def _records(directory):
+    """The directory's validated fallback records, in name order; reread only when a file's stat changes.
+
+    Every take of a book asks for its paragraph's retry group, and each used
+    to read every fallback record of the book again.
+    """
+    from .file_snapshot import stat_key
+    names = sorted(name for name in os.listdir(directory) if name.endswith(".json") and not name.startswith("."))
+    keys = tuple((name, tuple(stat_key(directory / name) or ())) for name in names)
+    cache_key = str(directory)
+    with _RECORDS_LOCK:
+        cached = _RECORDS.get(cache_key)
+    if cached is not None and cached[0] == keys:
+        return cached[1]
+    records = [_validate_record(read_json(regular_file(directory / name)), directory / name) for name in names]
+    with _RECORDS_LOCK:
+        _RECORDS[cache_key] = (keys, records)
+    return records
+
+
 def load_paragraph_fallbacks(work):
     """Return original passage IDs that must stay ungrouped when replanning."""
     directory = _directory(work)
     if not directory.exists():
         return set()
     members = set()
-    for path in sorted(directory.glob("*.json")):
-        record = _validate_record(read_json(regular_file(path)), path)
+    for record in _records(directory):
         members.update(record["member_chunk_ids"])
     return members
 
@@ -151,8 +175,7 @@ def paragraph_retry_episode(work, chunk):
         members, groups = {chunk["chunk_id"]}, set()
     directory = _directory(work)
     if directory.exists():
-        records = [_validate_record(read_json(regular_file(path)), path)
-                   for path in sorted(directory.glob("*.json"))]
+        records = _records(directory)
         while True:
             discovered = [record for record in records
                           if record["paragraph_chunk_id"] not in groups

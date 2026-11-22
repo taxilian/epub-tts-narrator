@@ -92,6 +92,22 @@ class ParagraphRecoveryTests(unittest.TestCase):
         self.assertEqual(len(episodes), 1)
         self.assertNotIn(None, episodes)
 
+    def test_each_take_does_not_reread_the_books_fallback_records(self):
+        from unittest import mock
+        from epub_tts_narrator.renderer import paragraph_recovery
+        record_paragraph_fallback(self.work, self.request)
+        child = self.request["chunk"]["paragraph_turns"][0]
+        episode = paragraph_retry_episode(self.work, child)
+        with mock.patch.object(paragraph_recovery, "read_json", side_effect=AssertionError("read again")):
+            for _ in range(3):
+                self.assertEqual(paragraph_retry_episode(self.work, child), episode)
+        # A record written since is read.
+        from epub_tts_narrator.renderer.paragraphs import _group
+        shorter = deepcopy(self.request)
+        shorter["chunk"] = _group(self.request["chunk"]["paragraph_turns"][:2])[0]
+        record_paragraph_fallback(self.work, shorter)
+        self.assertEqual(paragraph_retry_episode(self.work, shorter["chunk"]), episode)
+
     def test_retry_episode_rejects_corrupt_saved_relationships(self):
         path = record_paragraph_fallback(self.work, self.request)
         record = read_json(path)
