@@ -147,45 +147,48 @@ class _WorkCandidates:
                 self._found = [*self._found, candidate]
                 self.version += 1
 
-    def _paths(self):
+    def _names(self):
+        """Every ``clips/*/accepted.json`` and ``clips/*/parts/*/accepted.json`` of the work, relative and sorted.
+
+        Plain strings: pathlib objects for every take cost more than the reads they save.
+        """
         import os
         clips = self.work / "clips"
         if not clips.is_dir() or clips.is_symlink():
             return []
-        paths = []
-        for name in os.listdir(clips):
-            if not name.startswith("."):
-                paths.append(clips / name / "accepted.json")
+        names = [f"clips/{name}/accepted.json" for name in os.listdir(clips) if not name.startswith(".")]
         for folders in _part_folders(self.work).get().values():
-            paths.extend(folder / "accepted.json" for folder in folders)
-        return sorted(paths)
+            names.extend(f"clips/{folder.parent.parent.name}/parts/{folder.name}/accepted.json" for folder in folders)
+        return sorted(names)
 
     def _read(self):
+        import os
         from . import file_snapshot
         from .common import read_json
         snapshot = self.work / CANDIDATE_SNAPSHOT
         previous = file_snapshot.load(snapshot, "reading-example-candidates", None)
-        current, found = {}, []
-        for path in self._paths():
-            key = file_snapshot.stat_key(path)
+        current, found, root = {}, [], str(self.work)
+        for name in self._names():
+            full = os.path.join(root, name)
+            key = file_snapshot.stat_key(full)
             if key is None:
                 continue
-            name = str(path.relative_to(self.work))
             saved = previous.get(name)
             if isinstance(saved, list) and len(saved) == 2 and saved[0] == key:
                 row = saved[1]
                 current[name] = saved
             else:
                 row = None
+                path = Path(full)
                 try:
                     if not path.is_symlink() and b'"cmu_arpabet"' in path.read_bytes():
                         row = _saved_candidate(ReadingExamples._candidate(path, read_json(path)))
                 except (ValueError, OSError):
                     continue  # unreadable now: read it again next time
-                if file_snapshot.stat_key(path) == key:  # unchanged while it was read
+                if file_snapshot.stat_key(full) == key:  # unchanged while it was read
                     current[name] = [key, row]
             if row is not None:
-                found.append(dict(row, accepted=path, readings=frozenset(row["readings"])))
+                found.append(dict(row, accepted=Path(full), readings=frozenset(row["readings"])))
         if current != previous:
             file_snapshot.save(snapshot, "reading-example-candidates", None, current)
         return found
