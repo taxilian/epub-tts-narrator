@@ -67,6 +67,8 @@ def check_groups(document, requests, candidates, *, workers=1):
         payload = {"mode": "group_review", "v": GROUP_REVIEW_VERSION,
                    "items": [{key: value for key, value in item.items() if not key.startswith("_")} for item in batch]}
         by_id = {item["id"]: item for item in batch}
+        # A quote may come from any paragraph the request showed.
+        shown = {number: block for item in batch for number, block in item["_blocks"].items()}
 
         def validate(response):
             answers = _unwrap(response.get("r")) if isinstance(response, dict) else None
@@ -82,9 +84,10 @@ def check_groups(document, requests, candidates, *, workers=1):
                     continue
                 if len(answer) < 4 or answer[1] != "y" or type(answer[2]) is not int:
                     raise ValueError(f'{answer[0]}: give [item_id,"y",N,quote], [item_id,"n"] or [item_id,"?"]')
-                block = by_id[answer[0]]["_blocks"].get(answer[2])
-                if block is None or not isinstance(answer[3], str) or not answer[3].strip() \
-                        or answer[3].strip() not in block["text"]:
+                block = shown.get(answer[2])
+                if block is None:
+                    raise ValueError(f"{answer[0]}: paragraph {answer[2]} is not in this request; cite a paragraph shown here")
+                if not isinstance(answer[3], str) or not answer[3].strip() or answer[3].strip() not in block["text"]:
                     raise ValueError(f"{answer[0]}: the quote must be exact text from paragraph {answer[2]}")
                 result[answer[0]] = (answer[2], answer[3].strip(), block)
             missing = sorted(set(by_id) - set(result))

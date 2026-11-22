@@ -250,6 +250,8 @@ def check_pairs(document, requests, pairs, *, workers=1):
         payload = {"mode": "cast_review_same_person", "v": SAME_PERSON_VERSION,
                    "items": [{key: value for key, value in item.items() if not key.startswith("_")} for item in batch]}
         by_id = {item["id"]: item for item in batch}
+        # A quote may come from any paragraph the request showed.
+        shown = {number: text for item in batch for number, text in item["_text"].items()}
 
         def validate(response):
             answers = _unwrap(response.get("r")) if isinstance(response, dict) else None
@@ -264,7 +266,7 @@ def check_pairs(document, requests, pairs, *, workers=1):
                 if row[1] != "y":
                     result[row[0]] = (row[1], "")
                     continue
-                text = by_id[row[0]]["_text"].get(row[2]) if len(row) >= 4 and type(row[2]) is int else None
+                text = shown.get(row[2]) if len(row) >= 4 and type(row[2]) is int else None
                 quote = row[3].strip() if len(row) >= 4 and isinstance(row[3], str) else ""
                 if text is None or not quote or quote not in text:
                     raise ValueError(f'{row[0]}: "y" needs [item_id,"y",N,quote] with an exact quote from '

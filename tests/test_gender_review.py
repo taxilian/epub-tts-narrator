@@ -19,10 +19,11 @@ from test_cast_review import Store
 class GenderClient:
     """Answers each item for a character named in ``shown`` with that gender and an exact quote."""
 
-    def __init__(self, shown):
+    def __init__(self, shown, *, cite=None):
         self.model, self.base_url = "test-model", "https://example.invalid"
         self.identity = {"model": self.model, "base_url": self.base_url}
         self.shown, self.calls, self.lock = shown, [], Lock()
+        self.cite = cite  # (item, payload) -> (N, paragraph text) to quote instead of the item's first
 
     def complete(self, system, payload):
         with self.lock:
@@ -32,7 +33,8 @@ class GenderClient:
         for item in payload["items"]:
             name = item["who"].split("|")[0]
             if name in self.shown:
-                number, text = item["text"].splitlines()[0].split("|", 1)
+                number, text = (self.cite(item, payload) if self.cite
+                                else item["text"].splitlines()[0].split("|", 1))
                 answers.append([item["id"], self.shown[name], int(number), text[:12]])
             else:
                 answers.append([item["id"], "?"])
@@ -131,3 +133,44 @@ class GenderReviewTests(AttributionCLIHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class OneAnswer:
+    """Stands in for ``CachedRequests``: validates one fixed response, as a model's would be."""
+
+    def __init__(self, answers):
+        self.answers = answers
+
+    def run(self, system, payload, validate):
+        return validate({"r": self.answers})
+
+
+class QuoteSourceTests(unittest.TestCase):
+    """A request shows several characters' paragraphs; the evidence for one is often under another."""
+
+    def setUp(self):
+        # Xera's line is in a paragraph that names only Xantha, so the request lists it under Xantha.
+        blocks = [("b1", "Xera stood beside her mother."),
+                  ("b2", "Xantha watched the girl at her side. \u201cThese are friends,\u201d she said."),
+                  ("b3", "Xera smiled.")]
+        self.document = {
+            "source": {"blocks": [{"id": block_id, "chapter_id": "c1", "text": text} for block_id, text in blocks]},
+            "cast": {"voices": [{"id": "v1", "description": "Female, regal."}, {"id": "v2", "description": "Male, quick."}],
+                     "characters": [{"id": "c_xantha", "name": "Xantha", "voice_id": "v1"},
+                                    {"id": "c_xera", "name": "Xera", "voice_id": "v2"}]}}
+        self.rows = self.document["cast"]["characters"]
+
+    def check(self, answer):
+        return gender_review.check_genders(self.document, OneAnswer([["g1", "?"], answer]), self.rows)
+
+    def test_a_quote_from_a_paragraph_listed_under_another_character_is_accepted(self):
+        self.assertEqual(self.check(["g2", "Female", 2, "she said"]), {"c_xera": ("Female", "she said")})
+
+    def test_a_paragraph_the_request_never_showed_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "paragraph 9 is not in this request"):
+            self.check(["g2", "Female", 9, "she said"])
+
+    def test_a_quote_that_is_not_in_the_paragraph_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "exact text from paragraph 1"):
+            self.check(["g2", "Female", 1, "she said"])
