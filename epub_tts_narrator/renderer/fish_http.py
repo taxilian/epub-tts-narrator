@@ -78,6 +78,31 @@ def _is_timeout(exc) -> bool:
     return isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError)
 
 
+def local_network_hint(exc, url: str) -> str:
+    """Why a nearby worker may be unreachable on macOS, when the error looks like that cause; else "".
+
+    macOS Local Network privacy refuses a blocked app's connections to its own
+    network with "No route to host" (Apple's own tools such as curl are
+    exempt, so the worker can look fine from the same shell).
+    """
+    import errno
+    import ipaddress
+    import sys
+    reason = getattr(exc, "reason", exc)
+    if sys.platform != "darwin" or getattr(reason, "errno", None) != errno.EHOSTUNREACH:
+        return ""
+    host = urlsplit(url).hostname or ""
+    try:
+        nearby = ipaddress.ip_address(host).is_private
+    except ValueError:
+        nearby = host.endswith(".local") or "." not in host
+    if not nearby:
+        return ""
+    return ("; macOS may be blocking this app's local network access: allow the terminal app this render runs in "
+            "(iTerm, Terminal, and for tmux the app that started it) in System Settings > Privacy & Security > "
+            "Local Network; the render picks the worker up again by itself")
+
+
 def redact(message: str, key: str) -> str:
     return safe_error_text(message, secrets=(key,) if key else ())
 
@@ -437,8 +462,8 @@ class FishHTTPEngine(HistorySynthesis):
             raise FishHTTPError(redact(f"Fish HTTP {exc.code} ({self.name}; endpoint={url})", self.api_key),
                                 status=exc.code) from exc
         except (URLError, TimeoutError, socket.timeout, http.client.HTTPException, OSError, ValueError) as exc:
-            raise FishHTTPError(redact(f"Fish HTTP health check failed ({self.name}; endpoint={url}): {exc}",
-                                       self.api_key)) from exc
+            raise FishHTTPError(redact(f"Fish HTTP health check failed ({self.name}; endpoint={url}): {exc}"
+                                       f"{local_network_hint(exc, url)}", self.api_key)) from exc
         if not isinstance(body, dict):
             raise FishHTTPError(f"Fish HTTP health check returned invalid JSON ({self.name})")
         return body
@@ -555,7 +580,8 @@ class FishHTTPEngine(HistorySynthesis):
             if _is_timeout(exc):
                 raise FishHTTPError(redact(f"Fish HTTP request failed ({self.name}; endpoint={self.url}): "
                                            f"timed out after {limit:g}s", self.api_key), timed_out=True) from exc
-            raise FishHTTPError(redact(f"Fish HTTP request failed ({self.name}; endpoint={self.url}): {exc}", self.api_key)) from exc
+            raise FishHTTPError(redact(f"Fish HTTP request failed ({self.name}; endpoint={self.url}): {exc}"
+                                       f"{local_network_hint(exc, self.url)}", self.api_key)) from exc
         except OSError as exc:
             raise FishHTTPError(redact(f"Could not receive Fish HTTP audio ({self.name}; endpoint={self.url}): {exc}", self.api_key)) from exc
         finally:

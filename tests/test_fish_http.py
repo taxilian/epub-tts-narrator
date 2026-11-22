@@ -950,3 +950,29 @@ class FishHTTPTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LocalNetworkHintTests(unittest.TestCase):
+    """macOS refuses a blocked app's connections to its own network with "No route to host"."""
+
+    def unreachable(self, url, *, platform="darwin", code=65):
+        from epub_tts_narrator.renderer import fish_http
+        engine = fish_http.FishHTTPEngine({"url": url, "name": "second-mac"})
+        refusal = URLError(OSError(code, "No route to host"))
+        with patch("sys.platform", platform), \
+                patch.object(fish_http, "build_opener", return_value=Mock(open=Mock(side_effect=refusal))):
+            with self.assertRaises(fish_http.FishHTTPError) as caught:
+                engine.check_continuity()
+        return caught.exception
+
+    def test_a_nearby_worker_refused_on_macos_names_the_local_network_setting(self):
+        error = self.unreachable("http://172.19.32.6:8080/v1/tts")
+        self.assertIn("Local Network", str(error))
+        self.assertIsNone(error.status)  # still "no answer", so the render sets it aside and keeps asking
+
+    def test_other_failures_and_platforms_get_no_hint(self):
+        for url, platform, code in (("http://172.19.32.6:8080/v1/tts", "linux", 65),
+                                    ("http://172.19.32.6:8080/v1/tts", "darwin", 61),
+                                    ("https://tts.example.com/v1/tts", "darwin", 65)):
+            with self.subTest(url=url, platform=platform, code=code):
+                self.assertNotIn("Local Network", str(self.unreachable(url, platform=platform, code=code)))
