@@ -822,7 +822,7 @@ class ExampleChoiceTests(unittest.TestCase):
                     "chapter": "ch1"}
         examples = ReadingExamples("/fixture")
         rows = [item("both", {"A", "B"}, 3), item("only", {"A"}, 5)]
-        examples.candidates = lambda: rows
+        examples._rows = lambda: [(row.get("book", 0), row) for row in rows]
         saved = {str(row["accepted"]): {"audio_sha256": row["record_audio"],
                                         "engine_metadata": {"continuity_codes": row["marker"]}}
                  for row in rows}
@@ -850,7 +850,7 @@ class ExampleChoiceTests(unittest.TestCase):
         saved = {}
 
         def choose(rows):
-            examples.candidates = lambda: rows
+            examples._rows = lambda: [(row.get("book", 0), row) for row in rows]
             saved.update({str(row["accepted"]): {"audio_sha256": row["record_audio"],
                                                  "engine_metadata": {"continuity_codes": row["marker"]}}
                           for row in rows})

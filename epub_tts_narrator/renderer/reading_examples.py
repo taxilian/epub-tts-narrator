@@ -249,7 +249,6 @@ def _chapter(request):
 class ReadingExamples:
     def __init__(self, work):
         self.work = Path(work)
-        self._candidates = None
         self._series = None
         self._lock = threading.Lock()
 
@@ -292,16 +291,16 @@ class ReadingExamples:
         return [work for work in (Path(directory) / "render-work" for directory in earlier)
                 if (work / "clips").is_dir() and not (work / "clips").is_symlink()]
 
+    def _rows(self):
+        """``(books back, candidate)`` for every work's candidates, this book's first, without copying them."""
+        for distance, work in enumerate(self._works()):
+            rows, _ = _work_candidates(work).get()
+            for row in rows:
+                yield distance, row
+
     def candidates(self):
         """Every work's candidates, this book's first, each marked with how many books back it is (``book``)."""
-        works = [(distance, _work_candidates(work)) for distance, work in enumerate(self._works())]
-        found = [(distance, *shared.get()) for distance, shared in works]
-        versions = tuple((distance, version) for distance, _, version in found)
-        with self._lock:
-            if self._candidates is None or self._candidates[0] != versions:
-                self._candidates = (versions, [dict(candidate, book=distance)
-                                               for distance, rows, _ in found for candidate in rows])
-            return list(self._candidates[1])
+        return [dict(candidate, book=distance) for distance, candidate in self._rows()]
 
     def add(self, audio_path, accepted):
         """Index a take this render just accepted into chapter history."""
@@ -383,10 +382,13 @@ class ReadingExamples:
         return _part_folders(work).get()
 
     def _works(self):
-        with self._lock:
-            if self._series is None:
-                self._series = [self.work, *self._earlier_works()]
-            return list(self._series)
+        series = self._series
+        if series is None:
+            with self._lock:
+                if self._series is None:
+                    self._series = (self.work, *self._earlier_works())
+                series = self._series
+        return list(series)
 
     def example(self, speakers, readings, *, sequence, chapter, voices_by_asset, wanted=(), prefer=(), avoid=()):
         """A history entry from another chapter saying the most of ``readings`` right, or None.
@@ -426,9 +428,8 @@ class ReadingExamples:
         if not readings or sequence is None:
             return None
         scored = []
-        for item in self.candidates():
+        for earlier_book, item in self._rows():
             covered = len(readings & item["readings"])
-            earlier_book = item.get("book", 0)
             if (not covered or item["request_hash"] in avoid or (not earlier_book and item["chapter"] == chapter)
                     or not set(item["voices"]) <= set(speakers)
                     or not all(asset in voices_by_asset for asset in item["marker"].get("speakers", []))):
