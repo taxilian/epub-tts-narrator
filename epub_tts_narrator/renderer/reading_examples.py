@@ -57,16 +57,68 @@ def for_work(work):
         return _INDEXES[key]
 
 
+class _PartFolders:
+    """``{request hash: [folder]}`` of one render work's split-passage parts, read from disk once.
+
+    Shared by every index and thread of the process (a series' later books
+    read an earlier book's parts too): the first caller scans while the others
+    wait for its result, so concurrent chapters never repeat the scan.
+    """
+
+    def __init__(self, work):
+        self.work = Path(work)
+        self._found = None
+        self._lock = threading.Lock()
+
+    def get(self):
+        with self._lock:
+            if self._found is None:
+                self._found = _scan_parts(self.work / "clips")
+            return self._found
+
+    def add(self, folder):
+        with self._lock:
+            if self._found is not None and folder not in self._found.get(folder.name, []):
+                self._found.setdefault(folder.name, []).append(folder)
+
+
+_PARTS = {}
+
+
+def _part_folders(work):
+    key = str(Path(work).resolve())
+    with _LOCK:
+        if key not in _PARTS:
+            _PARTS[key] = _PartFolders(work)
+        return _PARTS[key]
+
+
+def _scan_parts(clips):
+    """The ``clips/*/parts/*`` folders, listing only each take folder's ``parts`` (most have none)."""
+    import os
+    found = {}
+    if not clips.is_dir() or clips.is_symlink():
+        return found
+    with os.scandir(clips) as takes:
+        names = [entry.name for entry in takes if entry.is_dir(follow_symlinks=False)]
+    for name in names:
+        parts = clips / name / "parts"
+        try:
+            with os.scandir(parts) as entries:
+                children = [entry.name for entry in entries]
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        for child in children:
+            found.setdefault(child, []).append(parts / child)
+    return found
+
+
 def note_part(folder):
-    """Register a split-passage part folder (``clips/HASH/parts/PART``) the render is making with every index that read its book."""
+    """Register a split-passage part folder (``clips/HASH/parts/PART``) the render is making."""
     folder = Path(folder)
     if folder.parent.name != "parts" or folder.parent.parent.parent.name != "clips":
         return
-    work = folder.parent.parent.parent.parent
-    with _LOCK:
-        indexes = list(_INDEXES.values())
-    for index in indexes:
-        index._note_part(work, folder)
+    _part_folders(folder.parent.parent.parent.parent).add(folder)
 
 
 def _sequence(request):
@@ -91,7 +143,6 @@ class ReadingExamples:
         self.work = Path(work)
         self._candidates = None
         self._series = None
-        self._part_folders = {}
         self._lock = threading.Lock()
 
     @staticmethod
@@ -235,30 +286,13 @@ class ReadingExamples:
         return "gone", None
 
     def _parts(self, work):
-        """``{request hash: [folder]}`` of a render work's split-passage parts.
+        """``{request hash: [folder]}`` of a render work's split-passage parts (``_part_folders``).
 
         Read from disk once per process: only the render makes take folders,
         and it registers every part it makes (``note_part``). Globbing them
         for every line searched every take folder of the book per line.
         """
-        key = Path(work).resolve()
-        with self._lock:
-            found = self._part_folders.get(key)
-        if found is None:
-            found = {}
-            clips = Path(work) / "clips"
-            if clips.is_dir() and not clips.is_symlink():
-                for folder in clips.glob("*/parts/*"):
-                    found.setdefault(folder.name, []).append(folder)
-            with self._lock:
-                found = self._part_folders.setdefault(key, found)
-        return found
-
-    def _note_part(self, work, folder):
-        with self._lock:
-            found = self._part_folders.get(Path(work).resolve())
-            if found is not None and folder not in found.get(folder.name, []):
-                found.setdefault(folder.name, []).append(folder)
+        return _part_folders(work).get()
 
     def _works(self):
         with self._lock:

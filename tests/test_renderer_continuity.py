@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import re
 import tempfile
 import unittest
+from unittest import mock
 
 from epub_tts_narrator.renderer.assembly import compose_chapter
 from epub_tts_narrator.renderer.common import file_hash, read_json
@@ -825,6 +826,34 @@ class PartIndexTests(unittest.TestCase):
             with mock.patch.dict(reading_examples._INDEXES, {"fixture": index}):
                 self.assertEqual(index._parts(work)["b" * 64], [old])
                 new = work / "clips" / ("c" * 64) / "parts" / ("d" * 64)
-                with mock.patch.object(Path, "glob", side_effect=AssertionError("rescanned")):
+                with mock.patch.object(reading_examples, "_scan_parts", side_effect=AssertionError("rescanned")):
                     reading_examples.note_part(new)
                     self.assertEqual(index._parts(work)["d" * 64], [new])
+
+    def test_concurrent_chapters_and_later_books_share_one_scan_of_a_book(self):
+        # Every chapter thread of every book in a render queue asks for an
+        # earlier book's parts at once; scanning it once each took minutes.
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        from epub_tts_narrator.renderer import reading_examples
+        with tempfile.TemporaryDirectory() as root:
+            earlier = Path(root) / "book-1" / "render-work"
+            part = earlier / "clips" / ("a" * 64) / "parts" / ("b" * 64)
+            part.mkdir(parents=True)
+            (earlier / "clips" / ("e" * 64)).mkdir()  # a take without parts
+            books = [reading_examples.ReadingExamples(Path(root) / name / "render-work") for name in ("book-1", "book-2")]
+            scans, scan = [], reading_examples._scan_parts
+            barrier = Barrier(8)
+
+            def counted(clips):
+                scans.append(clips)
+                return scan(clips)
+
+            def ask(number):
+                barrier.wait()
+                return books[number % 2]._parts(earlier)
+            with mock.patch.object(reading_examples, "_scan_parts", side_effect=counted), \
+                    ThreadPoolExecutor(8) as pool:
+                found = list(pool.map(ask, range(8)))
+            self.assertEqual(scans, [earlier / "clips"])
+            self.assertTrue(all(result == {"b" * 64: [part]} for result in found), found)
