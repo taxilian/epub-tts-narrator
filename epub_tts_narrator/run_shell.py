@@ -194,6 +194,8 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
                                                      "of the queue and starts when there is room"),
         Binding("X", "dismiss_done", "Dismiss done", tooltip="Clear the finished books from the lists (their "
                                                              "audiobooks stay; a adds one back)"),
+        Binding("o", "switch_node", "Node on/off", tooltip="Turn a speech node off (its takes finish; the local "
+                "one then shuts down and frees its memory) or back on"),
         Binding("p", "pause", "Pause", tooltip="Pause or resume: no new speech or model request starts while "
                                                "paused, and one that loses its connection is sent again on "
                                                "resume (for moving the laptop)"),
@@ -461,9 +463,14 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
         def speed(value):
             # Audio frames a second (Drama 3 makes ~21.5 per second of audio) and how much faster than real time.
             return "—" if not value else f"{value['fps']:.0f} fps · {value['realtime']:.2f}× real time"
+        model.set_nodes(nodes)
+        states = model.node_states(nodes)
+
+        def label(name):
+            return Text(f"{name} ({states[name]})", style="yellow") if name in states else name
         work_rows = [
-            (name, (name, number(rows), number(decoding), number(prefilling), number(waiting), number(requests),
-                    str(sent), speed(made)))
+            (name, (label(name), number(rows), number(decoding), number(prefilling), number(waiting),
+                    number(requests), str(sent), speed(made)))
             for name, rows, decoding, prefilling, waiting, requests, sent, made in model.node_work_rows(nodes)]
         if len(work_rows) > 1:
             work_rows.append(("all-nodes", (Text("all nodes", style="bold"), "", "", "", "", "", "",
@@ -480,6 +487,8 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
             line.append(f"{name}: ", style="bold")
             line.append(" · ".join(f"{'speech' if role == 'speech' else 'verify'} {busy}/{slots}"
                                    for role, (busy, slots) in sorted(roles.items(), key=lambda item: item[0] != "speech")))
+            if name in states:
+                line.append(f" ({states[name]})", style="yellow")
             line.append("    ")
         self.query_one("#nodes-line", Static).update(line)
 
@@ -1252,6 +1261,41 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
             "Stop waiting for retries? The run then reports the chapters that still failed (no audiobook "
             "is assembled for those books); R resumes them later.", title="Finish the run?", danger=True,
             yes="Finish"), lambda yes: yes and self.model.release_holds())
+
+    def action_switch_node(self):
+        """Turn a speech node off or on (``renderer.pool.RenderPool.switch_worker``), chosen in a dialog."""
+        nodes, _ = self._node_status()
+        choices = self.model.node_switch_choices(nodes) if self.model.running else []
+        if not choices:
+            self.notify("No speech node can be turned on or off now (only while a render on a worker pool runs)",
+                        severity="warning", timeout=8)
+            return
+
+        def chosen(value):
+            if value is None:
+                return
+            name, on = value
+            if on is None:
+                self.notify(f"{name} is changing; try again in a moment", severity="warning")
+                return
+            self.run_worker(lambda: self._switch_node(name, on), thread=True, group="switch-node")
+        self.push_screen(ChoiceScreen("Turn a speech node off or on", choices, filterable=False,
+                                      help_text="Enter chooses · Escape cancels"), chosen)
+
+    def _switch_node(self, name, on):
+        """On a worker thread: the pool answers at once and finishes the change on its own thread."""
+        from .renderer.node_activity import ACTIVITY
+
+        def say(message):
+            self.bus.log(message)
+            try:
+                self.call_from_thread(self.notify, message, timeout=8)
+            except RuntimeError:
+                pass  # the screen has closed
+        try:
+            say(ACTIVITY.switch(name, on, notify=say))
+        except ValueError as error:
+            say(str(error))
 
     def action_pause(self):
         """Pause or resume the render's speech and model requests (``renderer.render_pause``)."""

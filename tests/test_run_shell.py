@@ -6,6 +6,7 @@ import io
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from epub_tts_narrator.renderer import progress
@@ -591,6 +592,41 @@ class MoreBooksModelTests(unittest.TestCase):
         self.assertEqual(list(self.model.book_states), ["failed", "live", "done"])
 
 
+class NodeSwitchModelTests(unittest.TestCase):
+    """What the run shell offers and shows for speech nodes a person turns off and on."""
+
+    def nodes(self, **states):
+        from epub_tts_narrator.renderer.node_activity import NodeActivity
+        activity = NodeActivity()
+        owner = object()
+        for name, state in states.items():
+            activity.register(owner, name, "speech", 1, local=name == "local",
+                              switch=lambda on, notify=None: "ok", state=lambda state=state: state)
+        activity.register(owner, "local", "verify", 1, local=True)
+        return activity.snapshot()
+
+    def test_each_speech_node_offers_the_change_it_can_make(self):
+        model = RunModel("render")
+        choices = dict(model.node_switch_choices(self.nodes(local="on", far="off", near="turning on")))
+        self.assertEqual(set(choices), {("local", False), ("far", True), ("near", None)})
+        self.assertIn("shuts down and its memory is freed", choices[("local", False)])
+        self.assertIn("sends it speech again", choices[("far", True)])
+        local_off = dict(model.node_switch_choices(self.nodes(local="off")))
+        self.assertIn("loading the model takes a few minutes", local_off[("local", True)])
+        self.assertEqual(model.node_states(self.nodes(local="off", far="on")), {"local": "off"})
+
+    def test_with_every_speech_node_off_the_render_is_waiting_not_stalled(self):
+        clock = SimpleNamespace(now=0.0)
+        model = RunModel("render", clock=lambda: clock.now)
+        model.rows["c"] = {"scope": {"book": "b", "chapter": 1}, "snapshot": {}}
+        model.set_nodes(self.nodes(local="off", far="away"))
+        clock.now += 10_000
+        self.assertEqual(model.health()[0], "warning")
+        self.assertIn("Every speech node is off", model.health()[1])
+        model.set_nodes(self.nodes(local="on", far="away"))  # turned on: the stall clock starts again
+        self.assertEqual(model.health(), ("ok", "Running normally"))
+
+
 class VerdictCellTests(unittest.TestCase):
     def test_every_verdict_a_person_can_set_is_shown_as_judged(self):
         from epub_tts_narrator.renderer.take_feedback import VERDICTS
@@ -732,6 +768,38 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
                 await self.wait_for(pilot, lambda: not self.model.running)
         self.assertEqual(sent, ["request"])
         self.assertFalse(self.model.paused)
+
+    async def test_o_turns_a_speech_node_off_and_on_from_a_dialog(self):
+        from unittest import mock
+        from epub_tts_narrator.renderer import node_activity
+        from epub_tts_narrator.tui_widgets import ChoiceScreen
+        activity, state, calls, done = node_activity.NodeActivity(), ["on"], [], threading.Event()
+
+        def switch(on, notify=None):
+            calls.append(on)
+            state[0] = "on" if on else "off"
+            notify("Render node local is off. o turns it on again.")
+            return "Turning local " + ("on" if on else "off")
+        activity.register(object(), "local", "speech", 1, local=True, switch=switch, state=lambda: state[0])
+
+        app = self.make_app(lambda: (done.wait(10), 0)[1])
+        with mock.patch.object(node_activity, "ACTIVITY", activity):
+            async with app.run_test(size=(150, 40)) as pilot:
+                await pilot.press("o")
+                self.assertIsInstance(app.screen, ChoiceScreen)
+                await pilot.press("enter")
+                await self.wait_for(pilot, lambda: calls == [False])
+                await self.wait_for(pilot, lambda: self.model.speech_nodes_off)
+                self.assertIn("(off)", str(app.query_one("#nodes-line").render()))
+                logged = [event.text for _, event in self.model.logs]
+                self.assertIn("Turning local off", logged)
+                self.assertIn("Render node local is off. o turns it on again.", logged)
+                await pilot.press("o", "enter")
+                await self.wait_for(pilot, lambda: calls == [False, True])
+                done.set()
+                await self.wait_for(pilot, lambda: not self.model.running)
+                await pilot.press("o")  # the render has ended: nothing to turn on or off
+                self.assertNotIsInstance(app.screen, ChoiceScreen)
 
     async def test_ctrl_c_interrupts_the_command_and_the_screen_reports_it(self):
         started = threading.Event()

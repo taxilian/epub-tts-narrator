@@ -108,6 +108,15 @@ class _Slots:
                 self._workers = [known for known in self._order if known in self._workers or known is worker]
             self._ready.notify_all()
 
+    def wait_idle(self, worker, stop=None, poll=0.5):
+        """Wait until none of ``worker``'s slots is claimed (its takes have finished); False if ``stop()`` first."""
+        with self._ready:
+            while self._claimed[id(worker)] > 0:
+                if stop is not None and stop():
+                    return False
+                self._ready.wait(poll)
+            return True
+
 
 class _WorkerGone(Exception):
     """A take's remote worker has gone and was set aside; the pool sends the take to another worker."""
@@ -428,6 +437,10 @@ class RenderPool:
                          for worker in settings["workers"] if "tts" in worker.get("roles", ["tts"])]
         if not self._workers:
             raise EngineError("A render pool needs at least one TTS worker")
+        # Speech nodes a person turned off (run shell ``o``): id(worker) -> "draining" (finishing its
+        # takes), "stopping" (shutting down), "off" or "starting"; a node not listed is on.
+        self._switched = {}
+        self._switch_lock = RLock()
         from .recognition_workers import RemoteRecognizer
         self._recognizers = [_Recognizer("local", 1)] + [
             _Recognizer(worker["name"], worker.get("recognition_concurrency", 1), RemoteRecognizer(worker))
@@ -436,7 +449,10 @@ class RenderPool:
         from .node_activity import ACTIVITY
         for worker in self._workers:
             ACTIVITY.register(self, worker.settings["name"], "speech", worker.settings.get("concurrency", 1),
-                              local=worker.local, probe=worker.work_status)
+                              local=worker.local or bool(worker.settings.get("auto_serve")),
+                              probe=worker.work_status,
+                              switch=lambda on, notify=None, worker=worker: self.switch_worker(worker, on, notify),
+                              state=lambda worker=worker: self.worker_state(worker))
         for recognizer in self._recognizers:
             ACTIVITY.register(self, recognizer.settings["name"], "verify", recognizer.settings["concurrency"],
                               local=recognizer.local)
@@ -536,7 +552,7 @@ class RenderPool:
     def _set_aside(self, worker, reason, notify=None):
         say = notify or generation_notifier() or (lambda message: None)
         with self._away_lock:
-            if id(worker) in self._away:
+            if id(worker) in self._away or self._switched_state(worker) is not None:
                 return
             self._slots.set_aside(worker)
             self._away[id(worker)] = (worker, say)
@@ -593,11 +609,154 @@ class RenderPool:
                 except Exception:
                     continue  # still away (or not yet right): ask again later
                 with self._away_lock:
-                    self._away.pop(id(worker), None)
+                    if self._away.pop(id(worker), None) is None or self._switched_state(worker) is not None:
+                        continue  # turned off (or on) by a person meanwhile
                     self._slots.restore(worker)
                 if self._resources is not None:
                     self._resources.tts.wake()
                 say(f"Render worker {worker.settings['name']} answers again; sending it speech again.")
+
+    def _switched_state(self, worker):
+        # Read without the switch lock (writes hold it): callers hold the away or slot locks, which
+        # ``switch_worker`` takes inside the switch lock.
+        return self._switched.get(id(worker))
+
+    def worker_state(self, worker):
+        """``on``, ``away`` (gave no answer), ``turning off``, ``shutting down``, ``off`` or ``turning on``."""
+        state = self._switched_state(worker)
+        if state is not None:
+            return {"draining": "turning off", "stopping": "shutting down", "starting": "turning on"}.get(state, state)
+        with self._away_lock:
+            return "away" if id(worker) in self._away else "on"
+
+    def switch_worker(self, worker, on, notify=None):
+        """Turn a speech node off or back on for the rest of this render; returns what happens, in plain words.
+
+        Off: no new take goes to it, and takes already on it finish. Then the
+        node gives back what it holds: the auto-started local speech server is
+        stopped (its model's memory freed; another program using it may start
+        it again), and an in-process local model is unloaded. A remote node
+        stays running for its other clients. With every node off, the render
+        waits for one to be turned on. On: the local server is started again
+        (loading its model takes a while) or a remote node is asked whether
+        it answers, and takes go to it again. Nothing about a take changes.
+        """
+        say = notify or generation_notifier() or (lambda message: None)
+        name = worker.settings["name"]
+        if self._closed:
+            return f"{name}: this render has ended"
+        with self._switch_lock:
+            state = self._switched.get(id(worker))
+            if not on:
+                if state is not None:
+                    return f"{name} is {self.worker_state(worker)} already" if state != "starting" else (
+                        f"{name} is turning on; turn it off again once it is on")
+                self._switched[id(worker)] = "draining"
+                with self._away_lock:
+                    self._away.pop(id(worker), None)
+                self._slots.set_aside(worker)
+                busy = self._slots._claimed[id(worker)]
+            else:
+                if state is None:
+                    return f"{name} is on already"
+                if state in ("stopping", "starting"):
+                    return f"{name} is {self.worker_state(worker)}; try again in a moment"
+                if state == "draining":
+                    # Not shut down yet: it simply takes speech again.
+                    del self._switched[id(worker)]
+                    self._restore(worker)
+                    return f"{name} stays on"
+                self._switched[id(worker)] = "starting"
+        if not on:
+            Thread(target=self._turn_off, args=(worker, say), name=f"render-node-off-{name}", daemon=True).start()
+            what = ("then the local speech server stops" if worker.settings.get("auto_serve")
+                    else "then its model is unloaded" if worker.local else "it keeps running for other clients")
+            return (f"Turning {name} off: no new speech goes to it"
+                    + (f"; its {busy} take(s) in progress finish first" if busy else "") + f", {what}.")
+        Thread(target=self._turn_on, args=(worker, say), name=f"render-node-on-{name}", daemon=True).start()
+        return (f"Turning {name} on: starting the local speech server (loading its model can take a few minutes)."
+                if worker.settings.get("auto_serve") else f"Turning {name} on.")
+
+    def _restore(self, worker):
+        self._slots.restore(worker)
+        if self._resources is not None:
+            self._resources.tts.wake()
+
+    def _turn_off(self, worker, say):
+        name = worker.settings["name"]
+        if not self._slots.wait_idle(worker, stop=lambda: self._closed or self._switched_state(worker) != "draining"):
+            return
+        with self._switch_lock:
+            if self._switched.get(id(worker)) != "draining":
+                return  # turned on again while its takes finished
+            self._switched[id(worker)] = "stopping"
+        detail = ""
+        try:
+            detail = self._release_node(worker)
+        except Exception as error:  # noqa: BLE001 - reported; the node stays off either way
+            detail = f"; it could not give back its resources ({error})"
+        with self._switch_lock:
+            self._switched[id(worker)] = "off"
+        say(f"Render node {name} is off{detail}. o turns it on again.")
+        if not self._slots.offered():
+            say("Every speech node is off: the render waits until one is turned on (o).")
+
+    def _release_node(self, worker):
+        """Give back what a node that is off holds; returns how, as the end of a sentence."""
+        if worker.settings.get("auto_serve") and self._auto_serve is not None:
+            others = [other for other in self._workers if other is not worker and other.settings.get("auto_serve")
+                      and self._switched_state(other) not in ("stopping", "off")]
+            if others:
+                return "; the local speech server keeps running for " + ", ".join(
+                    other.settings["name"] for other in others)
+            from .auto_serve import AutoServeError, stop_server
+            with self._revive_lock:
+                try:
+                    stopped = stop_server(self._auto_serve)
+                except AutoServeError as error:
+                    return f"; the local speech server is still running ({error})"
+            return ("; the local speech server has stopped and its memory is free" if stopped
+                    else "; the local speech server was not running")
+        if worker.local:
+            def unload():
+                with self.local_lock:
+                    worker.close()
+                    worker._engine = None
+            self._local_runtime.run(unload)
+            return "; its model is unloaded and its memory is free"
+        return " (it keeps running for other clients)"
+
+    def _turn_on(self, worker, say):
+        name = worker.settings["name"]
+        try:
+            if worker.settings.get("auto_serve") and self._auto_serve is not None:
+                from .auto_serve import resolve_small_job_engine
+                with self._revive_lock:
+                    resolve_small_job_engine(self._auto_serve, notify=say)
+                    self._server_epoch += 1
+            if not worker.local:
+                engine = worker.engine()
+                reachable = getattr(engine, "reachable", None)
+                if callable(reachable) and not reachable():
+                    with self._switch_lock:
+                        self._switched.pop(id(worker), None)
+                    self._set_aside(worker, "does not answer", say)
+                    return
+                recheck = getattr(engine, "recheck_continuity", None)
+                if callable(recheck):
+                    recheck()
+        except Exception as error:  # noqa: BLE001 - reported; the node stays off
+            with self._switch_lock:
+                self._switched[id(worker)] = "off"
+            say(f"Render node {name} could not be turned on ({error}); it stays off.")
+            return
+        with self._switch_lock:
+            if self._closed:
+                return
+            self._switched.pop(id(worker), None)
+            self._restore(worker)
+        say(f"Render node {name} is on again; sending it speech"
+            + (" (its model loads with its first take)." if worker.local else "."))
 
     @property
     def identity(self):
@@ -964,6 +1123,8 @@ class RenderPool:
         worker = next((worker for worker in self._workers if worker.local), None)
         if worker is None:
             raise EngineError("Remote workers reuse saved voices. Configure a voice designer or add a local worker to create missing references.")
+        if self._switched_state(worker) is not None:
+            raise EngineError(f"Render node {worker.settings['name']} is turned off; turn it on (o) to create voices with it.")
         def create():
             with self.local_lock:
                 engine = worker.engine()

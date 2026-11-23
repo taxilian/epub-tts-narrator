@@ -484,6 +484,175 @@ class WorkerDropTests(unittest.TestCase):
             self.assertEqual(self.take(pool, said)["render_worker"], "near")  # first in configured order again
 
 
+def wait_until(condition, seconds=5.0):
+    deadline = time.monotonic() + seconds
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return condition()
+
+
+class HeldFixture(GoneFixture):
+    """A remote engine whose takes wait until ``release`` is set."""
+
+    def __init__(self, name):
+        super().__init__(name)
+        self.started, self.release = Event(), Event()
+
+    def synthesize(self, text, voice, output_path, *, seed, direction=""):
+        self.started.set()
+        self.release.wait(5)
+        return super().synthesize(text, voice, output_path, seed=seed, direction=direction)
+
+
+class NodeSwitchTests(unittest.TestCase):
+    """A person turns a speech node off (its takes finish, then it gives back its memory) and on again."""
+
+    take = WorkerDropTests.take
+
+    def pool(self, *names, scheduler="pipeline", fixture=GoneFixture, settings=None):
+        config = pool_config(*[{**worker(name), **(settings or {}).get(name, {})} for name in names])
+        config["render_pool"]["scheduler"] = scheduler
+        pool = RenderPool(config)
+        self.addCleanup(pool.close)
+        engines = {}
+        for slot in pool._workers:
+            engines[slot.settings["name"]] = slot._engine = fixture(slot.settings["name"])
+        return pool, engines
+
+    def node(self, pool, name):
+        return next(slot for slot in pool._workers if slot.settings["name"] == name)
+
+    def test_a_node_turned_off_gets_no_speech_until_it_is_turned_on(self):
+        for scheduler in ("pipeline", "legacy"):
+            with self.subTest(scheduler=scheduler):
+                pool, engines = self.pool("near", "far", scheduler=scheduler)
+                said = []
+                near = self.node(pool, "near")
+                self.assertIn("Turning near off", pool.switch_worker(near, False, said.append))
+                self.assertTrue(wait_until(lambda: pool.worker_state(near) == "off"))
+                self.assertTrue(any("near is off" in line and "keeps running" in line for line in said))
+                self.assertEqual([self.take(pool, said)["render_worker"] for _ in range(2)], ["far", "far"])
+                self.assertEqual(engines["near"].takes, 0)
+                self.assertIn("off already", pool.switch_worker(near, False, said.append))
+                pool.switch_worker(near, True, said.append)
+                self.assertTrue(wait_until(lambda: pool.worker_state(near) == "on"))
+                self.assertEqual(engines["near"].rechecks, 1)  # asked again whether it carries history
+                self.assertEqual(self.take(pool, said)["render_worker"], "near")
+                self.assertIn("on already", pool.switch_worker(near, True, said.append))
+
+    def test_takes_already_on_a_node_finish_before_it_is_off(self):
+        pool, engines = self.pool("only", fixture=HeldFixture)
+        only = self.node(pool, "only")
+        with ThreadPoolExecutor(1) as executor:
+            running = executor.submit(self.take, pool, [])
+            self.assertTrue(engines["only"].started.wait(5))
+            said = []
+            self.assertIn("1 take(s) in progress finish first", pool.switch_worker(only, False, said.append))
+            time.sleep(0.05)
+            self.assertEqual(pool.worker_state(only), "turning off")
+            engines["only"].release.set()
+            self.assertEqual(running.result(5)["render_worker"], "only")
+        self.assertTrue(wait_until(lambda: pool.worker_state(only) == "off"))
+        self.assertTrue(any("Every speech node is off" in line for line in said))
+
+    def test_with_every_node_off_the_render_waits_and_turning_one_on_goes_on(self):
+        pool, engines = self.pool("only")
+        only = self.node(pool, "only")
+        pool.switch_worker(only, False, lambda message: None)
+        self.assertTrue(wait_until(lambda: pool.worker_state(only) == "off"))
+        with ThreadPoolExecutor(1) as executor:
+            waiting = executor.submit(self.take, pool, [])
+            time.sleep(0.1)
+            self.assertFalse(waiting.done())  # no node is on: the take waits, it does not fail
+            pool.switch_worker(only, True, lambda message: None)
+            self.assertEqual(waiting.result(5)["render_worker"], "only")
+
+    def test_turning_a_node_on_while_its_takes_finish_keeps_it_on(self):
+        pool, engines = self.pool("near", "far", fixture=HeldFixture)
+        near = self.node(pool, "near")
+        with ThreadPoolExecutor(1) as executor:
+            running = executor.submit(self.take, pool, [])
+            self.assertTrue(engines["near"].started.wait(5))
+            pool.switch_worker(near, False, lambda message: None)
+            self.assertEqual(pool.switch_worker(near, True, lambda message: None), "near stays on")
+            engines["near"].release.set()
+            running.result(5)
+        time.sleep(0.05)
+        self.assertEqual(pool.worker_state(near), "on")
+
+    def test_the_local_speech_server_stops_when_its_node_is_off_and_starts_again_when_on(self):
+        pool, engines = self.pool("local", settings={"local": {"auto_serve": True}})
+        pool._auto_serve = {"server": {"port": 1}}
+        local = self.node(pool, "local")
+        said = []
+        with patch("epub_tts_narrator.renderer.auto_serve.stop_server", return_value=True) as stop, \
+                patch("epub_tts_narrator.renderer.auto_serve.resolve_small_job_engine") as start:
+            self.assertIn("then the local speech server stops", pool.switch_worker(local, False, said.append))
+            self.assertTrue(wait_until(lambda: pool.worker_state(local) == "off"))
+            stop.assert_called_once_with(pool._auto_serve)
+            self.assertTrue(any("server has stopped and its memory is free" in line for line in said))
+            start.assert_not_called()
+            self.assertIn("starting the local speech server", pool.switch_worker(local, True, said.append))
+            self.assertTrue(wait_until(lambda: pool.worker_state(local) == "on"))
+            start.assert_called_once()
+        self.assertEqual(self.take(pool, said)["render_worker"], "local")
+
+    def test_a_local_server_that_cannot_start_leaves_the_node_off(self):
+        from epub_tts_narrator.renderer.auto_serve import AutoServeError
+        pool, engines = self.pool("local", settings={"local": {"auto_serve": True}})
+        pool._auto_serve = {"server": {"port": 1}}
+        local = self.node(pool, "local")
+        said = []
+        with patch("epub_tts_narrator.renderer.auto_serve.stop_server", return_value=True), \
+                patch("epub_tts_narrator.renderer.auto_serve.resolve_small_job_engine",
+                      side_effect=AutoServeError("no model")):
+            pool.switch_worker(local, False, said.append)
+            self.assertTrue(wait_until(lambda: pool.worker_state(local) == "off"))
+            pool.switch_worker(local, True, said.append)
+            self.assertTrue(wait_until(lambda: any("could not be turned on (no model)" in line for line in said)))
+        self.assertEqual(pool.worker_state(local), "off")
+
+    def test_an_in_process_local_model_is_unloaded(self):
+        pool = RenderPool(pool_config(worker("local", local=True)))
+        self.addCleanup(pool.close)
+        local = pool._workers[0]
+        engine = local._engine = Mock()
+        pool.switch_worker(local, False, lambda message: None)
+        self.assertTrue(wait_until(lambda: pool.worker_state(local) == "off"))
+        engine.close.assert_called_once()
+        self.assertIsNone(local._engine)  # the next take after turning it on loads it again
+        with self.assertRaisesRegex(EngineError, "turned off"):
+            pool.create_voice("A voice.", "Words.", "/does/not/matter.wav", seed=1)
+
+    def test_a_node_turned_off_while_away_is_not_brought_back(self):
+        with patch("epub_tts_narrator.renderer.pool.REPROBE_SECONDS", 0.02):
+            pool, engines = self.pool("near", "far")
+            near = self.node(pool, "near")
+            engines["near"].gone = True
+            self.take(pool, [])
+            self.assertEqual(pool.worker_state(near), "away")
+            pool.switch_worker(near, False, lambda message: None)
+            engines["near"].gone = False
+            self.assertTrue(wait_until(lambda: pool.worker_state(near) == "off"))
+            time.sleep(0.1)
+            self.assertEqual(pool.worker_state(near), "off")
+            self.assertEqual(self.take(pool, [])["render_worker"], "far")
+
+    def test_the_run_shell_sees_and_switches_nodes_through_the_activity_registry(self):
+        from epub_tts_narrator.renderer.node_activity import NodeActivity
+        activity = NodeActivity()
+        with patch("epub_tts_narrator.renderer.node_activity.ACTIVITY", activity):
+            pool, engines = self.pool("near", "far")
+        states = {node["name"]: (node["state"], node["switchable"]) for node in activity.snapshot()
+                  if node["role"] == "speech"}
+        self.assertEqual(states, {"near": ("on", True), "far": ("on", True)})
+        self.assertIn("Turning far off", activity.switch("far", False))
+        self.assertTrue(wait_until(lambda: {node["name"]: node["state"] for node in activity.snapshot()
+                                            if node["role"] == "speech"}["far"] == "off"))
+        with self.assertRaisesRegex(ValueError, "can turn on or off"):
+            activity.switch("local", False)  # the verify node is not a speech node
+
+
 class TransportFailure(RuntimeError):
     transport_error = True
     def __init__(self, *, retryable=True):

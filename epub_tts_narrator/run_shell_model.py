@@ -183,6 +183,7 @@ class RunModel:
         self.seen = {"book": set(), "chapter": set(), "worker": set(), "voice": set()}
         self.stopping = False
         self.paused = False       # a person paused the render's network work (``renderer.render_pause``)
+        self.speech_nodes_off = False  # every speech node is turned off or away (``set_nodes``)
         self.progress = None      # analysis stage and model-stream status (PROGRESS events)
         self.holds = {}           # book (or None) -> release callable while a render waits for retries
         self.hold_failed = {}     # book (or None) -> failures it waits on; 0: a queue waiting for more books
@@ -977,6 +978,8 @@ class RunModel:
                 return "warning", "Stopping at safe boundaries"
             if self.paused:
                 return "warning", "Paused — no new requests start; running ones finish (p resumes)"
+            if self.speech_nodes_off and self.rows:
+                return "warning", "Every speech node is off — the render waits (o turns one on)"
             if self.holds and not any(self.hold_failed.values()) and not failures and not self.rows:
                 return "ok", "Every book finished — a adds a book, q closes"
             if self.holds:
@@ -1136,6 +1139,41 @@ class RunModel:
         return {"realtime": round(realtime, 2), "fps": round(sum(speed["fps"] for speed in speeds), 1),
                 "audio_seconds": round(sum(speed["audio_seconds"] for speed in speeds), 1),
                 "span": max(speed["span"] for speed in speeds)}
+
+    @staticmethod
+    def node_states(nodes):
+        """``{node: state}`` for speech nodes that are not simply on (off, turning off, away, ...)."""
+        return {node["name"]: node["state"] for node in nodes or []
+                if node["role"] == "speech" and node.get("state", "on") != "on"}
+
+    @staticmethod
+    def node_switch_choices(nodes):
+        """``[((name, on), label)]``: what ``o`` offers for each speech node a person can turn off or on."""
+        choices = []
+        for node in nodes or []:
+            if node["role"] != "speech" or not node.get("switchable"):
+                continue
+            state = node.get("state", "on")
+            if state in ("on", "away"):
+                what = ("its takes in progress finish, then it shuts down and its memory is freed" if node["local"]
+                        else "its takes in progress finish; it keeps running for other clients")
+                choices.append(((node["name"], False), f"Turn {node['name']} off ({state} now): {what}"))
+            elif state in ("off", "turning off"):
+                what = ("starts it again; loading the model takes a few minutes"
+                        if node["local"] and state == "off" else "sends it speech again")
+                choices.append(((node["name"], True), f"Turn {node['name']} on ({state} now): {what}"))
+            else:
+                choices.append(((node["name"], None), f"{node['name']} is {state}; wait a moment"))
+        return choices
+
+    def set_nodes(self, nodes):
+        """Note how many speech nodes are on; with none on, waiting is not a stall."""
+        speech = [node for node in nodes or [] if node["role"] == "speech"]
+        on = sum(1 for node in speech if node.get("state", "on") in ("on", "turning off"))
+        with self._lock:
+            if self.speech_nodes_off and on:
+                self.last_progress = self._clock()
+            self.speech_nodes_off = bool(speech) and not on
 
     def node_summary(self, nodes):
         """``{node: {role: (busy, slots)}}`` for the at-a-glance line."""

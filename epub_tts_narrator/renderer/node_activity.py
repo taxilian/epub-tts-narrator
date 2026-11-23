@@ -14,6 +14,10 @@ Each finished generation also records how many seconds of audio a node made
 ``AUDIO_FRAMES_PER_SECOND`` frames for each second of audio) and how many
 times faster than real time.
 
+A pool may also let a person turn a speech node off and on (``switch``,
+the run shell's ``o``): each node then reports its ``state`` (``on``,
+``away``, ``turning off``, ``shutting down``, ``off``, ``turning on``).
+
 Only names, counts, IDs and timings are kept: no text, URLs or keys.
 Observing never creates or changes anything, and with no pool (or without
 the run shell) nothing reads it.
@@ -59,12 +63,25 @@ class NodeActivity:
         self._made = deque()    # (time, name, audio seconds) of finished generations, newest last
         self.chapter_capacity = None
 
-    def register(self, owner, name, role, slots, *, local, probe=None):
-        """``probe()`` (optional) returns the node's own report of its work, polled by ``probe_nodes``."""
+    def register(self, owner, name, role, slots, *, local, probe=None, switch=None, state=None):
+        """``probe()`` (optional) returns the node's own report of its work, polled by ``probe_nodes``.
+
+        ``switch(on, notify)`` (optional) turns the node off or on and returns
+        what happens in plain words; ``state()`` says where it is now.
+        """
         with self._lock:
             self._nodes[(name, role)] = {"name": name, "role": role, "slots": int(slots), "local": bool(local),
                                          "owner": owner, "probe": probe, "work": None, "probed": None,
-                                         "registered": self._clock()}
+                                         "registered": self._clock(), "switch": switch, "state": state}
+
+    def switch(self, name, on, notify=None):
+        """Turn speech node ``name`` off (``on=False``) or on; returns what happens. ValueError if it cannot be."""
+        with self._lock:
+            node = self._nodes.get((name, "speech"))
+            switch = node and node["switch"]
+        if not callable(switch):
+            raise ValueError(f"{name} is not a speech node this render can turn on or off")
+        return switch(on, notify)
 
     def unregister(self, owner):
         """Forget the nodes one pool registered (its close)."""
@@ -147,7 +164,7 @@ class NodeActivity:
         return {"nodes": nodes, "overall": overall}
 
     def snapshot(self):
-        """``[{"name", "role", "slots", "local", "jobs": [{"book", "chapter", "block", "elapsed"}]}]``."""
+        """``[{"name", "role", "slots", "local", "state", "switchable", "jobs": [{"book", "chapter", "block", "elapsed"}]}]``."""
         now = self._clock()
         with self._lock:
             nodes = [dict(node, jobs=[]) for node in self._nodes.values()]
@@ -159,6 +176,12 @@ class NodeActivity:
                                          "block": item.get("block"), "elapsed": now - item["started"]})
         speeds = self.speeds()["nodes"]
         for node in nodes:
+            state = node.pop("state", None)
+            try:
+                node["state"] = state() if callable(state) else "on"
+            except Exception:
+                node["state"] = "on"
+            node["switchable"] = callable(node.pop("switch", None))
             for private in ("owner", "probe", "probed", "registered"):
                 node.pop(private, None)
             if node["role"] == "speech":
