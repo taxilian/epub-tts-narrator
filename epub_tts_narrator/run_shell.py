@@ -152,6 +152,9 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
     #search { display: none; }
     #search.visible { display: block; }
     #log { height: 1fr; }
+    #paused-banner { display: none; height: 1; padding: 0 1; background: $warning; color: $background;
+                     text-style: bold; }
+    #paused-banner.on { display: block; }
     """
     TILES = ("Health", "Books", "Generating", "Verifying", "Accepted", "Rejected takes", "Failures", "Left")
     TABS = {"summary": "summary", "chapters": "chapters", "workers": "workers-tab", "log": "log-tab",
@@ -231,6 +234,7 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        yield Static("", id="paused-banner")
         with TabbedContent(initial="summary", id="tabs"):
             with TabPane("Summary", id="summary"):
                 with Grid(id="glance"):
@@ -381,6 +385,7 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
                         timeout=15)
         self._was_idle = idle
         self.sub_title = model.summary()
+        self._draw_pause()
         self._draw_glance()
         self._draw_profile()
         failures = []
@@ -1297,11 +1302,20 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
         except ValueError as error:
             say(str(error))
 
+    def _draw_pause(self):
+        """A bar above every tab while the render is paused (``p``)."""
+        banner = self.query_one("#paused-banner", Static)
+        text = self.model.pause_banner()
+        banner.set_class(text is not None, "on")
+        if text is not None:
+            banner.update(Text("⏸ " + text))
+
     def action_pause(self):
         """Pause or resume the render's speech and model requests (``renderer.render_pause``)."""
         from .renderer.render_pause import PAUSE
         paused = PAUSE.toggle()
         self.model.set_paused(paused)
+        self.refresh_view(force=True)  # the banner shows (or goes) at once
         if paused:
             self.bus.log("Paused: no new speech or model request starts; requests already running finish, and "
                          "one that loses its connection is sent again on resume. p resumes.", severity="warning")

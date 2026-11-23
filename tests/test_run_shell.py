@@ -627,6 +627,23 @@ class NodeSwitchModelTests(unittest.TestCase):
         self.assertEqual(model.health(), ("ok", "Running normally"))
 
 
+class PauseBannerTests(unittest.TestCase):
+    def test_the_banner_says_how_long_it_has_been_paused_and_what_resumes_it(self):
+        clock = SimpleNamespace(now=100.0)
+        model = RunModel("render", clock=lambda: clock.now)
+        self.assertIsNone(model.pause_banner())
+        model.set_paused(True)
+        clock.now += 75
+        model.set_paused(True)  # pausing again does not restart the time
+        self.assertIn("PAUSED for 01:15 — ", model.pause_banner())
+        self.assertIn("p resumes", model.pause_banner())
+        model.finish(130)
+        self.assertIn("the next render (R) starts paused", model.pause_banner())
+        model.set_paused(False)
+        self.assertIsNone(model.pause_banner())
+        self.assertNotIn("PAUSED", model.summary())
+
+
 class VerdictCellTests(unittest.TestCase):
     def test_every_verdict_a_person_can_set_is_shown_as_judged(self):
         from epub_tts_narrator.renderer.take_feedback import VERDICTS
@@ -761,10 +778,20 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("p")
                 self.assertTrue(gate.paused())
                 self.assertIn("Paused", self.model.health()[1])
+                banner = app.query_one("#paused-banner")
+                for tab in ("4", "2", "1"):  # shown above every tab, not only Summary's health tile
+                    await pilot.press(tab)
+                    await pilot.pause()
+                    self.assertTrue(banner.display)
+                self.assertIn("PAUSED", str(banner.render()))
+                self.assertTrue(app.sub_title.startswith("PAUSED · "))
                 go.set()
                 await pilot.pause(0.3)
                 self.assertEqual(sent, [])
                 await pilot.press("p")
+                await pilot.pause()
+                self.assertFalse(banner.display)
+                self.assertNotIn("PAUSED", app.sub_title)
                 await self.wait_for(pilot, lambda: not self.model.running)
         self.assertEqual(sent, ["request"])
         self.assertFalse(self.model.paused)

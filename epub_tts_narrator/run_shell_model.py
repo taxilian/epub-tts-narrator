@@ -183,6 +183,7 @@ class RunModel:
         self.seen = {"book": set(), "chapter": set(), "worker": set(), "voice": set()}
         self.stopping = False
         self.paused = False       # a person paused the render's network work (``renderer.render_pause``)
+        self.paused_since = None  # when (clock time) the current pause began
         self.speech_nodes_off = False  # every speech node is turned off or away (``set_nodes``)
         self.progress = None      # analysis stage and model-stream status (PROGRESS events)
         self.holds = {}           # book (or None) -> release callable while a render waits for retries
@@ -955,10 +956,25 @@ class RunModel:
     def set_paused(self, paused):
         """Record a pause or resume; the time paused never counts as a stall."""
         with self._lock:
+            if paused and not self.paused:
+                self.paused_since = self._clock()
             self.paused = bool(paused)
             if not paused:
+                self.paused_since = None
                 self.last_progress = self._clock()
         self.changed.set()
+
+    def pause_banner(self, now=None):
+        """The line every tab shows while the render is paused, or ``None``."""
+        now = self._clock() if now is None else now
+        with self._lock:
+            if not self.paused:
+                return None
+            since = f" for {_duration(now - self.paused_since)}" if self.paused_since is not None else ""
+            ended = not self.running
+        if ended:
+            return f"PAUSED{since} — the next render (R) starts paused; p resumes"
+        return f"PAUSED{since} — no new speech or model request starts; running ones finish. p resumes"
 
     def health(self, now=None):
         """``(level, text)``: ok, busy, warning or error, for the at-a-glance view."""
@@ -1218,6 +1234,8 @@ class RunModel:
                           "failed": "finished with errors", "interrupted": "stopped"}[self.state])
             if self.attempt > 1:
                 parts.append(f"attempt {self.attempt}")
+            if self.paused:
+                parts.insert(0, "PAUSED")
         return " · ".join(parts)
 
     def closing_lines(self, limit=12):
