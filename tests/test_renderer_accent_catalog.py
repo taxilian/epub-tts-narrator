@@ -95,6 +95,7 @@ class PickerTests(unittest.IsolatedAsyncioTestCase):
         asyncio.get_running_loop().slow_callback_duration = 10
 
     async def open(self, pilot, app):
+        await review_tests.answer_first_plan(app, pilot)  # a first plan asks for optional instructions
         self.controller.jobs.wait_idle(5)
         await pilot.pause(0.4)
 

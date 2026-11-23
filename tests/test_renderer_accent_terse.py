@@ -60,6 +60,7 @@ class BusyBannerTests(unittest.IsolatedAsyncioTestCase):
         from epub_tts_narrator.renderer.accent_tui import AccentApp
         app = AccentApp(self.controller, title="Fixture Book")
         async with app.run_test(size=(160, 45)) as pilot:
+            await review_tests.answer_first_plan(app, pilot)  # a first plan asks for optional instructions
             await pilot.pause(0.6)
             banner = app.query_one("#busy", Static)
             self.assertTrue(banner.has_class("running"))
