@@ -529,6 +529,68 @@ class RunModelTests(unittest.TestCase):
         self.assertTrue(self.model.should_hold())
 
 
+class MoreBooksModelTests(unittest.TestCase):
+    """A run shell adds books to the running render queue and clears finished ones from its lists."""
+
+    def setUp(self):
+        self.bus = EventBus()
+        self.model = RunModel("render")
+        self.bus.subscribe(self.model.on_event)
+        self.board = BusBoard(self.bus)
+
+    def test_paths_are_read_whole_or_shell_quoted(self):
+        from epub_tts_narrator.run_shell_model import book_paths
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            spaced = Path(root) / "The Last Lantern"
+            spaced.mkdir()
+            self.assertEqual(book_paths(f"  {spaced}  "), [str(spaced)])
+            self.assertEqual(book_paths(f"'{spaced}'"), [str(spaced)])
+        self.assertEqual(book_paths("/books/one /books/Two\\ Words"), ["/books/one", "/books/Two Words"])
+        self.assertEqual(book_paths("   "), [])
+
+    def test_books_go_to_the_queue_and_an_ended_queue_takes_none(self):
+        calls = []
+        self.board.book_adder(lambda path: (calls.append(path), (path != "/bad", f"answer {path}"))[1])
+        self.assertEqual(self.model.add_books(["/books/two", "/bad"]),
+                         [("/books/two", True, "answer /books/two"), ("/bad", False, "answer /bad")])
+        self.board.book_adder(lambda path: 1 / 0)
+        self.assertEqual(self.model.add_books(["/books/three"])[0][1], False)  # an error never escapes
+        self.board.book_adder(None)
+        self.assertEqual(self.model.add_books(["/books/four"]),
+                         [("/books/four", False, "This render takes no more books now")])
+        self.assertEqual(calls, ["/books/two", "/bad"])
+
+    def test_a_queue_waiting_for_more_books_is_idle_not_waiting_for_retries(self):
+        self.board.retry_hold(lambda: None, 0)
+        self.assertTrue(self.model.idle())
+        self.assertEqual(self.model.health()[0], "ok")
+        self.assertIn("waiting for more books (a adds, q closes)", self.model.summary())
+        self.board.retry_hold(None, 0)
+        self.board.retry_hold(lambda: None, 1)
+        self.assertFalse(self.model.idle())
+        self.assertIn("waiting for retries", self.model.summary())
+
+    def test_dismissing_clears_only_finished_books_from_every_list(self):
+        for book, state in (("/b/done", "done"), ("/b/failed", "failed"), ("/b/live", "rendering")):
+            self.board.book_state(book, state)
+            self.board.chapter_plan(book, [{"number": 1, "title": "One", "blocks": 2}])
+        self.board.book_outcome("/b/done", True)
+        self.bus.publish("rejected", "text_mismatch", scope={"book": "done", "chapter": 1},
+                         data={"request_hash": "h", "attempt": 1})
+        self.model.filter.book = "done"
+        self.assertEqual(self.model.dismiss_done(), ["done"])
+        self.assertEqual(list(self.model.book_states), ["failed", "live"])
+        self.assertNotIn("done", self.model.chapter_plans)
+        self.assertEqual(list(self.model.rejections), [])
+        self.assertIsNone(self.model.filter.book)
+        self.assertNotIn("done", self.model.choices("book"))
+        self.assertIn("1 dismissed", self.model.glance()["Books"][1])
+        self.assertEqual(self.model.dismiss_done(), [])
+        self.board.book_state("/b/done", "queued")  # added again: listed anew
+        self.assertEqual(list(self.model.book_states), ["failed", "live", "done"])
+
+
 class VerdictCellTests(unittest.TestCase):
     def test_every_verdict_a_person_can_set_is_shown_as_judged(self):
         from epub_tts_narrator.renderer.take_feedback import VERDICTS
@@ -596,6 +658,55 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((len(attempts), app.result, self.model.state), (2, 0, "finished"))
         self.assertIn("Completed audiobook: /books/fixture/audiobook",
                       [event.text for _, event in self.model.logs])
+
+    async def test_books_are_added_while_it_runs_finished_ones_dismissed_and_q_closes_when_all_are_done(self):
+        import tempfile
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+        extra = root / "Second Book"
+        extra.mkdir()
+        (extra / "manifest.json").write_text("{}")
+        added, closed = [], threading.Event()
+
+        def add(path):
+            added.append(path)
+            progress.report_book_state(notify_box[0], path, "queued")
+            return True, f"Added {Path(path).name}"
+        notify_box = []
+
+        def command():
+            with live_board(print) as notify:
+                notify_box.append(notify)
+                progress.report_book_adder(notify, add)
+                progress.report_book_state(notify, "/books/first", "rendering")
+                report_book_outcome(notify, "/books/first", True)
+                progress.report_retry_hold(notify, closed.set, 0)
+                closed.wait(10)
+                progress.report_retry_hold(notify, None, 0)
+                progress.report_book_adder(notify, None)
+            return 0
+
+        app = self.make_app(command)
+        async with app.run_test(size=(150, 40)) as pilot:
+            await self.wait_for(pilot, self.model.idle)
+            await pilot.press("a")
+            from epub_tts_narrator.tui_widgets import TextEditScreen
+            self.assertIsInstance(app.screen, TextEditScreen)
+            app.screen.query_one("#editor").value = str(root / "missing")
+            await pilot.press("enter")
+            self.assertIsInstance(app.screen, TextEditScreen)  # not a book: the dialog says why and stays
+            app.screen.query_one("#editor").value = f"'{extra}'"
+            await pilot.press("enter")
+            await self.wait_for(pilot, lambda: added)
+            self.assertEqual(added, [str(extra)])
+            await self.wait_for(pilot, lambda: "Second Book" in self.model.book_states)
+            await pilot.press("X")
+            self.assertEqual(list(self.model.book_states), ["Second Book"])
+            self.model.book_states["Second Book"]["state"] = "done"
+            await pilot.press("q")  # every book finished: closing asks nothing
+            await self.wait_for(pilot, lambda: not app.is_running)
+        self.assertTrue(closed.is_set())
+        self.assertEqual(app.result, 0)
 
     async def test_p_pauses_new_requests_until_pressed_again(self):
         from unittest import mock

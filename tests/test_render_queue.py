@@ -683,17 +683,132 @@ class BookOutcomeBoardTests(QueueFixtureTests):
         self.assertEqual(code, 1)
         self.assertEqual(reported, [(str(self.books[0]), False), (str(self.books[1]), True)])
 
-    def run_in_shell_board(self, behavior, on_event, count=3, engine=None):
+    def run_in_shell_board(self, behavior, on_event, count=3, engine=None, *, books=None, extra=(),
+                           close_when_idle=True):
+        """Render in a run shell's board; ``close_when_idle`` ends the run once every book has finished
+        (a run shell keeps the queue waiting for more books until a person closes it)."""
         from epub_tts_narrator.renderer.progress import shell_board
         from epub_tts_narrator.run_events import EventBus
         bus = EventBus()
         bus.subscribe(on_event)
+
+        def close_idle(event):
+            if close_when_idle and event.kind == "hold" and event.data["release"] is not None \
+                    and event.data["failed"] == 0:
+                event.data["release"]()
+        bus.subscribe(close_idle)
         with (shell_board(bus),
               patch("epub_tts_narrator.renderer.model_setup.ModelSetup.ensure"),
               patch("epub_tts_narrator.renderer.engines.create_engine", return_value=engine or Mock()),
               patch("epub_tts_narrator.renderer.verification.create_verifier", return_value=Mock()),
               patch("epub_tts_narrator.renderer.workflow.render", side_effect=behavior)):
-            return render_queue_command(self.render_args(*range(1, count + 1)), self.config, poll_seconds=0.01)
+            return render_queue_command(self.render_args(*(books or range(1, count + 1)), extra=extra),
+                                        self.config, poll_seconds=0.01)
+
+    @staticmethod
+    def rendered_name(config):
+        return Path(config["render"]["work_dir"]).parent.name
+
+    def test_a_book_added_while_the_queue_runs_renders_after_the_queued_ones(self):
+        rendered, added, engines = [], [], []
+
+        def behavior(bundle, config, engine, verifier, **kwargs):
+            rendered.append((self.rendered_name(config), kwargs["queue_position"]))
+            engines.append(engine)
+            return {"chapters": []}
+
+        def on_event(event):
+            if event.kind == "adder" and event.data["add"] is not None and not added:
+                added.append(event.data["add"](self.books[2]))  # a person pressed a before anything rendered
+
+        self.assertEqual(self.run_in_shell_board(behavior, on_event, books=(1, 2)), 0)
+        self.assertEqual(added, [(True, "Added book-3 as book 3; it starts when there is room")])
+        self.assertEqual(rendered, [("book-1", 0), ("book-2", 1), ("book-3", 2)])
+        self.assertEqual(len(set(map(id, engines))), 1)  # one engine for every book, added ones too
+
+    def test_a_finished_queue_waits_for_more_books_until_closed(self):
+        rendered, holds, answers = [], [], []
+
+        def behavior(bundle, config, engine, verifier, **kwargs):
+            rendered.append(self.rendered_name(config))
+            return {"chapters": []}
+
+        adder = []
+
+        def on_event(event):
+            if event.kind == "adder":
+                adder.append(event.data["add"])
+            if event.kind == "hold" and event.data["release"] is not None:
+                holds.append(event.data["failed"])
+                if len(holds) == 1:
+                    answers.append(adder[-1](self.books[1]))  # every book finished: add another
+                elif len(holds) == 2:
+                    answers.append(adder[-1](self.books[0]))  # a finished book renders again
+                else:
+                    event.data["release"]()  # the person closes the render
+
+        lines = []
+
+        def record(event):
+            on_event(event)
+            if event.kind == "log":
+                lines.append(event.text)
+        self.assertEqual(self.run_in_shell_board(behavior, record, books=(1,), close_when_idle=False), 0)
+        self.assertEqual(holds, [0, 0, 0])
+        self.assertEqual(rendered, ["book-1", "book-2", "book-1"])
+        self.assertEqual([accepted for accepted, _ in answers], [True, True])
+        self.assertIn("will render again", answers[1][1])
+        self.assertIsNone(adder[-1])  # the ended queue takes no more books
+        self.assertIn("Every book in the queue has finished. a adds another book; q closes.", lines)
+        self.assertTrue(any(line.startswith("Render queue finished: all 2 book(s) rendered.") for line in lines),
+                        lines)
+
+    def test_books_that_cannot_join_the_queue_are_refused_with_the_reason(self):
+        answers = {}
+        not_a_book = self.root / "not-a-book"
+        not_a_book.mkdir()
+        twin = self.root / "elsewhere" / "book-1"
+        twin.mkdir(parents=True)
+        (twin / "manifest.json").write_text("{}")
+
+        def behavior(bundle, config, engine, verifier, **kwargs):
+            return {"chapters": []}
+
+        def on_event(event):
+            add = event.data.get("add") if event.kind == "adder" else None
+            if add is not None and not answers:
+                answers["not a book"] = add(not_a_book)
+                answers["queued"] = add(self.books[1])
+                answers["same name"] = add(twin)
+            if event.kind == "adder" and event.data["add"] is None:
+                answers["ended"] = self.ended_add(self.books[2])
+
+        adders = []
+
+        def remember(event):
+            if event.kind == "adder" and event.data["add"] is not None:
+                adders.append(event.data["add"])
+                self.ended_add = event.data["add"]
+            on_event(event)
+        self.assertEqual(self.run_in_shell_board(behavior, remember, books=(1, 2)), 0)
+        self.assertEqual({name: accepted for name, (accepted, _) in answers.items()},
+                         {"not a book": False, "queued": False, "same name": False, "ended": False})
+        self.assertIn("no manifest.json", answers["not a book"][1])
+        self.assertIn("book-2 is already in this render", answers["queued"][1])
+        self.assertIn("also called book-1", answers["same name"][1])
+        self.assertIn("has ended", answers["ended"][1])
+
+    def test_a_render_of_chosen_chapters_takes_no_other_book(self):
+        answers = []
+
+        def on_event(event):
+            if event.kind == "adder" and event.data["add"] is not None and not answers:
+                answers.append(event.data["add"](self.books[1]))
+
+        self.assertEqual(self.run_in_shell_board(lambda *args, **kwargs: {"chapters": []}, on_event,
+                                                 books=(1,), extra=("--chapters", "1")), 0)
+        self.assertEqual(answers[0][0], False)
+        self.assertIn("--chapters, which belongs to one book", answers[0][1])
 
     def test_queued_books_list_their_chapters_from_their_manifests(self):
         outlines = {}
@@ -914,6 +1029,13 @@ class QueueCliWiringTests(QueueFixtureTests):
             code, output, error = self.run_cli("render", self.books[0], "--config", self.config)
         self.assertEqual(code, 0, error)
         render.assert_called_once()
+
+    def test_a_single_book_render_in_the_run_shell_uses_the_queue(self):
+        # So a person can add more books to it while it runs.
+        with patch("epub_tts_narrator.renderer.render_queue.render_queue_command", return_value=0) as queue:
+            code = main(["render", str(self.books[0]), "--config", str(self.config)], in_shell=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(queue.call_args.args[0].bundle, [self.books[0]])
 
     def test_single_book_with_remote_flag_dispatches_to_the_queue(self):
         with patch("epub_tts_narrator.renderer.render_queue.render_queue_command",

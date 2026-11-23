@@ -404,17 +404,20 @@ def doctor(config):
 
 
 def _resume_books(argv, books):
-    """For the run shell's R after a multi-book render: render again only the books that did not finish."""
+    """For the run shell's R after a render: render again only the books that did not finish.
+
+    Books a person added in the shell are part of the run too: the shell's
+    book list (``key``: the path each was queued with) decides, in its order.
+    """
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(books) < 2:
-        return None
     paths = {Path(book) for book in books}
     options = [token for token in argv[1:] if token.startswith("-") or Path(token) not in paths]
 
     def resume(model, chosen=None):
         names = set(chosen or [name for name, state in model.book_states.items() if state["state"] != "done"])
-        selected = [str(book) for book in books if Path(book).name in names]
-        if not selected or len(selected) == len(books):
+        listed = [str(state.get("key") or name) for name, state in model.book_states.items() if name in names]
+        selected = list(dict.fromkeys([*(str(book) for book in books if Path(book).name in names), *listed]))
+        if not selected or [Path(book) for book in selected] == [Path(book) for book in books]:
             return None
         return lambda: main([argv[0], *selected, *options], in_shell=True)
     return resume
@@ -609,7 +612,8 @@ def _main(argv=None, *, in_shell=False):
             from .flac_migration import convert_command
             return convert_command(args, config)
         bundle_paths = args.bundle if args.command == "render" else [args.bundle]
-        if args.command == "render" and (len(bundle_paths) > 1 or getattr(args, "remote", False)):
+        # Inside the run shell even one book renders through the queue, so a person can add more books.
+        if args.command == "render" and (len(bundle_paths) > 1 or getattr(args, "remote", False) or in_shell):
             from .render_queue import render_queue_command
             return render_queue_command(args, config_path)
         bundle = load_bundle(bundle_paths[0])

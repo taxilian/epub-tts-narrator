@@ -12,11 +12,13 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 import itertools
+from pathlib import Path
 import re
+import shlex
 import threading
 import time
 
-from .run_events import (BOOK, CHAPTER, CHAPTERS, FAILURE, FINISHED, HOLD, LOG, OUTCOME, PROGRESS, REBUILD,
+from .run_events import (ADDER, BOOK, CHAPTER, CHAPTERS, FAILURE, FINISHED, HOLD, LOG, OUTCOME, PROGRESS, REBUILD,
                          REJECTED, SEVERITIES, STATUS, STATUS_REMOVED)
 
 
@@ -138,6 +140,20 @@ class RunFilter:
         return all(word in text.casefold() for word in words)
 
 
+def book_paths(text):
+    """The book folders in what a person typed or dropped: one path (spaces and all) or several, shell-quoted."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    whole = text.strip("'\"")
+    if Path(whole).expanduser().exists():
+        return [whole]
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return [whole]
+
+
 def next_severity(current):
     index = SEVERITY_LEVELS.index(current) if current in SEVERITY_LEVELS else 0
     return SEVERITY_LEVELS[(index + 1) % len(SEVERITY_LEVELS)]
@@ -169,6 +185,9 @@ class RunModel:
         self.paused = False       # a person paused the render's network work (``renderer.render_pause``)
         self.progress = None      # analysis stage and model-stream status (PROGRESS events)
         self.holds = {}           # book (or None) -> release callable while a render waits for retries
+        self.hold_failed = {}     # book (or None) -> failures it waits on; 0: a queue waiting for more books
+        self.add_book = None      # the running render queue's add(path) -> (accepted, message), else None
+        self.dismissed = 0        # finished books a person cleared from the lists
         self.book_states = {}     # book -> {"state", "ready", "total", "key"}
         self.chapter_plans = {}   # book -> {number: {"number", "title", "blocks", "state", "done", ...}}
         self._outlines = set()    # books whose chapters are still a queued outline
@@ -336,8 +355,13 @@ class RunModel:
                 book = event.scope.get("book")
                 if event.data.get("release") is None:
                     self.holds.pop(book, None)
+                    self.hold_failed.pop(book, None)
                 else:
                     self.holds[book] = event.data["release"]
+                    self.hold_failed[book] = event.data.get("failed") or 0
+            elif event.kind == ADDER:
+                add = (event.data or {}).get("add")
+                self.add_book = add if callable(add) else None
             elif event.kind == PROGRESS:
                 self.progress = dict(event.data or {})
             elif event.kind == FINISHED:
@@ -461,6 +485,7 @@ class RunModel:
             self.error = error
             self.finished_at = self._clock()
             self.rows.clear()
+            self.add_book = None
             self._stop_chapters()
             if interrupted or exit_code == 130:
                 self.state = "interrupted"
@@ -485,6 +510,8 @@ class RunModel:
             self.stopping = False
             self.progress = None
             self.holds.clear()
+            self.hold_failed.clear()
+            self.add_book = None
             self.wanted_retries.clear()
             self.rebuild_handlers.clear()
             self.pending_rebuilds.clear()
@@ -701,10 +728,58 @@ class RunModel:
         return [item for item in reversed(items)
                 if flt.matches(item["scope"], text=" ".join(item["reasons"]) + " " + item["detail"])]
 
+    def idle(self):
+        """The render queue has finished every book and waits for more (``a`` adds one, ``q`` closes)."""
+        with self._lock:
+            return (self.running and bool(self.holds) and not any(self.hold_failed.values())
+                    and not self.rows and not self.current_failures())
+
+    def add_books(self, paths):
+        """Hand each path to the running render queue: ``[(path, accepted, message)]``."""
+        add = self.add_book
+        results = []
+        for path in paths:
+            if not callable(add):
+                results.append((path, False, "This render takes no more books now"))
+                continue
+            try:
+                accepted, message = add(path)
+            except Exception as error:  # noqa: BLE001 - a person's typo must never stop the render
+                accepted, message = False, f"{type(error).__name__}: {error}"
+            results.append((path, bool(accepted), str(message)))
+        self.changed.set()
+        return results
+
+    def dismiss_done(self):
+        """Clear every finished book from the lists (its audiobook stays); returns their names.
+
+        Its chapters, rejected takes and past failures leave the screen with
+        it; the log keeps its messages. Adding the book again lists it anew.
+        """
+        with self._lock:
+            done = [book for book, state in self.book_states.items()
+                    if book is not None and state["state"] == "done"]
+            gone = set(done)
+            for book in done:
+                for table in (self.book_states, self.chapter_plans, self._hidden, self.books, self.completed,
+                              self.wanted_retries, self.rebuild_handlers):
+                    table.pop(book, None)
+                self._outlines.discard(book)
+                self.seen["book"].discard(book)
+            self.failures = [item for item in self.failures if item["scope"].get("book") not in gone]
+            self.rejections = deque((item for item in self.rejections if item["scope"].get("book") not in gone),
+                                    maxlen=self.rejections.maxlen)
+            self.pending_rebuilds = {place for place in self.pending_rebuilds if place[0] not in gone}
+            if self.filter.book in gone:
+                self.filter.book = None
+            self.dismissed += len(done)
+        self.changed.set()
+        return done
+
     def release_holds(self):
         """Finish every render that waits for retries; it then reports what still failed."""
         with self._lock:
-            releases, self.holds = list(self.holds.values()), {}
+            releases, self.holds, self.hold_failed = list(self.holds.values()), {}, {}
         for release in releases:
             release()
         self.changed.set()
@@ -902,6 +977,8 @@ class RunModel:
                 return "warning", "Stopping at safe boundaries"
             if self.paused:
                 return "warning", "Paused — no new requests start; running ones finish (p resumes)"
+            if self.holds and not any(self.hold_failed.values()) and not failures and not self.rows:
+                return "ok", "Every book finished — a adds a book, q closes"
             if self.holds:
                 return "error", f"Waiting for retries: {failures} failure(s)"
             if self.rows and now - self.last_progress > STALL_SECONDS:
@@ -930,6 +1007,8 @@ class RunModel:
         book_detail = ", ".join(f"{states.count(name)} {name}" for name in
                                 ("rendering", "assembling", "preparing", "queued", "done", "stopped", "failed")
                                 if states.count(name))
+        if self.dismissed:
+            book_detail = ", ".join(part for part in (book_detail, f"{self.dismissed} dismissed") if part)
         result = {
             "Health": (text, f"elapsed {_duration((self.finished_at or now) - self.started)}", level),
             "Books": (str(books) if books else "—", book_detail,
@@ -1094,7 +1173,9 @@ class RunModel:
             if failures:
                 parts.append(f"{failures} failure(s)")
             if self.holds and self.running:
-                parts.append("waiting for retries (r retries, F finishes)")
+                parts.append("waiting for more books (a adds, q closes)"
+                             if not any(self.hold_failed.values()) and not failures
+                             else "waiting for retries (r retries, F finishes)")
             parts.append({"running": "stopping…" if self.stopping else "running", "finished": "finished",
                           "failed": "finished with errors", "interrupted": "stopped"}[self.state])
             if self.attempt > 1:

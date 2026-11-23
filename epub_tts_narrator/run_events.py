@@ -24,6 +24,8 @@ LOG, STATUS, STATUS_REMOVED, OUTCOME, FAILURE, FINISHED, PROGRESS, HOLD, BOOK, R
     "rejected", "rebuild")
 # A book's planned chapters (``data["chapters"]``), and one chapter's state change (``data["state"]``).
 CHAPTERS, CHAPTER = "chapters", "chapter"
+# The running render queue's ``add(path)`` for more books (``data["add"]``; None once it takes no more).
+ADDER = "adder"
 SEVERITIES = ("debug", "info", "warning", "error")
 
 

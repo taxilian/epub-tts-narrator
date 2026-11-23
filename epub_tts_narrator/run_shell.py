@@ -16,6 +16,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import ctypes
 import os
+from pathlib import Path
 import sys
 import threading
 
@@ -26,7 +27,7 @@ from textual.containers import Grid
 from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static, TabbedContent, TabPane
 
 from .run_events import EventBus
-from .run_shell_model import CHAPTER_STATES, RunModel, next_severity, plain_failure, repair_hint
+from .run_shell_model import CHAPTER_STATES, RunModel, book_paths, next_severity, plain_failure, repair_hint
 from .tui_support import prompt_streams, screen_host
 from .tui_widgets import (
     BASE_CSS, CapturePrintMixin, ChoiceScreen, VimKeysMixin, ConfirmScreen, DetailScreen, KeysScreen, PromptBridge,
@@ -189,6 +190,10 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
                 tooltip="Stop waiting for retries; the run reports what still failed (asks first)"),
         Binding("R", "resume", "Resume", tooltip="Run again (only the failed books when one is highlighted); "
                                                  "completed work is reused"),
+        Binding("a", "add_book", "Add book", tooltip="Add another analyzed book to this render: it joins the end "
+                                                     "of the queue and starts when there is room"),
+        Binding("X", "dismiss_done", "Dismiss done", tooltip="Clear the finished books from the lists (their "
+                                                             "audiobooks stay; a adds one back)"),
         Binding("p", "pause", "Pause", tooltip="Pause or resume: no new speech or model request starts while "
                                                "paused, and one that loses its connection is sent again on "
                                                "resume (for moving the laptop)"),
@@ -217,6 +222,7 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
         self._log_filter = None
         self._thread = None
         self._player = None
+        self._was_idle = False      # the queue was waiting for more books when last drawn
 
     PROFILE = "render"
     FILTER_KEYS = "b book · c chapter · s state · w worker · V voice · v level · / text · x clear"
@@ -367,6 +373,11 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
         for notice in model.pop_notices():
             self.notify(notice, severity="warning", timeout=20)
             self.bus.log(notice, severity="warning")
+        idle = self.PROFILE == "render" and model.idle()
+        if idle and not self._was_idle:
+            self.notify("Every book has finished. a adds another book, X clears the finished ones, q closes.",
+                        timeout=15)
+        self._was_idle = idle
         self.sub_title = model.summary()
         self._draw_glance()
         self._draw_profile()
@@ -1184,9 +1195,58 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
                          f"{counts['false_acceptance']} wrongly passed)", severity="warning")
             self.notify(f"Wrote {path}")
 
+    # More books, and clearing finished ones ---------------------------------------
+
+    def action_add_book(self):
+        if not callable(self.model.add_book):
+            self.notify("Books can be added while a render on this computer's worker pool runs"
+                        + (" (R runs this one again)" if not self.model.running and self.resumable else ""),
+                        severity="warning", timeout=8)
+            return
+
+        def check(text):
+            paths = book_paths(text)
+            if not paths:
+                raise ValueError("Type or drop the folder of an analyzed book")
+            for path in paths:
+                folder = Path(path).expanduser()
+                if not (folder / "manifest.json").is_file():
+                    raise ValueError(f"{path} is not an analyzed book folder (it has no manifest.json)")
+
+        def chosen(text):
+            if text:
+                self.run_worker(lambda: self._add_books(book_paths(text)), thread=True, group="add-book")
+        self.push_screen(TextEditScreen(
+            "Add a book to this render", "", single_line=True, validate=check,
+            help_text="The folder of an analyzed book (drop it from Finder; several, quoted, are fine). "
+                      "Enter adds · Escape cancels"), chosen)
+
+    def _add_books(self, paths):
+        """On a worker thread: the queue reads each book's chapter list as it adds it."""
+        for path, accepted, message in self.model.add_books(paths):
+            try:
+                self.call_from_thread(self.notify, message, severity="information" if accepted else "warning",
+                                      timeout=8)
+            except RuntimeError:
+                return
+
+    def action_dismiss_done(self):
+        done = self.model.dismiss_done()
+        if not done:
+            self.notify("No finished book to dismiss", severity="warning")
+            return
+        self.refresh_view(force=True)
+        self.notify(f"Dismissed {len(done)} finished book(s): " + ", ".join(map(str, done))
+                    + ". Their audiobooks stay where they were written.", timeout=8)
+
     def action_finish(self):
         if not self.model.holds:
             self.notify("Nothing is waiting for retries", severity="warning")
+            return
+        if self.model.idle():
+            self.push_screen(ConfirmScreen(
+                "Every book has finished. End the render? The screen then closes; a adds a book instead.",
+                title="End the render?", yes="End"), lambda yes: yes and self.model.release_holds())
             return
         self.push_screen(ConfirmScreen(
             "Stop waiting for retries? The run then reports the chapters that still failed (no audiobook "
@@ -1245,6 +1305,11 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
             # Already stopping at safe boundaries: quit when that is done (another stop request would force it).
             self.exit_when_done = True
             self._wait_to_quit()
+            return
+        if self.model.idle():
+            # Every book finished and nothing runs: closing loses nothing, so it needs no question.
+            self._stop(then_exit=True)
+            self.notify("Closing: every book has finished.")
             return
         if self.model.holds:
             message = ("The run is waiting for you to retry failed chapters. Quit? It reports what still failed "

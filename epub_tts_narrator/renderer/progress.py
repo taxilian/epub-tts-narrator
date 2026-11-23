@@ -323,6 +323,10 @@ class BusBoard(TerminalBoard):
         self.bus.publish("hold", scope={"book": book} if book else {},
                          data={"release": release, "failed": failed})
 
+    def book_adder(self, add):
+        """``add(path)`` puts one more book at the end of the running queue; ``None`` once it takes no more."""
+        self.bus.publish("adder", data={"add": add})
+
     def close(self):
         self._closed = True
 
@@ -518,6 +522,15 @@ def report_retry_hold(notify, release, failed):
     """Tell a run shell the run is waiting for retries (``release`` finishes it); ``None`` ends the wait."""
     if offers_chapter_retries(notify):
         _board_of(notify).retry_hold(release, failed)
+
+
+def report_book_adder(notify, add):
+    """Let a run shell add books to this render queue (``add(path) -> (accepted, message)``); ``None`` ends it."""
+    if offers_chapter_retries(notify):
+        board = _board_of(notify)
+        adder = getattr(board, "book_adder", None) or getattr(getattr(board, "board", None), "book_adder", None)
+        if callable(adder):
+            adder(add)
 
 
 def report_book_outcome(notify, key, succeeded):

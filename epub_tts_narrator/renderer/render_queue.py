@@ -306,14 +306,22 @@ def _validate_queue_invocation(books, args):
         raise QueueError("The render queue cannot render the same book more than once "
                          "(paths resolving to the same directory): " + ", ".join(duplicates))
     if len(books) > 1:
-        if getattr(args, "chapters", None) is not None:
+        flag = _single_book_option(args)
+        if flag == "--chapters":
             raise QueueError("--chapters selects chapters of one book; omit it to render whole "
                              "books, or render one book at a time")
-        for attribute, flag in (("output", "--output/-o"), ("work_dir", "--work-dir"),
-                                ("epub", "--epub"), ("performance_plan", "--performance-plan")):
-            if getattr(args, attribute, None) is not None:
-                raise QueueError(f"{flag} belongs to a single book; omit it to render whole "
-                                 "books, or render one book at a time")
+        if flag is not None:
+            raise QueueError(f"{flag} belongs to a single book; omit it to render whole "
+                             "books, or render one book at a time")
+
+
+def _single_book_option(args):
+    """The first option given that belongs to one book (a queue of several refuses it), or None."""
+    for attribute, flag in (("chapters", "--chapters"), ("output", "--output/-o"), ("work_dir", "--work-dir"),
+                            ("epub", "--epub"), ("performance_plan", "--performance-plan")):
+        if getattr(args, attribute, None) is not None:
+            return flag
+    return None
 
 
 def _prepare_book(book, args, *, notify=print):
@@ -600,6 +608,57 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
     pending = deque(enumerate(books))
     requested = set()
     latest = {}
+    # A run shell can also add books while the queue runs (``add``); they
+    # join at the end. ``admission`` guards the book list and what waits.
+    admission = threading.Lock()
+    closed = []
+
+    def add(path):
+        """Put one more book at the end of this queue: ``(accepted, message)``.
+
+        A book this run already finished (or that failed) is rendered again
+        in its own place; one still waiting or rendering is left as it is.
+        """
+        path = Path(str(path)).expanduser()
+        try:
+            resolved = path.resolve()
+        except (OSError, RuntimeError) as error:
+            return False, f"{path}: {error}"
+        name = _book_name(resolved)
+        if not (resolved / "manifest.json").is_file():
+            return False, f"{path} is not an analyzed book: it has no manifest.json"
+        flag = _single_book_option(args)
+        if flag is not None:
+            return False, (f"This render was started with {flag}, which belongs to one book; render {name} "
+                           "with its own command")
+        with admission:
+            if closed:
+                return False, "This render has ended; R runs it again, or render the book with its own command"
+            known = next((index for index, book in enumerate(books) if Path(book).resolve() == resolved), None)
+            if known is None and any(_book_name(book) == name for book in books):
+                return False, f"Another book in this render is also called {name}; render it with its own command"
+            if known is not None:
+                run = latest.get(known)
+                if run is None or not run.finished or known in requested:
+                    return False, f"{name} is already in this render"
+                index, again = known, True
+            else:
+                books.append(path)
+                index, again = len(books) - 1, False
+            # Both wait as requests: the lowest command-line place goes first, and a held queue wakes.
+            book_retries.request(index)
+        if not again:
+            report_book_state(notify, path, "queued")
+            report_chapter_plan(notify, path, lambda: _chapter_outline(path), outline=True)
+        changed.set()
+        _emit(notify, f"[{name}] Added to the queue as book {index + 1} of {len(books)}"
+                      + (": rendering it again (completed work is reused)." if again else "."))
+        return True, (f"{name} will render again (completed work is reused)" if again
+                      else f"Added {name} as book {index + 1}; it starts when there is room")
+
+    if book_retries is not None:
+        from .progress import report_book_adder
+        report_book_adder(notify, add)
 
     def failed(index, run, message):
         """Record one book's failure, offering the shell a retry while the queue runs."""
@@ -617,12 +676,13 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
 
     def waiting():
         """The earliest book on the command line waiting to be admitted (retried or not yet started), or None."""
-        if book_retries is not None:
-            while (index := book_retries.take_nowait()) is not None:
-                book_retries.done()
-                requested.add(index)
-        candidates = [*requested, *([pending[0][0]] if pending else [])]
-        return min(candidates) if candidates else None
+        with admission:
+            if book_retries is not None:
+                while (index := book_retries.take_nowait()) is not None:
+                    book_retries.done()
+                    requested.add(index)
+            candidates = [*requested, *([pending[0][0]] if pending else [])]
+            return min(candidates) if candidates else None
 
     def earliest_rendering():
         indexes = [run.index for run in runs if run.thread is not None and run.thread.is_alive()]
@@ -633,11 +693,13 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
         index = waiting()
         if index is None:
             return None
-        if index in requested:
-            requested.discard(index)
-            return index, books[index], True
-        pending.popleft()
-        return index, books[index], False
+        with admission:
+            if index in requested:
+                requested.discard(index)
+                # A book added while the queue ran has no earlier run: it starts, not again.
+                return index, books[index], index in latest
+            pending.popleft()
+            return index, books[index], False
 
     with RenderInterrupts():
         try:
@@ -654,7 +716,7 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                         upcoming, rendering = waiting(), earliest_rendering()
                         if rendering is not None and upcoming < rendering:
                             _emit(notify, f"Admitting book {upcoming + 1} of {len(books)}"
-                                         f"{' again' if upcoming in requested else ''}: it comes before book "
+                                         f"{' again' if upcoming in latest else ''}: it comes before book "
                                          f"{rendering + 1} on the command line, so its chapters go next.")
                             break
                         slots = getattr(engine, "max_parallel", None)
@@ -667,7 +729,7 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                             spare_polls = spare_polls + 1 if busy < slots else 0
                             if spare_polls >= GATE_OPEN_POLLS:
                                 _emit(notify, f"Admitting book {upcoming + 1} of {len(books)}"
-                                             f"{' again' if upcoming in requested else ''}: "
+                                             f"{' again' if upcoming in latest else ''}: "
                                              f"spare capacity ({busy} of {slots} slots).")
                                 break
                         changed.wait(poll_seconds)
@@ -684,7 +746,8 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                         continue
                     failures = [run for run in latest.values() if run.status and run.status[0] == "failed"]
                     if not failures:
-                        break
+                        # A run shell keeps the queue (and its loaded models) for more books.
+                        _emit(notify, "Every book in the queue has finished. a adds another book; q closes.")
                     report_retry_hold(notify, book_retries.release, len(failures))
                     if not book_retries.wait_for_request(stop_check=stop_if_requested):
                         break
@@ -692,7 +755,8 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                     continue
                 index, book, retried = chosen
                 run = _BookRun(index, book)
-                latest[index] = run
+                with admission:
+                    latest[index] = run
                 book_notify = _prefixed(f"[{run.name}] ", notify)
                 if retried:
                     _emit(notify, f"[{run.name}] Back in the queue in its command-line place: rendering it again.")
@@ -753,6 +817,11 @@ def _run_local_queue(books, args, *, notify, poll_seconds=POLL_SECONDS):
                     run.thread.join(timeout=poll_seconds)
                     stop_if_requested()
         finally:
+            with admission:
+                closed.append(True)
+            if book_retries is not None:
+                from .progress import report_book_adder
+                report_book_adder(notify, None)
             for run in runs:
                 if run.thread is not None:
                     run.thread.join()
