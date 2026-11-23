@@ -40,6 +40,8 @@ Done: per-voice clip counts (`voice_clip_counts.py`, `book_voice_settings.py`); 
 
 ## Phase 2 — run shell (`run_shell_model.py`, `run_shell.py`, built from `tui_widgets.py`)
 
+Layout: the existing fixed shell retains one scrolling Chapters DataTable. A book's completed chapters are represented by one summary row when at least two are complete; `E` toggles expansion and Enter on a summary expands completed rows. Active and problem chapters remain individually selectable, and underlying chapter counters are unchanged.
+
 Long-running commands run inside it on a TTY: `analyze` (and book updates, `resolve-speakers`), `verify-attribution`, `refresh-directions`, `render` (single book and multi-book queue, local and remote pool), `assemble`, `import-voices`, `cast --action generate-missing|regenerate-all|prepare-samples`, and the labelling stage of `pronounce`. Quick read-only commands (`validate`, `review`, `list`, `plan`, `doctor`) keep printing, because their output is meant to be piped.
 
 Layout:
