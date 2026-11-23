@@ -94,13 +94,13 @@ def validate_book_paths(bundle, config):
 
 def voice_store(bundle, config, *, local_aliases=None):
     """Construct current-first lookup; every writable operation stays local."""
-    from .bundle import load_bundle
+    from .bundle import load_earlier_bundle
     from .book_aliases import read_book_aliases
     from .voice_bindings import validate_aliases
     from .voices import VoiceStore
     from epub_tts_narrator.narration_identity import author_name_key, author_narrator_name
     from functools import partial
-    books = [bundle, *[load_bundle(path) for path in config.get("_voice_parents", [])]]
+    books = [bundle, *[load_earlier_bundle(path) for path in config.get("_voice_parents", [])]]
     entries, allowed_ids = [], set()
     # Author narration is a separate scope, never an implicit alias for the
     # main narrator or any fictional character, even when a cast shares IDs.

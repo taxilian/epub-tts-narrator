@@ -162,10 +162,39 @@ class ContinuationDirectoryTests(unittest.TestCase):
 
     def test_each_book_is_validated_once_per_chain_traversal(self):
         first, second, third = self.chain()
-        original = analysis_directory._completed_directory
-        with patch.object(analysis_directory, "_completed_directory", wraps=original) as completed:
+        analysis_directory._VALIDATED.clear()  # publishing the chain already validated the earlier books
+        original = analysis_directory._check_completed_directory
+        with patch.object(analysis_directory, "_check_completed_directory", wraps=original) as completed:
             self.assertEqual(continuation_directories(third), [second, first])
         self.assertEqual([call.args[0] for call in completed.call_args_list], [third, second, first])
+
+    def test_unchanged_books_are_not_validated_again(self):
+        first, second, third = self.chain()
+        continuation_directories(third)
+        original = analysis_directory._check_completed_directory
+        with patch.object(analysis_directory, "_check_completed_directory", wraps=original) as completed:
+            self.assertEqual(continuation_directories(third), [second, first])
+            self.assertEqual(continuation_directories(second), [first])
+        self.assertEqual(completed.call_args_list, [])
+
+    def test_a_changed_earlier_book_is_validated_again(self):
+        first, second, third = self.chain()
+        continuation_directories(third)
+        cast = first / "cast.json"
+        record = self.read(cast)
+        record["voices"] = []
+        cast.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "Cannot load continuation parent.*checksum mismatch: cast.json"):
+            continuation_directories(third)
+
+    def test_callers_that_change_a_validated_book_get_their_own_copy(self):
+        first, _, third = self.chain()
+        continuation_directories(third)
+        document, registry, _ = analysis_directory._completed_directory(first)
+        document["cast"]["voices"].clear()
+        registry["books"].clear()
+        self.assertEqual(continuation_directories(third)[-1], first)
+        self.assertTrue(analysis_directory._validated_directory(first)[0]["cast"]["voices"])
 
     def test_publication_rejects_registry_that_differs_from_parent(self):
         first = self.book(1)

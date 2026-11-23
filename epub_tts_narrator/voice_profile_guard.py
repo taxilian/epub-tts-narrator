@@ -8,15 +8,14 @@ from .voice_profile_state import FILENAME, LOCKNAME, read_state
 
 
 def require_valid_profiles(directory):
-    from .analysis_directory import (_continuation_entry, _read_json, _regular_file,
-                                     continuation_directories)
+    from .analysis_directory import _continuation_entry, _saved_manifest, continuation_directories
     directory = Path(directory).resolve()
     current, chain = directory, []
     # Find the durable owner before transient chain locks or publication checks.
     while current not in chain:
         chain.append(current)
         _require_ready(current, marker_only=True)
-        link = _continuation_entry(_read_json(_regular_file(current, "manifest.json")))
+        link = _continuation_entry(_saved_manifest(current))
         if link is None:
             break
         current = (current / link["path"]).resolve()

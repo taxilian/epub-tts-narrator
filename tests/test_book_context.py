@@ -53,6 +53,33 @@ class BookContextTests(unittest.TestCase):
         self.assertEqual(first["voices"]["series_id"], second["voices"]["series_id"])
         self.assertEqual(second["_voice_parents"], [str(self.first)])
 
+    def test_an_unchanged_earlier_book_is_loaded_once(self):
+        from unittest import mock
+        from epub_tts_narrator.renderer import bundle as bundle_module
+        config = resolve_book_config(self.bundle, self.config)
+        with mock.patch.object(bundle_module, "load_bundle", wraps=bundle_module.load_bundle) as loads:
+            voice_store(self.bundle, config)
+            voice_store(self.bundle, config)
+            first = bundle_module.load_earlier_bundle(self.first)
+        self.assertEqual(loads.call_count, 1)
+        self.assertEqual(first["source"], load_bundle(self.first)["source"])
+
+    def test_a_changed_earlier_book_is_loaded_and_checked_again(self):
+        from epub_tts_narrator.renderer import bundle as bundle_module
+        bundle_module.load_earlier_bundle(self.first)
+        cast = self.first / "cast.json"
+        cast.write_text(cast.read_text().replace('"voices"', '"voices" ', 1))
+        with self.assertRaisesRegex(ValueError, "checksum mismatch: cast.json"):
+            bundle_module.load_earlier_bundle(self.first)
+
+    def test_an_earlier_book_pending_a_profile_refresh_is_refused_even_when_remembered(self):
+        from epub_tts_narrator.renderer import bundle as bundle_module
+        from epub_tts_narrator.voice_profile_state import FILENAME
+        bundle_module.load_earlier_bundle(self.first)
+        (self.first / FILENAME).write_text("{}")
+        with self.assertRaisesRegex(ValueError, "Voice profiles are invalid while refresh is pending"):
+            bundle_module.load_earlier_bundle(self.first)
+
     def test_output_and_work_overrides_cannot_target_ancestor_or_source(self):
         targets = [self.first, self.first / "new-output", self.first / "voices",
                    self.root, self.second, self.second / "scripts",

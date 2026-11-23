@@ -6,6 +6,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import re
+import threading
 
 from epub_tts_narrator.contracts import validate_document, review_items
 from epub_tts_narrator.chapter_partitions import script_partitions
@@ -122,6 +123,46 @@ def load_bundle(directory):
             "cast": cast, "reviews": reviews, "chapters": chapters,
             "implied_reviews": review_items(document),
             "bundle_hash": digest(manifest)}
+
+
+_EARLIER = {}  # resolved directory -> (file stat keys, bundle), this process only
+_EARLIER_LOCK = threading.Lock()
+
+
+def _bundle_keys(directory, manifest):
+    from .file_snapshot import stat_key
+    names = ["manifest.json", "scripts", "source.json", "cast.json", "review.json",
+             *(entry.get("path", "") for entry in manifest["files"]["scripts"])]
+    return [stat_key(directory / name) for name in names]
+
+
+def load_earlier_bundle(directory):
+    """``load_bundle`` of an earlier series book, for reading only; loaded once while its files are unchanged.
+
+    Opening a later book reaches every earlier book's bundle several times (the
+    voice store, accent assignment, a person's notes), and each load hashes and
+    validates the whole book. The bundle is remembered with the stat of every
+    file it was built from and reused while they are all unchanged; voice
+    profile readiness is still checked on every call. The same object is
+    returned each time, so callers must not modify it.
+    """
+    directory = Path(directory).resolve()
+    with _EARLIER_LOCK:
+        saved = _EARLIER.get(directory)
+    if saved is not None:
+        from ..voice_profile_guard import require_valid_profiles
+        require_valid_profiles(directory)
+        if _bundle_keys(directory, saved[1]["manifest"]) == saved[0]:
+            return saved[1]
+    try:
+        before = _bundle_keys(directory, read_json(regular_file(directory / "manifest.json")))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        before = None  # load_bundle reports it
+    bundle = load_bundle(directory)
+    if before is not None and _bundle_keys(directory, bundle["manifest"]) == before:
+        with _EARLIER_LOCK:
+            _EARLIER[directory] = (before, bundle)
+    return bundle
 
 
 def ignored_block_ids(bundle, ignored):

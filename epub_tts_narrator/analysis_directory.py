@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import threading
 
 from .analysis_progress import CACHE_DIRNAME, PENDING_DIRNAME, is_pending_directory
 from .contracts import readiness, review_items, validate_document
@@ -137,8 +138,75 @@ def _validate_script_rows(directory, manifest, document):
         raise ValueError("Prior chapter scripts do not cover the analysis")
 
 
+_VALIDATED = {}  # resolved directory -> (file stat keys, (document, registry, names)), this process only
+_VALIDATED_LOCK = threading.Lock()
+
+
+def _file_key(path):
+    try:
+        info = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    return stat.S_IFMT(info.st_mode), info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino
+
+
+def _directory_keys(directory, names):
+    """The stat of every file ``_completed_directory`` reads, so any edit, replacement or link shows."""
+    return tuple(_file_key(directory / name)
+                 for name in ("manifest.json", "analysis.json", "series-cast.json", "scripts", *names))
+
+
+_MANIFESTS = {}  # manifest path -> (stat key, parsed manifest), this process only
+
+
+def _saved_manifest(directory):
+    """``manifest.json`` of ``directory`` for reading only, parsed again only when the file changes."""
+    path = _regular_file(Path(directory), "manifest.json")
+    key = _file_key(path)
+    with _VALIDATED_LOCK:
+        saved = _MANIFESTS.get(path)
+    if saved is not None and saved[0] == key:
+        return saved[1]
+    manifest = _read_json(path)
+    if _file_key(path) == key:
+        with _VALIDATED_LOCK:
+            _MANIFESTS[path] = (key, manifest)
+    return manifest
+
+
+def _validated_directory(directory):
+    """``_completed_directory`` for read-only use, validated once per process while its files are unchanged.
+
+    A series' later book reaches each earlier book many times when it opens
+    (every load of an earlier book checks that book's own ancestors), and each
+    check reads, hashes and validates whole analyses. The result is remembered
+    with the stat of every file the check read and reused while they are all
+    unchanged. Callers must not modify what it returns.
+    """
+    directory = Path(directory).resolve()
+    with _VALIDATED_LOCK:
+        saved = _VALIDATED.get(directory)
+    if saved is not None and _directory_keys(directory, saved[1][2]) == saved[0]:
+        return saved[1]
+    before = None
+    try:
+        names = _bundle_files(_read_json(_regular_file(directory, "manifest.json")))
+        before = _directory_keys(directory, names)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        pass  # _completed_directory reports it
+    result = _check_completed_directory(directory)
+    if before is not None and _directory_keys(directory, result[2]) == before:
+        with _VALIDATED_LOCK:
+            _VALIDATED[directory] = (before, result)
+    return result
+
+
 def _completed_directory(directory):
-    """Validate the bundle and its matching cumulative series snapshot."""
+    """Validate the bundle and its matching cumulative series snapshot (fresh objects the caller may change)."""
+    return _check_completed_directory(Path(directory).resolve())
+
+
+def _check_completed_directory(directory):
     directory = Path(directory).resolve()
     if not directory.is_dir():
         raise ValueError(f"Previous analysis directory does not exist: {directory}")
@@ -200,7 +268,7 @@ def _continuation_chain(directory, document, registry):
     visited = {current}
     ancestors = []
     while True:
-        manifest = _read_json(_regular_file(current, "manifest.json"))
+        manifest = _saved_manifest(current)
         link = _continuation_entry(manifest)
         if link is None:
             return ancestors
@@ -209,10 +277,10 @@ def _continuation_chain(directory, document, registry):
             raise ValueError(f"Cycle in analysis directory continuation chain: {parent}")
         visited.add(parent)
         try:
-            parent_document, parent_registry, _ = _completed_directory(parent)
+            parent_document, parent_registry, _ = _validated_directory(parent)
         except (OSError, ValueError) as exc:
             raise ValueError(f"Cannot load continuation parent {parent}: {exc}") from exc
-        parent_metadata = _read_json(parent / "manifest.json")["analysis_directory"]["sha256"]
+        parent_metadata = _saved_manifest(parent)["analysis_directory"]["sha256"]
         if (parent_registry["series_id"] != link["series_id"]
                 or fingerprint(parent_document["source"]) != link["source_fingerprint"]
                 or parent_metadata["analysis.json"] != link["analysis_sha256"]
@@ -235,12 +303,12 @@ def continuation_directories(directory):
     """
     directory = Path(directory).resolve()
     try:
-        manifest = _read_json(_regular_file(directory, "manifest.json"))
+        manifest = _saved_manifest(directory)
         if not isinstance(manifest, dict):
             raise ValueError("Invalid analysis directory manifest")
         if _continuation_entry(manifest) is None:
             return []
-        document, registry, _ = _completed_directory(directory)
+        document, registry, _ = _validated_directory(directory)
         return _continuation_chain(directory, document, registry)
     except OSError as exc:
         raise ValueError(f"Cannot read analysis directory continuation chain at {directory}: {exc}") from exc

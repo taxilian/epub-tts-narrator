@@ -363,8 +363,8 @@ def voice_entries(bundle, parents=(), known=None):
 
 def parent_bundles(config):
     """Earlier books' bundles, nearest first (for where a returning character was introduced)."""
-    from .bundle import load_bundle
-    return [load_bundle(path) for path in config.get("_voice_parents", [])]
+    from .bundle import load_earlier_bundle
+    return [load_earlier_bundle(path) for path in config.get("_voice_parents", [])]
 
 
 MAX_VOICE = 300
