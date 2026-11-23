@@ -189,6 +189,7 @@ docker buildx build --platform linux/amd64 -f deploy/runpod/Dockerfile -t REGIST
 
 ## NOTES
 
+- Render Chapters view: `RunModel.visible_chapters` collapses all completed chapters (at least two) into one summary per book, even across unfinished/failed rows; raw chapter records and breakdowns stay unchanged. `RunApp` `E` toggles expansion, Enter on a summary expands; summaries are never chapter retry/take/edit targets, and cursor remapping keeps the selected chapter or its group.
 - **Two environments:** analyzer venv (3.11+) and renderer venv (3.12, uv) are separate by design.
 - **Full test environment:** install/update `test.requirements.txt` with `uv pip --python .venv-renderer/bin/python`; missing test dependencies are failures, not acceptable skips. Fixtures must be tracked or constructed by each test, never depend on saved runs.
 - **External tools:** FFmpeg + FFprobe required for rendering; paths configured in TOML.

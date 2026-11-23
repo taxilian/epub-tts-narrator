@@ -172,6 +172,8 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
         Binding("4", "tab('log')", "Log", tooltip="Every message, filtered"),
         Binding("5", "tab('errors')", "Errors", tooltip="Every failure with its detail and repairs"),
         Binding("6", "tab('rejected')", "Rejected", tooltip="Every rejected take: listen, judge it, or use it"),
+        Binding("E", "collapse_completed", "Toggle", tooltip="Chapters view: collapse or expand runs of "
+                "completed chapters (Enter on a summary row expands it and highlights its first chapter)"),
         Binding("e", "export_feedback", "Export", show=False,
                 tooltip="Write the takes you judged differently from verification, for detection work"),
         Binding("b", "pick('book')", "Book", tooltip="Filter by book"),
@@ -412,9 +414,22 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
         model = self.model
         model.sched = self._sched_status()
         chapters = model.visible_chapters()
-        sync_table(self.query_one("#rows", DataTable), [(key, _chapter_cells(chapter)) for key, chapter in chapters])
+        rows = self.query_one("#rows", DataTable)
+        previous = highlighted_key(rows)
+        sync_table(rows, [(key, _chapter_cells(chapter)) for key, chapter in chapters])
+        if previous is not None and previous not in {key for key, _ in chapters}:
+            # The highlight was a chapter a summary absorbed (or a summary that
+            # dissolved): land on the summary / its first member, not a shifted row.
+            target = _collapsed_cursor_target(previous, chapters)
+            if target is not None:
+                index = next(n for n, (key, _) in enumerate(chapters) if key == target)
+                rows.move_cursor(row=index, scroll=False)
         tally = model.chapter_breakdown()
-        self.query_one("#chapter-breakdown", Static).update(_breakdown_text(tally, len(chapters), model.filter))
+        completed = [_completed_members(chapter) for _, chapter in chapters]
+        shown = sum(len(numbers) or 1 for numbers in completed)
+        collapsed = sum(len(numbers) for numbers in completed)
+        self.query_one("#chapter-breakdown", Static).update(
+            _breakdown_text(tally, shown, model.filter, collapsed))
         total = sum(item[1] for item in tally)
         done = sum(item[2].get("done", 0) for item in tally)
         self.query_one("#tabs", TabbedContent).get_tab("chapters").label = (
@@ -600,6 +615,33 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
         self.model.filter.severity = next_severity(self.model.filter.severity)
         self.refresh_view(force=True)
 
+    def action_collapse_completed(self):
+        """``E`` in the Chapters view: collapse or expand every run of completed chapters; elsewhere it does nothing."""
+        if self.query_one("#tabs", TabbedContent).active != "chapters":
+            return
+        table = self.query_one("#rows", DataTable)
+        previous = highlighted_key(table)
+        self.model.collapse_completed = not self.model.collapse_completed
+        self.refresh_view(force=True)
+        if previous is not None:
+            rows = {key.value: index for index, key in enumerate(table.rows)}
+            if previous in rows:
+                table.move_cursor(row=rows[previous], scroll=False)
+            else:
+                target = _collapsed_cursor_target(previous, self.model.visible_chapters())
+                if target in rows:
+                    table.move_cursor(row=rows[target], scroll=False)
+
+    def _expand_completed_summary(self, key):
+        """Enter on a summary row: expand completed chapters and highlight the group's first chapter."""
+        self.model.collapse_completed = False
+        self.refresh_view(force=True)
+        table = self.query_one("#rows", DataTable)
+        target = _collapsed_cursor_target(key, self.model.visible_chapters())
+        rows = {row_key.value: index for index, row_key in enumerate(table.rows)}
+        if target in rows:
+            table.move_cursor(row=rows[target], scroll=False)
+
     def action_search(self):
         self.action_tab("log")
         box = self.query_one("#search", Input)
@@ -631,7 +673,12 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
             if not self._open_book_failure(book):
                 self._show_book(book)
         elif table == "rows":
-            self._chapter_detail(event.row_key.value)
+            key = event.row_key.value
+            chapter = next((item for row_key, item in self.model.visible_chapters() if row_key == key), None)
+            if chapter is not None and chapter.get("completed"):
+                self._expand_completed_summary(key)
+            else:
+                self._chapter_detail(key)
         elif table == "errors":
             item = self._failure_at(event.row_key.value)
             if item is not None:
@@ -696,6 +743,16 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
         chapter = next((item for row_key, item in self.model.visible_chapters() if row_key == key), None)
         if chapter is None:
             return
+        if chapter.get("completed"):
+            # A summary row is not one chapter: say what the group holds, never a member's failure.
+            numbers = chapter["completed"]
+            lines = [f"{len(numbers)} completed chapter{'s' if len(numbers) != 1 else ''} of "
+                     f"{chapter['book']}: {_number_span(numbers)}."]
+            if chapter["completed_reused"]:
+                lines.append(f"{chapter['completed_reused']} restored from an earlier run, not re-rendered.")
+            lines += ["", "Close this detail, then press E or Enter on the summary to expand completed chapters."]
+            self.push_screen(DetailScreen(f"[{chapter['book']}] completed chapters", "\n".join(lines)))
+            return
         if chapter["state"] in ("failed", "blocked", "retrying"):
             failure = self.model.chapter_failure(chapter["book"], chapter["chapter"])
             if failure is not None:
@@ -759,6 +816,8 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
             chapter = next((item for row_key, item in self.model.visible_chapters() if row_key == key), None)
             if chapter is None:
                 return None, "Highlight a chapter first."
+            if chapter.get("completed"):
+                return None, "That row summarizes completed chapters; highlight a chapter that needs attention."
             item = self.model.chapter_failure(chapter["book"], chapter["chapter"])
             name = self.model.chapter_name(chapter["book"], chapter["chapter"])
             return item, None if item is not None else (
@@ -1554,8 +1613,21 @@ def _state_label(chapter, *, short=False):
     return chapter["state"]
 
 
+def _completed_members(chapter):
+    if not isinstance(chapter, dict):
+        return []
+    members = chapter.get("completed")
+    return members if isinstance(members, list) else []
+
+
 def _chapter_cells(chapter):
     """One Chapters row: book, chapter, title, state, blocks, rejected takes, timing and what it is doing."""
+    numbers = chapter.get("completed")
+    if numbers is not None:
+        state = Text(f"{len(numbers)} completed chapters", style="green")
+        return (str(chapter["book"] or ""), _number_span(numbers, compact=True), "", state, "",
+                Text(str(chapter["rejected"]), style="yellow") if chapter["rejected"] else "",
+                "", "", Text("Enter expands", style="dim"))
     snapshot, blocks, done = chapter["snapshot"], chapter["blocks"], chapter["done"]
     if blocks is not None:
         progress = f"{done}/{blocks}" + (f" ({round(100 * done / max(1, blocks))}%)" if blocks else "")
@@ -1576,7 +1648,32 @@ def _chapter_cells(chapter):
             f"~{format_seconds(snapshot['remaining'])}" if snapshot and snapshot.get("remaining") else "", now)
 
 
-def _breakdown_text(tally, shown, flt):
+def _collapsed_cursor_target(previous, chapters):
+    """Where the highlight lands when ``previous`` left the list: a summary absorbs its done chapter; a dissolved summary yields its first member."""
+    parts = str(previous).split("\x1f")
+    if len(parts) == 3 and parts[1] == "done":
+        try:
+            book, number = parts[0], int(parts[2].split("-")[0])
+        except ValueError:
+            return None
+    elif len(parts) == 2 and parts[1].isdigit():
+        book, number = parts[0], int(parts[1])
+    else:
+        return None
+    return next((key for key, chapter in chapters if chapter["book"] == book
+                 and (chapter["chapter"] == number or number in chapter.get("completed", ()))), None)
+
+
+def _number_span(numbers, *, compact=False):
+    """A contiguous range or gapped member list, abbreviated in the table."""
+    if numbers == list(range(numbers[0], numbers[-1] + 1)):
+        return f"{numbers[0]}-{numbers[-1]}"
+    if compact:
+        return f"{numbers[0]}, …, {numbers[-1]}"
+    return ", ".join(str(number) for number in numbers)
+
+
+def _breakdown_text(tally, shown, flt, collapsed=0):
     """How many chapters are in each state, per book (and for all books when several are shown)."""
     def line(name, total, counts, reused):
         text = Text(f"{name}: ", style="bold")
@@ -1604,6 +1701,9 @@ def _breakdown_text(tally, shown, flt):
             result.append("\n")
         result.append_text(line(str(book or "this run"), total, counts, reused))
     total = sum(item[1] for item in tally)
+    if collapsed:
+        result.append(f"\n{collapsed} completed chapter{'s are' if collapsed != 1 else ' is'} collapsed "
+                      "(E expands)", style="dim")
     if shown != total:
         result.append(f"\nShowing {shown} of {total} ({flt.describe()}; x clears)", style="dim")
     return result

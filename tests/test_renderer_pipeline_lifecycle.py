@@ -397,6 +397,7 @@ class PipelineLifecycleTests(unittest.TestCase):
             return on_event
 
         first = RunModel("render")
+        first.collapse_completed = False  # this test reads the raw per-chapter list, not the grouped view
         with self.assertRaises(ChaptersRenderFailed):
             self._render_in_shell("pipeline", watch(first))
         # Every chapter is listed from the start, before any has reported progress.
@@ -412,6 +413,7 @@ class PipelineLifecycleTests(unittest.TestCase):
         from epub_tts_narrator.renderer.progress import shell_board
         from epub_tts_narrator.run_events import EventBus
         second = RunModel("render")
+        second.collapse_completed = False  # raw per-chapter list, as above
         plans.clear()
         bus = EventBus()
         bus.subscribe(watch(second))

@@ -382,6 +382,9 @@ class RunModelTests(unittest.TestCase):
         self.assertEqual(plain_failure([]), "")
 
     def test_every_planned_chapter_is_listed_in_order_with_its_state_and_a_breakdown(self):
+        # This test's contract is the ungrouped list: completed-chapter collapsing
+        # (on by default) is covered by test_run_shell_completed.py.
+        self.model.collapse_completed = False
         board = BusBoard(self.bus)
         board.book_state("/q/b1", "rendering")
         board.book_state("/q/b2", "queued")

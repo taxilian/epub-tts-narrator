@@ -190,6 +190,7 @@ class RunModel:
         self.hold_failed = {}     # book (or None) -> failures it waits on; 0: a queue waiting for more books
         self.add_book = None      # the running render queue's add(path) -> (accepted, message), else None
         self.dismissed = 0        # finished books a person cleared from the lists
+        self.collapse_completed = True
         self.book_states = {}     # book -> {"state", "ready", "total", "key"}
         self.chapter_plans = {}   # book -> {number: {"number", "title", "blocks", "state", "done", ...}}
         self._outlines = set()    # books whose chapters are still a queued outline
@@ -876,6 +877,12 @@ class RunModel:
         Keys are strings, stable while the chapter list stays the same, so
         the table updates in place. The book, chapter and state filters
         apply; a worker or voice filter keeps chapters with matching active work.
+        With ``collapse_completed`` (the default), all finished chapters of
+        one book become one summary row when there are at least two. Its key is
+        ``"<book>\\x1fdone\\x1f<first>-<last>"``, and its chapter
+        dict carries ``completed`` (member numbers) and ``completed_reused``;
+        single finished chapters and unfinished rows stay individual, so the
+        raw chapter list and the breakdown are untouched either way.
         """
         with self._lock:
             items = self._chapters()
@@ -883,12 +890,30 @@ class RunModel:
 
         def tasks(chapter):
             return (chapter["snapshot"] or {}).get("active", [])
-        return [(key, chapter) for key, chapter in items
-                if (flt.book is None or chapter["book"] == flt.book)
-                and (flt.chapter is None or chapter["chapter"] == flt.chapter)
-                and (flt.state is None or chapter["state"] == flt.state)
-                and (flt.worker is None or any(task.get("worker") == flt.worker for task in tasks(chapter)))
-                and (flt.voice is None or any(flt.voice in (task.get("voices") or ()) for task in tasks(chapter)))]
+        visible = [(key, chapter) for key, chapter in items
+                   if (flt.book is None or chapter["book"] == flt.book)
+                   and (flt.chapter is None or chapter["chapter"] == flt.chapter)
+                   and (flt.state is None or chapter["state"] == flt.state)
+                   and (flt.worker is None or any(task.get("worker") == flt.worker for task in tasks(chapter)))
+                   and (flt.voice is None or any(flt.voice in (task.get("voices") or ()) for task in tasks(chapter)))]
+        if not self.collapse_completed:
+            return visible
+        completed_by_book = {}
+        for key, chapter in visible:
+            if chapter["state"] == "done":
+                completed_by_book.setdefault(chapter["book"], []).append((key, chapter))
+        grouped, summarized_books = [], set()
+        for key, chapter in visible:
+            if chapter["state"] != "done":
+                grouped.append((key, chapter))
+            elif chapter["book"] not in summarized_books:
+                completed = completed_by_book[chapter["book"]]
+                if len(completed) >= 2:
+                    grouped.append(_completed_summary(completed))
+                else:
+                    grouped.append((key, chapter))
+                summarized_books.add(chapter["book"])
+        return grouped
 
     def chapter_breakdown(self):
         """``[(book, total, {state: count}, reused)]`` per shown book (the book filter applies, not the others).
@@ -1249,6 +1274,25 @@ class RunModel:
                 lines.append(_line(event))
         lines.extend(_line(event) for event in tail)
         return lines
+
+
+def _completed_summary(run):
+    """One summary row for all finished chapters of a book, with member numbers.
+
+    ``run`` is ``[(key, chapter)]`` of same-book ``done`` rows in chapter order;
+    both freshly finished and restored (``reused``) chapters count. The key's
+    ``done`` segment keeps it distinct from numeric (``<book>\\x1f<number>``)
+    and live (``live\\x1f…``) row keys.
+    """
+    members = [chapter for _, chapter in run]
+    book = members[0]["book"]
+    numbers = [chapter["chapter"] for chapter in members]
+    reused = sum(1 for chapter in members if chapter["reused"])
+    return f"{book}\x1fdone\x1f{numbers[0]}-{numbers[-1]}", {
+        "book": book, "chapter": None, "title": "", "state": "done", "reused": bool(reused),
+        "blocks": None, "done": 0, "rejected": sum(chapter["rejected"] for chapter in members),
+        "error": None, "error_type": None, "snapshot": None, "text": "", "row_key": None,
+        "completed": numbers, "completed_reused": reused}
 
 
 def _chapter_share(entry):
