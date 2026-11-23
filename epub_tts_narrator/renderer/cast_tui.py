@@ -187,7 +187,7 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
                 tooltip="What you know about this character (later names, gender, origin, notes): used for its "
                         "accent and voice description"),
         Binding("v", "accents", "Accents",
-                tooltip="Review the book's accent plan (as accents BOOK does); q comes back here"),
+                tooltip="Switch to the book's accent plan (as accents BOOK shows it); v there switches back"),
         Binding("d", "share", "Share", tooltip="Use another voice's recording for this voice"),
         Binding("D", "stop_sharing", "Unshare", show=False, tooltip="Stop sharing (this book's own link only)"),
         Binding("J", "merge", "Same as", show=False,
@@ -221,6 +221,9 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         self._started = time.monotonic()
         self._voice_widths = None
         self._fitted_width = None
+        # The accent view: None, "opening", or {"controller", "screen", "changes"} once open. It stays alive
+        # while the cast is shown, so v switches between the two at once and keeps an unsaved plan.
+        self._accents = None
         controller._on_change = self._changed
 
     # Layout --------------------------------------------------------------------
@@ -256,6 +259,16 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         self.render_all()
         voices.focus()
         self.set_interval(0.5, self._tick)
+        if self.run_startup:
+            self._accents_first()
+
+    def _accents_first(self):
+        """Open on the accent plan while any voice here has no accent decided: voices are designed with theirs."""
+        undecided = self.controller.undecided_accents(self.controller.rows)
+        if undecided:
+            self.controller.log(f"{len(undecided)} voice(s) have no accent decided yet, so the accent plan opens "
+                                "first; v switches between it and the cast.", "warning")
+            self.action_accents()
 
     # Updates -------------------------------------------------------------------
 
@@ -980,37 +993,68 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
     def action_accents(self):
         if self._accent_view() is not None:
             return
+        view = self._accents
+        if view == "opening":
+            self.notify("The accent plan is still opening…")
+            return
+        if view is not None:
+            accents = view["controller"]
+            if (view["changes"] == self.controller.voice_changes or accents.planner.dirty or accents.busy()):
+                self.push_screen(view["screen"])
+                return
+            # A voice changed since this untouched plan was read: read it again.
+            self.close_accents()
+        self._accents = "opening"
         self.controller.log("Opening the book's accent plan…")
-        self._attempt(lambda: self.controller.open_accents(self._accents_ready))
+        if self._attempt(lambda: self.controller.open_accents(self._accents_ready, self._accents_failed)) is None:
+            self._accents = None
+
+    def _accents_failed(self):
+        def reset():
+            if self._accents == "opening":
+                self._accents = None
+        try:
+            self.call_from_thread(reset)
+        except RuntimeError:
+            pass  # The cast screen closed first.
 
     def _accents_ready(self, accents):
         def show():
             from .accent_tui import CastAccentScreen
-            if self._accent_view() is not None:
+            if self._accents != "opening":
                 accents.close()
                 return
-            planner = accents.planner
-            title = self.book_title
-            screen = CastAccentScreen(accents, title=title)
-
-            def closed(saved):
-                accents.close()
-                self.controller.log("Saved the accent plan; voices now use its accents." if saved or planner.saved
-                                    else "Closed the accent plan without saving.")
-                self._schedule_reload()
-            self.push_screen(screen, closed)
+            screen = CastAccentScreen(accents, title=self.book_title, on_saved=self._accents_saved)
+            self._accents = {"controller": accents, "screen": screen, "changes": self.controller.voice_changes}
+            self.install_screen(screen, name="accents")  # kept while the cast is shown
+            self.push_screen(screen)
         try:
             self.call_from_thread(show)
         except RuntimeError:
             accents.close()  # The cast screen closed first.
 
+    def _accents_saved(self):
+        self.controller.log("Saved the accent plan; voices now use its accents.")
+        self._schedule_reload()
+
+    def close_accents(self):
+        """Close the accent view's plan and its model jobs (when the cast closes, or to read it again)."""
+        view, self._accents = self._accents, None
+        if isinstance(view, dict):
+            if self.is_screen_installed(view["screen"]) and view["screen"] not in self.screen_stack:
+                self.uninstall_screen(view["screen"])
+            view["controller"].close()
+
     def action_quit_cast(self):
-        accents = self._accent_view()
-        if accents is not None:
-            # Close the accent view first; it asks before discarding an unsaved plan.
-            if self.screen is accents:
-                accents.action_quit_accents()
+        view = self._accents if isinstance(self._accents, dict) else None
+        if view is not None and (view["controller"].busy() or view["controller"].planner.dirty):
+            message = ("A model request for the accent plan is still running. Quit without saving the plan?"
+                       if view["controller"].busy() else "Quit without saving the accent plan?")
+            self._confirm(message, self._quit_cast, title="Quit casting?")
             return
+        self._quit_cast()
+
+    def _quit_cast(self):
         running = self.controller.jobs.running()
         if running is None:
             self.exit()
@@ -1043,6 +1087,7 @@ def run_cast_tui(controller, *, title="Cast"):
         with prompt_streams(bridge.input, bridge.output):
             app.run()
     finally:
+        app.close_accents()
         controller.close()
     return 0
 

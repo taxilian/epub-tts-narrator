@@ -436,7 +436,7 @@ if __name__ == "__main__":
 
 
 class CastAccentViewTests(unittest.IsolatedAsyncioTestCase):
-    """The accent review opens over the cast screen (v) and q returns to the cast."""
+    """Cast and Accents are two views of one screen: v switches between them, keeping the plan; q quits."""
 
     def setUp(self):
         from cast_tui_fixtures import FakePlayer, FakeSession
@@ -450,9 +450,14 @@ class CastAccentViewTests(unittest.IsolatedAsyncioTestCase):
         self.session = FakeSession()
         self.cast = CastController(self.session, FakePlayer(), describe_error=str)
         self.addCleanup(self.cast.close)
-        self.accents = AccentController(self.planner, describe_error=str)
-        self.addCleanup(self.accents.close)
-        self.cast.accent_factory = lambda: self.accents
+        self.opened = []
+
+        def factory():
+            controller = AccentController(self.planner, describe_error=str)
+            self.addCleanup(controller.close)
+            self.opened.append(controller)
+            return controller
+        self.cast.accent_factory = factory
         self.app = CastApp(self.cast, title="Fixture Book", startup=False)
 
     async def asyncSetUp(self):
@@ -461,16 +466,20 @@ class CastAccentViewTests(unittest.IsolatedAsyncioTestCase):
     async def settle(self, pilot):
         for _ in range(3):
             self.cast.jobs.wait_idle(5)
-            self.accents.jobs.wait_idle(5)
+            for controller in self.opened:
+                controller.jobs.wait_idle(5)
             await pilot.pause()
 
-    async def test_v_opens_the_accent_plan_and_q_comes_back_to_the_cast(self):
+    async def open_plan(self, pilot):
+        await pilot.press("v")
+        await self.settle(pilot)
+        await answer_first_plan(self.app, pilot)
+        await self.settle(pilot)
+
+    async def test_v_switches_to_the_plan_and_back_and_the_cast_keys_rest_meanwhile(self):
         from epub_tts_narrator.renderer.accent_tui import AccentScreen
         async with self.app.run_test(size=(160, 45)) as pilot:
-            await pilot.press("v")
-            await self.settle(pilot)
-            await answer_first_plan(self.app, pilot)
-            await self.settle(pilot)
+            await self.open_plan(pilot)
             screen = self.app.screen
             self.assertIsInstance(screen, AccentScreen)
             self.assertEqual(screen.query_one("#groups", DataTable).row_count, 2)  # the first plan was proposed
@@ -484,29 +493,83 @@ class CastAccentViewTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("y")
             await self.settle(pilot)
             self.assertTrue(self.planner.saved)
-            await pilot.press("q")
-            await self.settle(pilot)
-            self.assertNotIsInstance(self.app.screen, AccentScreen)
-            self.assertTrue(self.app.is_running)
             self.assertTrue(any("Saved the accent plan" in text for _, _, text in self.cast.messages))
+            await pilot.press("v")
+            await pilot.pause()
+            self.assertNotIsInstance(self.app.screen, AccentScreen)
             self.assertEqual(self.app.query_one("#voices", DataTable).row_count, 7)
+            await pilot.press("v")
+            await pilot.pause()
+            self.assertIs(self.app.screen, screen)  # the same view again, not read anew
+            self.assertEqual(len(self.opened), 1)
 
-    async def test_ctrl_q_with_an_unsaved_plan_asks_before_leaving_the_accent_view(self):
-        from epub_tts_narrator.renderer.accent_tui import AccentScreen
+    async def test_an_unsaved_plan_is_kept_while_the_cast_is_shown(self):
         async with self.app.run_test(size=(160, 45)) as pilot:
+            await self.open_plan(pilot)
+            screen = self.app.screen
+            self.assertTrue(self.planner.dirty)
+            groups = [dict(group) for group in self.planner.groups]
+            await pilot.press("v")
+            await pilot.pause()
+            self.cast.voice_changes += 1  # even a changed voice never discards unsaved edits
+            await pilot.press("v")
+            await pilot.pause()
+            self.assertIs(self.app.screen, screen)
+            self.assertTrue(self.planner.dirty)
+            self.assertEqual(self.planner.groups, groups)
+            self.assertEqual(len(self.opened), 1)
+
+    async def test_an_untouched_plan_is_read_again_after_a_voice_changes(self):
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await self.open_plan(pilot)
+            await pilot.press("s")
+            await pilot.press("y")
+            await self.settle(pilot)
+            first = self.app.screen
+            await pilot.press("v")
+            await pilot.pause()
+            self.cast.voice_changes += 1
             await pilot.press("v")
             await self.settle(pilot)
-            await answer_first_plan(self.app, pilot)
-            await self.settle(pilot)
-            self.assertTrue(self.planner.dirty)
+            self.assertIsNot(self.app.screen, first)
+            self.assertEqual(len(self.opened), 2)
+            self.assertFalse(self.app.is_screen_installed(first))
+
+    async def test_q_on_an_unsaved_plan_asks_then_quits_casting(self):
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await self.open_plan(pilot)
+            await pilot.press("q")
+            await pilot.pause()
+            self.assertIsInstance(self.app.screen, ConfirmScreen)
+            await pilot.press("n")
+            await pilot.pause()
+            self.assertTrue(self.app.is_running)
             await pilot.press("ctrl+q")
             await pilot.pause()
             self.assertIsInstance(self.app.screen, ConfirmScreen)
             await pilot.press("y")
+            await pilot.pause()
+            self.assertFalse(self.app.is_running)
+        self.assertFalse(self.planner.saved)
+
+    async def test_the_cast_opens_on_the_plan_while_accents_are_undecided(self):
+        from epub_tts_narrator.renderer.accent_tui import AccentScreen
+        self.cast.undecided_accents = lambda rows: ["Old Fisherman"]
+        self.app.run_startup = True
+        async with self.app.run_test(size=(160, 45)) as pilot:
             await self.settle(pilot)
-            self.assertNotIsInstance(self.app.screen, AccentScreen)
-            self.assertTrue(self.app.is_running)  # back on the cast, not quit
-            self.assertFalse(self.planner.saved)
+            await answer_first_plan(self.app, pilot)
+            await self.settle(pilot)
+            self.assertIsInstance(self.app.screen, AccentScreen)
+            self.assertTrue(any("no accent decided yet" in text for _, _, text in self.cast.messages))
+
+    async def test_the_cast_opens_on_the_cast_when_every_accent_is_decided(self):
+        self.cast.undecided_accents = lambda rows: []
+        self.app.run_startup = True
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await self.settle(pilot)
+            self.assertIsNone(self.app._accent_view())
+            self.assertEqual(self.opened, [])
 
 
 class CastLineMenuAccentTests(PlannerCase):

@@ -156,10 +156,8 @@ class AccentPickerScreen(ChoiceScreen):
 class AccentScreen(Screen):
     """The accent review. ``controller`` owns the plan; this screen only displays it.
 
-    It is ``accents BOOK``'s whole app (``AccentApp``) and also opens over the
-    cast screen (``cast_tui``, key ``v``), returning there when closed:
-    ``on_close`` ends the standalone app; otherwise the screen dismisses
-    with whether the plan was saved.
+    It is ``accents BOOK``'s whole app (``AccentApp``, ``on_close`` ends it) and,
+    as ``CastAccentScreen``, the cast screen's accent view (``cast_tui``, key ``v``).
     """
 
     # Screen CSS applies app-wide: every rule names this screen, so the cast screen's ids are untouched
@@ -554,12 +552,16 @@ class AccentScreen(Screen):
                       self._save, title="Save accents")
 
     def _save(self):
+        """Save the plan; True when it was saved."""
         try:
             self.controller.save()
         except (ValueError, OSError) as error:
             self.controller.log(f"Could not save: {error}", "error")
             self.notify(str(error), severity="error")
+            self.render_all()
+            return False
         self.render_all()
+        return True
 
     def action_quit_accents(self):
         planner = self.controller.planner
@@ -582,10 +584,33 @@ class AccentScreen(Screen):
 
 
 class CastAccentScreen(AccentScreen):
-    """The accent screen opened over the cast screen: q goes back to the cast."""
+    """The accent view of the cast screen: v switches to the cast and back, keeping the plan; q quits casting.
 
-    BINDINGS = [Binding("q", "quit_accents", "Back to cast") if binding.key == "q" else binding
-                for binding in AccentScreen.BINDINGS]
+    The cast screen keeps this screen (``App.install_screen``), so leaving it
+    loses nothing: an unsaved plan or a running model request carries on, and
+    quitting asks about them. ``on_saved()`` tells the cast a plan was saved.
+    """
+
+    BINDINGS = [AccentScreen.BINDINGS[0],
+                Binding("v", "to_cast", "Cast", tooltip="Switch to the cast; v there comes back to this plan"),
+                *AccentScreen.BINDINGS[1:]]
+
+    def __init__(self, controller, *, title="Accents", on_saved=None):
+        super().__init__(controller, title=title)
+        self._on_saved = on_saved or (lambda: None)
+
+    def action_to_cast(self):
+        if self.app.screen is self:
+            self.app.pop_screen()
+
+    def action_quit_accents(self):
+        self.app.action_quit_cast()
+
+    def _save(self):
+        if super()._save():
+            self._on_saved()
+            return True
+        return False
 
 
 class AccentApp(VimKeysMixin, CapturePrintMixin, App):

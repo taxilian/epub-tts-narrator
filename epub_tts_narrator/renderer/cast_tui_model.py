@@ -346,6 +346,7 @@ class CastController:
         self.playing = None
         self.compare = None  # (voice_id, candidate_id) marked for A/B
         self.reopen = False  # a character merge changed the cast: the screen reopens on the saved book
+        self.voice_changes = 0  # finished jobs that changed a voice: an unedited accent plan is read again
         session.notify = lambda message: self.log(str(message))
 
     # Reading -----------------------------------------------------------------
@@ -546,16 +547,21 @@ class CastController:
 
     # The book's accent plan, reviewed over the cast screen ---------------------
 
-    def open_accents(self, on_ready):
+    def open_accents(self, on_ready, on_failed=lambda: None):
         """Prepare this book's accent review (``accent_review``) off the screen's thread.
 
         ``on_ready(controller)`` gets an ``AccentController`` on the saved plan
         (the model is asked only when the person asks, or for a first plan);
-        the caller closes it when the review closes.
+        the caller closes it when the review closes. ``on_failed()`` runs when
+        it could not be prepared (the job then shows the error).
         """
         def run():
             factory = self.accent_factory or self._accent_controller
-            controller = factory()
+            try:
+                controller = factory()
+            except BaseException:
+                on_failed()
+                raise
             on_ready(controller)
             return controller
         return self.jobs.submit("Open the book's accent plan", run, lane=ASK_LANE)
@@ -912,6 +918,8 @@ class CastController:
         elif job.state == FAILED:
             self.log(f"Failed: {job.label}: {job.error}", "error")
         elif job.state == "done":
+            if job.scope.get("voice"):
+                self.voice_changes += 1
             self.log("Done: " + job.label)
         elif job.state == "cancelled":
             self.log("Cancelled: " + job.label, "warning")
