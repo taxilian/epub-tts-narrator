@@ -391,8 +391,9 @@ class CastingSession:
 
     def prepare_samples(self):
         """Save excerpt defaults without loading a model or replacing a voice."""
+        from .samples import shared_candidates
         prepared, seen = [], set()
-        with self._locked():
+        with self._locked(), shared_candidates():
             self._retry_gemini_cleanup()
             for voice_id in self._cast_ids:
                 canonical = self.store.canonical_id(voice_id)
@@ -561,6 +562,11 @@ class CastingSession:
         return label
 
     def rows(self):
+        from .samples import shared_candidates
+        with shared_candidates():
+            return self._rows()
+
+    def _rows(self):
         from epub_tts_narrator.narration_identity import author_narrator_name
         from ..speech_traits import speech_traits
         from .speech_traits import speech_trait_overrides

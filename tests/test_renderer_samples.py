@@ -439,3 +439,45 @@ class SampleSelectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedCandidateTests(unittest.TestCase):
+    """Inside ``shared_candidates`` the book is walked once and every answer matches a fresh search."""
+
+    def data(self):
+        rows = [row(TEXT, voice=voice, role=role, ident=f"s{index}", sequence=index)
+                for index, (voice, role) in enumerate([("v1", "r1"), ("v2", "r2"), ("v1", "r1"), ("v2", "r2")])]
+        return bundle(rows)
+
+    def test_the_book_is_walked_once_for_every_voice_and_question(self):
+        from unittest import mock
+        from epub_tts_narrator.renderer import samples
+        data, same = self.data(), (lambda value: value)
+        expected = {voice: (select_sample(data, voice, canonical_id=same),
+                            samples.select_extra_samples(data, voice, canonical_id=same, count=2))
+                    for voice in ("v1", "v2")}
+        with mock.patch.object(samples, "_eligible_performers", wraps=samples._eligible_performers) as walked:
+            with samples.shared_candidates():
+                found = {voice: (select_sample(data, voice, canonical_id=same),
+                                 samples.select_extra_samples(data, voice, canonical_id=same, count=2))
+                         for voice in ("v1", "v2")}
+        self.assertEqual(found, expected)
+        self.assertEqual(walked.call_count, 4)  # one call per line of the book
+
+    def test_a_changed_alias_is_searched_again(self):
+        from epub_tts_narrator.renderer import samples
+        data = self.data()
+        with samples.shared_candidates():
+            alone = select_sample(data, "v1", canonical_id=lambda value: value)
+            shared = select_sample(data, "v1", canonical_id=lambda value: {"v2": "v1"}.get(value, value))
+        self.assertEqual(alone["source"]["canonical_voice_id"], "v1")
+        self.assertEqual(shared, select_sample(data, "v1", canonical_id=lambda value: {"v2": "v1"}.get(value, value)))
+
+    def test_changing_a_returned_sample_does_not_change_the_next_answer(self):
+        from epub_tts_narrator.renderer import samples
+        data = self.data()
+        with samples.shared_candidates():
+            first = select_sample(data, "v1", canonical_id=lambda value: value)
+            first["source"]["segment_id"] = "changed"
+            second = select_sample(data, "v1", canonical_id=lambda value: value)
+        self.assertNotEqual(second["source"].get("segment_id"), "changed")

@@ -181,9 +181,16 @@ def _overrides(bundle):
     return list(dict.fromkeys(replaced))
 
 
-def prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice_ids=None,
-                    workers=5, progress=lambda message: None, refresh=False, allow_incomplete=False,
-                    extra_clips=0):
+def prepare_samples(bundle, requests, **options):
+    """``_prepare_samples`` with each voice's book candidates found once (``samples.shared_candidates``)."""
+    from epub_tts_narrator.renderer.samples import shared_candidates
+    with shared_candidates():
+        return _prepare_samples(bundle, requests, **options)
+
+
+def _prepare_samples(bundle, requests, *, canonical_id=lambda value: value, voice_ids=None,
+                     workers=5, progress=lambda message: None, refresh=False, allow_incomplete=False,
+                     extra_clips=0):
     """Prefer source auditions; explicitly refresh selected groups when requested.
 
     Refresh drops creative fallbacks only for the selected canonical groups.

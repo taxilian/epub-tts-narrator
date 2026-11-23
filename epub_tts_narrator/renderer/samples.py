@@ -8,6 +8,9 @@ Offsets use Python/Unicode code points, matching the analyzer and render plan.
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager
+import contextvars
+from copy import deepcopy
 import re
 import unicodedata
 
@@ -215,12 +218,68 @@ def _safe_text(text):
     return not sample_text_problems(text)
 
 
+_SHARED = contextvars.ContextVar("shared_sample_candidates", default=None)
+
+
+@contextmanager
+def shared_candidates():
+    """Within this block each voice's book candidates are found once, from one pass over the book.
+
+    Casting asks for the same voice's candidates several times (its audition,
+    its extra clips, the cast list) and each search walked every line of the
+    book; opening the cast walked the whole book about 200 times. Inside this
+    block the book is walked once and each voice's candidates are kept, so the
+    bundle must not change while it is open. Nested blocks share the outer one.
+    """
+    if _SHARED.get() is not None:
+        yield
+        return
+    token = _SHARED.set({})
+    try:
+        yield
+    finally:
+        _SHARED.reset(token)
+
+
+def _voice_rows(bundle, canonical, profiles):
+    """``{canonical voice: [(chapter number, chapter, row number, row, performers)]}`` in book order."""
+    index = {}
+    for chapter_number, chapter in enumerate(bundle["chapters"], 1):
+        for row_number, row in enumerate(chapter["rows"]):
+            by_target = {}
+            for performer in _eligible_performers(row, profiles):
+                target = canonical.get(performer.get("voice_id"))
+                if target is not None:
+                    by_target.setdefault(target, []).append(performer)
+            for target, performers in by_target.items():
+                index.setdefault(target, []).append((chapter_number, chapter, row_number, row, performers))
+    return index
+
+
 def _candidate_data(bundle, voice_id, canonical_id):
-    book = bundle["source"]["book"]
     voice_ids = {voice["id"] for voice in bundle["cast"]["voices"]}
     if voice_id not in voice_ids:
         raise ValueError("Sample voice is not in the bundle cast")
     canonical = {item: canonical_id(item) for item in voice_ids}
+    shared = _SHARED.get()
+    if shared is None:
+        return _find_candidates(bundle, voice_id, canonical, None)
+    # The objects themselves are kept with the result, so their ids cannot be reused while it is.
+    scope = (id(bundle["chapters"]), id(bundle["cast"]), id(bundle["source"]), id(bundle["manifest"]),
+             tuple(sorted(canonical.items())))
+    rows_key = ("rows", scope)
+    if rows_key not in shared:
+        profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
+        shared[rows_key] = (_voice_rows(bundle, canonical, profiles),
+                            (bundle["chapters"], bundle["cast"], bundle["source"], bundle["manifest"]))
+    key = ("candidates", scope, canonical[voice_id])
+    if key not in shared:
+        shared[key] = _find_candidates(bundle, voice_id, canonical, shared[rows_key][0])
+    return shared[key]
+
+
+def _find_candidates(bundle, voice_id, canonical, index):
+    book = bundle["source"]["book"]
     target = canonical[voice_id]
     source_base = {
         "selection_version": SELECTION_VERSION,
@@ -231,81 +290,78 @@ def _candidate_data(bundle, voice_id, canonical_id):
     roles = {role["id"]: role for role in bundle["cast"]["roles"]}
     profiles = {voice["id"]: voice for voice in bundle["cast"]["voices"]}
     rejected, candidates = Counter(), []
-    for chapter_number, chapter in enumerate(bundle["chapters"], 1):
-        for row_number, row in enumerate(chapter["rows"]):
-            # An explicit unison passage is also something each member actually
-            # says. Use it as a solo audition without changing its attribution.
-            performers = [performer for performer in _eligible_performers(row, profiles)
-                          if canonical.get(performer.get("voice_id")) == target]
-            if not performers:
+    # An explicit unison passage is also something each member actually
+    # says. Use it as a solo audition without changing its attribution.
+    if index is None:
+        index = _voice_rows(bundle, {item: value for item, value in canonical.items() if value == target}, profiles)
+    for chapter_number, chapter, row_number, row, performers in index.get(target, ()):
+        performer = min(performers, key=lambda item: (item["voice_id"] != target, item["role_id"]))
+        original_voice, role_id = performer["voice_id"], performer["role_id"]
+        role = roles.get(role_id, {})
+        priority = _role_priority(row, role)
+        from ..ensembles import lanes_of
+        lead = profiles.get(role.get("voice_id"))
+        if priority is None or original_voice not in (lanes_of(lead) if lead else [role.get("voice_id")]):
+            rejected["non_speech_role"] += 1
+            continue
+        attribution = row.get("attribution", {})
+        alternatives = attribution.get("candidates", [])
+        if (attribution.get("review_required") is not False
+                or attribution.get("basis") not in {"explicit", "context", "user"}
+                or any(item != role_id for item in alternatives)):
+            rejected["uncertain_attribution"] += 1
+            continue
+        try:
+            direction = effective_delivery(row)
+            spoken, _ = build_spoken(row)
+        except (ValueError, KeyError):
+            rejected["unsupported_source_mapping"] += 1
+            continue
+        if _EXTREME.search(direction):
+            rejected["extreme_delivery"] += 1
+            continue
+        found = False
+        speech_start, speech_end = (
+            _speech_bounds(spoken) if row["kind"] in {"dialogue", "thought", "letter"}
+            else (0, len(spoken))
+        )
+        for start, end in _spans(spoken[speech_start:speech_end]):
+            start, end = start + speech_start, end + speech_start
+            text = spoken[start:end]
+            words = _WORDS.findall(text)
+            if not _MIN_EXCERPT_WORDS <= len(words) <= _MAX_WORDS or not _safe_text(text):
                 continue
-            performer = min(performers, key=lambda item: (item["voice_id"] != target, item["role_id"]))
-            original_voice, role_id = performer["voice_id"], performer["role_id"]
-            role = roles.get(role_id, {})
-            priority = _role_priority(row, role)
-            from ..ensembles import lanes_of
-            lead = profiles.get(role.get("voice_id"))
-            if priority is None or original_voice not in (lanes_of(lead) if lead else [role.get("voice_id")]):
-                rejected["non_speech_role"] += 1
-                continue
-            attribution = row.get("attribution", {})
-            alternatives = attribution.get("candidates", [])
-            if (attribution.get("review_required") is not False
-                    or attribution.get("basis") not in {"explicit", "context", "user"}
-                    or any(item != role_id for item in alternatives)):
-                rejected["uncertain_attribution"] += 1
-                continue
-            try:
-                direction = effective_delivery(row)
-                spoken, _ = build_spoken(row)
-            except (ValueError, KeyError):
-                rejected["unsupported_source_mapping"] += 1
-                continue
-            if _EXTREME.search(direction):
-                rejected["extreme_delivery"] += 1
-                continue
-            found = False
-            speech_start, speech_end = (
-                _speech_bounds(spoken) if row["kind"] in {"dialogue", "thought", "letter"}
-                else (0, len(spoken))
-            )
-            for start, end in _spans(spoken[speech_start:speech_end]):
-                start, end = start + speech_start, end + speech_start
-                text = spoken[start:end]
-                words = _WORDS.findall(text)
-                if not _MIN_EXCERPT_WORDS <= len(words) <= _MAX_WORDS or not _safe_text(text):
-                    continue
-                score = (priority, original_voice != target, not _complete(text),
-                         attribution["basis"] == "context", abs(len(words) - _TARGET_WORDS),
-                         chapter_number, row.get("sequence", row_number), start, end)
-                source = {
-                    **source_base, "kind": "book_excerpt",
-                    "chapter_id": row["chapter_id"],
-                    "chapter_title": chapter["entry"].get("title", ""),
-                    "chapter_number": chapter_number,
-                    "script_path": chapter["entry"].get("path"),
-                    "segment_id": row["id"], "segment_ids": [row["id"]],
-                    "voice_id": original_voice, "role_id": role_id,
-                    "segment_kind": row["kind"], "block_id": row["block_id"],
-                    "source_ranges": spoken_source_ranges(row, start, end),
-                    "spoken_start": start, "spoken_end": end,
-                    "word_count": len(words), "short_sample": len(words) < _TARGET_MIN_WORDS,
-                    "attribution_basis": attribution["basis"],
-                }
-                if row.get("simultaneous_speakers"):
-                    source["simultaneous_speakers"] = [dict(item) for item in row["simultaneous_speakers"]]
-                candidates.append({"score": score, "reference_text": text, "source": source,
-                                   "order": (chapter_number, row.get("sequence", row_number), start)})
-                found = True
-            if not found:
-                rejected["insufficient_suitable_text"] += 1
+            score = (priority, original_voice != target, not _complete(text),
+                     attribution["basis"] == "context", abs(len(words) - _TARGET_WORDS),
+                     chapter_number, row.get("sequence", row_number), start, end)
+            source = {
+                **source_base, "kind": "book_excerpt",
+                "chapter_id": row["chapter_id"],
+                "chapter_title": chapter["entry"].get("title", ""),
+                "chapter_number": chapter_number,
+                "script_path": chapter["entry"].get("path"),
+                "segment_id": row["id"], "segment_ids": [row["id"]],
+                "voice_id": original_voice, "role_id": role_id,
+                "segment_kind": row["kind"], "block_id": row["block_id"],
+                "source_ranges": spoken_source_ranges(row, start, end),
+                "spoken_start": start, "spoken_end": end,
+                "word_count": len(words), "short_sample": len(words) < _TARGET_MIN_WORDS,
+                "attribution_basis": attribution["basis"],
+            }
+            if row.get("simultaneous_speakers"):
+                source["simultaneous_speakers"] = [dict(item) for item in row["simultaneous_speakers"]]
+            candidates.append({"score": score, "reference_text": text, "source": source,
+                               "order": (chapter_number, row.get("sequence", row_number), start)})
+            found = True
+        if not found:
+            rejected["insufficient_suitable_text"] += 1
     return source_base, rejected, candidates, canonical
 
 
 def _joined_sample(candidates, source_base):
     ordered = sorted(candidates, key=lambda candidate: candidate["order"])
     if len(ordered) == 1:
-        return {key: ordered[0][key] for key in ("reference_text", "source")}
+        return {key: deepcopy(ordered[0][key]) for key in ("reference_text", "source")}
     excerpts, texts, cursor = [], [], 0
     for candidate in ordered:
         text = candidate["reference_text"]
