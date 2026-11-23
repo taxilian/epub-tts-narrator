@@ -83,7 +83,36 @@ class VoiceStore:
                     result.append(ancestor)
         return tuple(result)
 
+    def _alias_files_key(self):
+        """The stat of everything ``_local_alias_state`` reads, or None when its alias loader is not a known file reader."""
+        from functools import partial
+        from .book_aliases import read_book_aliases
+        from .file_snapshot import stat_key
+        loader = self._alias_loader
+        files = [self.directory.parent, self.directory, self.directory / "voice-aliases.json"]
+        if isinstance(loader, partial) and loader.func is read_book_aliases and not loader.keywords:
+            files.append(Path(loader.args[0]))
+        elif loader is not None and not getattr(loader, "constant_aliases", False):
+            return None
+        return [stat_key(path) for path in files]
+
     def _local_alias_state(self):
+        """This store's checked alias policy, read again only when one of its files changes.
+
+        Every voice lookup (``canonical_id``) needs it, and opening the cast
+        looks up tens of thousands of voices; rereading and checking the same
+        unchanged alias files each time took most of the cast screen's opening.
+        """
+        key = self._alias_files_key()
+        saved = getattr(self, "_saved_alias_state", None)
+        if key is not None and saved is not None and saved[0] == key:
+            return saved[1]
+        state = self._read_local_alias_state()
+        if key is not None and self._alias_files_key() == key:
+            self._saved_alias_state = (key, state)
+        return state
+
+    def _read_local_alias_state(self):
         from .voice_bindings import validate_aliases, validate_alias_ownership
         path = self.directory / "voice-aliases.json"
         saved, explicit, owners = {}, {}, {}

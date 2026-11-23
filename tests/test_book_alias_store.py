@@ -188,3 +188,52 @@ class BookAliasStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RememberedAliasPolicyTests(unittest.TestCase):
+    """A book's alias file is read once while unchanged; an edit to it is seen at once."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.policy = self.root / "voice-aliases.json"
+
+    def write_policy(self, aliases):
+        write_json(self.policy, {"format": "audiobook-book-voice-aliases", "version": 1,
+                                 "series_id": "series-one", "book_id": "book-one", "aliases": aliases})
+
+    def store(self):
+        from functools import partial
+        from epub_tts_narrator.renderer.book_aliases import read_book_aliases
+        loader = partial(read_book_aliases, self.policy, "series-one", "book-one", {"narrator", "b", "c"})
+        cast = {"characters": [{"id": f"character-{value}", "name": "Alex", "voice_id": value}
+                               for value in ("b", "c")], "roles": []}
+        return VoiceStore(self.root / "voices", "series-one", cast=cast, alias_loader=loader)
+
+    def test_many_lookups_read_the_alias_file_once(self):
+        from unittest import mock
+        from epub_tts_narrator.renderer import book_aliases
+        self.write_policy({"narrator": "b"})
+        store = self.store()
+        with mock.patch.object(book_aliases, "read_json", wraps=book_aliases.read_json) as reads:
+            for _ in range(50):
+                self.assertEqual(store.canonical_id("narrator"), "b")
+        self.assertEqual(reads.call_count, 0)
+
+    def test_an_edited_alias_file_is_used_at_the_next_lookup(self):
+        self.write_policy({"narrator": "b"})
+        store = self.store()
+        self.assertEqual(store.canonical_id("narrator"), "b")
+        self.write_policy({"narrator": "c"})
+        self.assertEqual(store.canonical_id("narrator"), "c")
+        self.policy.unlink()
+        self.assertEqual(store.canonical_id("narrator"), "narrator")
+
+    def test_an_invalid_edit_is_refused_even_after_a_good_read(self):
+        self.write_policy({"narrator": "b"})
+        store = self.store()
+        store.canonical_id("narrator")
+        self.write_policy({"narrator": "someone-else"})
+        with self.assertRaisesRegex(ValueError, "exact voice IDs"):
+            store.canonical_id("narrator")

@@ -117,6 +117,7 @@ def voice_store(bundle, config, *, local_aliases=None):
             if (set(overrides) | set(overrides.values())) - allowed_ids:
                 raise ValueError("Book voice aliases must use exact voice IDs from this book or its ancestors")
             loader = lambda: dict(overrides)
+            loader.constant_aliases = True  # fixed values: the store may keep what it read
         directory = config["voices"]["directory"] if index == 0 else Path(book["directory"]) / "voices"
         store = VoiceStore(directory, config["voices"]["series_id"], cast=book["cast"],
                            alias_loader=loader)
