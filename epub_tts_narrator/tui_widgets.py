@@ -294,12 +294,18 @@ class QuitWaitScreen(Dialog):
                                                                      else ".")), classes="dialog-help")
 
     def on_mount(self):
+        if self._never_composed():
+            return
         self.query_one("#cancel" if self.can_cancel else "#now", Button).focus()
         self._refresh()
         self.set_interval(0.5, self._refresh)
 
+    def _never_composed(self):
+        """The work ended and the app is closing while this dialog opens: nothing is left to show."""
+        return not self.query("#now")
+
     def _refresh(self):
-        if self._dismissed_once:
+        if self._dismissed_once or self._never_composed():
             return
         try:
             lines = list(self.describe())
