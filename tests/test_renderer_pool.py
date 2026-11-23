@@ -638,6 +638,47 @@ class NodeSwitchTests(unittest.TestCase):
             self.assertEqual(pool.worker_state(near), "off")
             self.assertEqual(self.take(pool, [])["render_worker"], "far")
 
+    def test_a_worker_started_off_is_never_loaded_or_checked_until_it_is_turned_on(self):
+        config = pool_config(worker("local", local=True), worker("far"))
+        config["_start_off"] = ["local"]
+        pool = RenderPool(config)
+        self.addCleanup(pool.close)
+        local, far = pool._workers
+        far._engine = GoneFixture("far")
+        loaded = []
+
+        class Loaded(GoneFixture):
+            def __init__(self, settings):
+                loaded.append(settings)
+                super().__init__("local")
+        self.assertEqual(pool.worker_state(local), "off")
+        self.assertEqual(pool.max_parallel, 2)  # the lanes have room for it once it is on
+        with patch("epub_tts_narrator.renderer.pool.create_engine", side_effect=Loaded):
+            pool.check_continuity(notify=lambda message: None)
+            self.assertEqual(loaded, [])  # off: neither loaded nor asked
+            self.assertEqual([self.take(pool, [])["render_worker"] for _ in range(2)], ["far", "far"])
+            said = []
+            pool.switch_worker(local, True, said.append)
+            self.assertTrue(wait_until(lambda: pool.worker_state(local) == "on"))
+            self.assertEqual(len(loaded), 1)  # turning it on loads it and checks it carries history
+            self.assertTrue(any("local is on" in line for line in said))
+            self.assertEqual(self.take(pool, [])["render_worker"], "local")
+
+    def test_a_local_server_started_off_is_not_started_until_its_worker_is_turned_on(self):
+        from epub_tts_narrator.renderer.auto_serve import shared_worker_config
+        config = pool_config(worker("local", local=True, concurrency=4), worker("far"))
+        config["engine"]["type"] = "drama3_mlx"
+        config["_config_path"] = "/does/not/exist.toml"
+        config["server"]["api_key"] = "fixture-key"
+        config["_start_off"] = ["local"]
+        with patch("epub_tts_narrator.renderer.auto_serve.resolve_small_job_engine") as start:
+            routed = shared_worker_config(config)
+        start.assert_not_called()
+        local = routed["render_pool"]["workers"][0]
+        self.assertEqual((local["type"], local["auto_serve"], local["concurrency"]), ("fish_http", True, 4))
+        self.assertTrue(local["url"].startswith("http://127.0.0.1:"))
+        self.assertEqual(routed["_auto_serve"]["server"]["batch_rows"], 4)
+
     def test_the_run_shell_sees_and_switches_nodes_through_the_activity_registry(self):
         from epub_tts_narrator.renderer.node_activity import NodeActivity
         activity = NodeActivity()

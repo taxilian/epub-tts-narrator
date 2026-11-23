@@ -81,8 +81,9 @@ def parser():
                                  help="Render through the managed Runpod chapter service: reuse the running "
                                       "service or bootstrap one; its idle monitor stops the compute later")
             command.add_argument("--no-local", action="store_true",
-                                 help="Make speech only on the remote render-pool workers ([render_pool].workers "
-                                      "with type = \"fish_http\"); this Mac loads no TTS engine for this run. "
+                                 help="Start with the local render-pool worker turned off, so speech is made on "
+                                      "the remote workers ([render_pool].workers with type = \"fish_http\") and "
+                                      "this Mac loads no TTS engine; o in the run shell turns it on later. "
                                       "Recognition and verification still run where configured")
         if name == "cache-report":
             command.add_argument("--max-examples", type=int, default=10,
@@ -481,16 +482,19 @@ def _render_components(config, command, *, ensured=False):
     from .engines import create_engine
     from .pool import create_render_components
     from .verification import create_verifier
+    from .config import starts_off
     workers = config.get("render_pool", {}).get("workers", []) if command in {"render", "assemble"} else []
     if not ensured:
         from .model_setup import ModelSetup
         setup = ModelSetup(config)
-        if not workers or any(worker["type"] == "local" for worker in workers):
+        if not workers or any(worker["type"] == "local" and not starts_off(config, worker) for worker in workers):
             setup.ensure("engine")
         setup.ensure("verification")
     if workers:
         print("Rendering with " + ", ".join(
-            f"{worker['name']} ({worker['concurrency']} slot(s))" for worker in workers))
+            f"{worker['name']} ({worker['concurrency']} slot(s)"
+            + (", off: o in the run shell turns it on)" if starts_off(config, worker) else ")")
+            for worker in workers))
         return create_render_components(config, verifier_factory=create_verifier)
     return (create_engine(config["engine"]),
             create_verifier(config["verification"], config.get("jev"), config.get("provider")))
@@ -936,7 +940,9 @@ def _main(argv=None, *, in_shell=False):
         from .model_setup import ModelSetup
         setup = ModelSetup(config)
         workers = config.get("render_pool", {}).get("workers", []) if args.command == "render" else []
-        remote_only = bool(workers) and all(worker["type"] != "local" for worker in workers)
+        from .config import starts_off
+        remote_only = bool(workers) and all(worker["type"] != "local" or starts_off(config, worker)
+                                            for worker in workers)
         if not remote_only:
             setup.ensure("engine")
         setup.ensure("verification")

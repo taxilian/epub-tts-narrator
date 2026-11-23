@@ -262,7 +262,7 @@ class DistributedCLITests(unittest.TestCase):
         engine.close.assert_called_once()
         verifier.close.assert_called_once()
 
-    def test_no_local_renders_only_on_remote_workers_without_loading_the_local_engine(self):
+    def test_no_local_starts_the_local_worker_off_without_loading_the_local_engine(self):
         self.configure(worker_table("this-mac", "local") + worker_table("other-mac"))
         before = self.config.read_bytes()
         engine, verifier, store = Mock(), Mock(), Mock()
@@ -278,11 +278,12 @@ class DistributedCLITests(unittest.TestCase):
         self.assertEqual(status, 0, error)
         setup.assert_called_once_with("verification")
         local.assert_not_called()
-        workers = factory.call_args.args[0]["render_pool"]["workers"]
-        self.assertEqual([worker["name"] for worker in workers], ["other-mac"])
+        config = factory.call_args.args[0]
+        # The local worker stays in the pool, turned off, so a person can turn it on later (run shell o).
+        self.assertEqual([worker["name"] for worker in config["render_pool"]["workers"]], ["this-mac", "other-mac"])
+        self.assertEqual(config["_start_off"], ["this-mac"])
         self.assertIs(render.call_args.args[2], engine)
-        self.assertIn("other-mac (1 slot(s))", output)
-        self.assertNotIn("this-mac", output)
+        self.assertIn("this-mac (1 slot(s), off: o in the run shell turns it on), other-mac (1 slot(s))", output)
         self.assertEqual(self.config.read_bytes(), before)
 
     def test_no_local_without_a_remote_worker_is_refused_before_any_model_setup(self):

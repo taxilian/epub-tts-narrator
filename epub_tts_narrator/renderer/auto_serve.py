@@ -140,10 +140,13 @@ def _verified_client(config, port, health, *, api_key=""):
     if health.get("model") not in expected:
         raise AutoServeError(f"The serve worker on port {port} provides model {health.get('model')!r} but this "
                              f"configuration uses {sorted(expected)}; change server.port or the worker's engine.model")
-    settings = {"url": f"http://127.0.0.1:{port}/v1/tts", "protocol": "fish_inline", "name": "local-serve",
-                "model": _client_model(config), "api_key": api_key,
-                "timeout_seconds": (config.get("server") or {}).get("request_timeout_seconds", 600)}
-    return FishHTTPEngine(settings, sampling=_client_sampling(config))
+    return FishHTTPEngine(_client_settings(config, port, api_key), sampling=_client_sampling(config))
+
+
+def _client_settings(config, port, api_key=""):
+    return {"url": f"http://127.0.0.1:{port}/v1/tts", "protocol": "fish_inline", "name": "local-serve",
+            "model": _client_model(config), "api_key": api_key,
+            "timeout_seconds": (config.get("server") or {}).get("request_timeout_seconds", 600)}
 
 
 @contextmanager
@@ -404,15 +407,24 @@ def shared_worker_config(config):
     settings = {**config, "server": dict(config["server"])}
     settings["server"]["batch_rows"] = max(worker.get("concurrency", 1) for worker in workers
                                            if worker["type"] == "local")
-    client = resolve_small_job_engine(settings)
+    from .config import starts_off
+    if all(starts_off(config, worker) for worker in workers if worker["type"] == "local"):
+        # Turned off from the start (--no-local): route to the server without starting it; the pool
+        # starts it when a person turns the worker on.
+        port, api_key = _port_and_key(settings)
+        client = _client_settings(settings, port, api_key)
+    else:
+        engine = resolve_small_job_engine(settings)
+        client = {"url": engine.url, "api_key": engine.api_key, "protocol": engine.protocol,
+                  "model": engine.model, "timeout_seconds": engine.timeout}
     routed = []
     for worker in workers:
         if worker["type"] == "local":
             # auto_serve: the pool starts this server again if it disappears mid-render.
-            routed.append({**worker, "type": "fish_http", "url": client.url,
-                           "api_key": client.api_key, "protocol": client.protocol,
-                           "model": client.model, "multi_speaker": True,
-                           "timeout_seconds": client.timeout, "auto_serve": True})
+            routed.append({**worker, "type": "fish_http", "url": client["url"],
+                           "api_key": client["api_key"], "protocol": client["protocol"],
+                           "model": client["model"], "multi_speaker": True,
+                           "timeout_seconds": client["timeout_seconds"], "auto_serve": True})
         else:
             routed.append(worker)
     return {**config, "_auto_serve": settings,

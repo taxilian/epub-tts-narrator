@@ -386,7 +386,9 @@ def _ensure_models(config):
     from .model_setup import ModelSetup
     setup = ModelSetup(config)
     workers = config.get("render_pool", {}).get("workers", [])
-    remote_only = bool(workers) and all(worker["type"] != "local" for worker in workers)
+    from .config import starts_off
+    remote_only = bool(workers) and all(worker["type"] != "local" or starts_off(config, worker)
+                                        for worker in workers)
     if not remote_only:
         setup.ensure("engine")
     setup.ensure("verification")
@@ -400,7 +402,9 @@ def _ensure_missing_voices(bundle, config, plan, args):
     if not missing:
         return bundle
     workers = config.get("render_pool", {}).get("workers", [])
-    remote_only = bool(workers) and all(worker["type"] != "local" for worker in workers)
+    from .config import starts_off
+    remote_only = bool(workers) and all(worker["type"] != "local" or starts_off(config, worker)
+                                        for worker in workers)
     if remote_only:
         from .config import resolve_voice_design
         if resolve_voice_design(config)["type"] == "engine":

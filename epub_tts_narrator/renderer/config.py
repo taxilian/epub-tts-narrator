@@ -263,12 +263,14 @@ WORKER_ROLES = ("tts", "recognition")
 
 
 def without_local_renderer(config):
-    """``render --no-local``: speech is made only by the remote TTS workers; this Mac loads no TTS engine.
+    """``render --no-local``: the render starts with its local worker turned off; this Mac loads no TTS engine.
 
-    The local worker leaves ``[render_pool].workers`` for this run only (the
-    file is unchanged). Recognition and verification still run where they
-    are configured. A configured chapter service (``[remote_chapters].url``)
-    is already remote and is left as it is.
+    The local worker stays in the pool, switched off from the start (named in
+    the run-only ``config["_start_off"]``; the file is unchanged): no take
+    goes to it, its server is not started and its model is not loaded until a
+    person turns it on (the run shell's ``o``). Recognition and verification
+    still run where they are configured. A configured chapter service
+    (``[remote_chapters].url``) is already remote and is left as it is.
     """
     if (config.get("remote_chapters") or {}).get("url"):
         return config
@@ -276,9 +278,14 @@ def without_local_renderer(config):
     if not any(worker["type"] != "local" and "tts" in worker.get("roles", ["tts"]) for worker in workers):
         raise ValueError("--no-local needs a remote TTS worker: add a [[render_pool.workers]] entry with "
                          "type = \"fish_http\" (or use --remote for the chapter service)")
-    config["render_pool"]["workers"] = [worker for worker in workers if worker["type"] != "local"]
+    config["_start_off"] = [worker["name"] for worker in workers if worker["type"] == "local"]
     validate_distributed_settings(config)
     return config
+
+
+def starts_off(config, worker):
+    """Whether this run starts ``worker`` (a ``[render_pool].workers`` entry) turned off (``--no-local``)."""
+    return worker.get("name") in (config.get("_start_off") or ())
 
 
 def validate_distributed_settings(config):

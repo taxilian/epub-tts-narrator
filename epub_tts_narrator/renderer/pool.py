@@ -504,6 +504,13 @@ class RenderPool:
         self._away_lock = RLock()
         self._probe_stop = Event()
         self._prober = None
+        # Workers this run starts turned off (--no-local): set aside after the slot counts above, so a
+        # person can turn them on into the capacity the lanes were sized for.
+        from .config import starts_off
+        for worker in self._workers:
+            if starts_off(config, worker.settings):
+                self._switched[id(worker)] = "off"
+                self._slots.set_aside(worker)
 
     def check_continuity(self, notify=None):
         """Every worker must carry chapter history; checked once per pool.
@@ -518,13 +525,15 @@ class RenderPool:
             return
         from .continuity import require_support
         from .fish_http import FishHTTPError
+        # A worker turned off is checked when a person turns it on (``_turn_on``), never loaded now.
+        workers = [worker for worker in self._workers if self._switched_state(worker) is None]
         def check():
-            for worker in self._workers:
+            for worker in workers:
                 if worker.local:
                     require_support(worker.engine())
         self._local_runtime.run(check)
         unreachable = []
-        for worker in self._workers:
+        for worker in workers:
             if worker.local or worker in self._away_workers():
                 continue
             try:
@@ -533,7 +542,7 @@ class RenderPool:
                 if error.status is not None:
                     raise
                 unreachable.append((worker, error))
-        if unreachable and len(unreachable) == len(self._workers):
+        if unreachable and len(unreachable) == len(workers):
             raise unreachable[0][1]
         for worker, error in unreachable:
             self._set_aside(worker, f"does not answer ({error})", notify)
@@ -734,7 +743,14 @@ class RenderPool:
                 with self._revive_lock:
                     resolve_small_job_engine(self._auto_serve, notify=say)
                     self._server_epoch += 1
-            if not worker.local:
+            if worker.local:
+                from .continuity import require_support
+                def load():
+                    # Loads its model now, as at the start of a render: on means ready for takes.
+                    with self.local_lock:
+                        require_support(worker.engine())
+                self._local_runtime.run(load)
+            else:
                 engine = worker.engine()
                 reachable = getattr(engine, "reachable", None)
                 if callable(reachable) and not reachable():
@@ -755,8 +771,7 @@ class RenderPool:
                 return
             self._switched.pop(id(worker), None)
             self._restore(worker)
-        say(f"Render node {name} is on again; sending it speech"
-            + (" (its model loads with its first take)." if worker.local else "."))
+        say(f"Render node {name} is on; sending it speech.")
 
     @property
     def identity(self):
