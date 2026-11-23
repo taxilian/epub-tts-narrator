@@ -28,6 +28,10 @@ def validate_description(value):
             or (description[0] in '\"“' and description[-1] in '\"”')):
         raise ValueError("Voice description must be nonempty plain direction without control characters, markup, or outer quotation marks")
     audiobook_voice_prompt(description)
+    from .speech_traits import ACCENT_FREE, accent_words
+    named = accent_words(description)
+    if named:
+        raise ValueError(f"Voice description {ACCENT_FREE.format(words=', '.join(named))}")
     if (not isinstance(reason, str) or not reason.strip() or reason != reason.strip()
             or len(reason) > 1000
             or any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in reason)):

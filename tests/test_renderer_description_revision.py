@@ -59,6 +59,11 @@ class ReviseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Type what should change"):
             revise(FakeRequests(without_accent), VOICES, "  ")
 
+    def test_a_revised_description_that_names_an_accent_is_refused(self):
+        # The application adds the accent the accent tool chose; a description never names one.
+        with self.assertRaisesRegex(ValueError, "accent or dialect"):
+            revise(FakeRequests(lambda payload: {"d": [["v2", "A dry tenor with a Welsh accent."]]}), VOICES, "x")
+
     def test_a_large_cast_is_sent_in_batches(self):
         voices = [{"voice_id": f"v-{n}", "name": f"N{n}", "description": f"Voice {n} with a Welsh lilt.",
                    "accent": ""} for n in range(BATCH + 3)]

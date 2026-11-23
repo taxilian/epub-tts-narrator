@@ -145,16 +145,12 @@ class NarratorClient:
             return {"r": answers}
         if mode == "narrator_verify_tiebreak":
             return {"r": [[item["id"], item["choices"][1]["id"]] for item in payload["items"]]}
-        if mode == "narrator_accents":
-            # Different backgrounds, different accents: the first character is Scottish.
-            names = [row[0] for row in payload["characters"]]
-            return {"a": [["the north", "Scottish", names[:1]], ["the coast", "Irish", names[1:2]]]}
         if mode == "narrator_voices":
             gender = {"m": "male", "f": "female"}
             # Real-world words only: never a name from the book.
             return {"v": [[row[0], f"A clear {gender.get(row[2], 'androgynous')} voice number {row[0][1:]}.",
-                           "General American; even pace",
-                           "pitch=mid;pace=even;accent=General American"] for row in payload["voices"]]}
+                           "even pace, crisp consonants",
+                           "pitch=mid;pace=even"] for row in payload["voices"]]}
         raise ProviderError("unexpected request in fixture")
 
 
@@ -1020,14 +1016,26 @@ class NarratedAnalyzeTests(unittest.TestCase):
         corrections = [call for call in client.calls if call.get("mode") == "narrator_voices" and "correction" in call]
         self.assertTrue(corrections)
 
-    def test_characters_of_different_backgrounds_get_their_assigned_accents(self):
-        client = NarratorClient()
-        self.analyze(client)
-        accents = next(call for call in client.calls if call["mode"] == "narrator_accents")
-        first, second = accents["characters"][0][0], accents["characters"][1][0]
-        notes = {row[1]: row[3] for call in client.calls if call["mode"] == "narrator_voices" for row in call["voices"]}
-        self.assertTrue(notes[first].endswith("; accent: Scottish"))
-        self.assertTrue(notes[second].endswith("; accent: Irish"))
+    def test_voice_descriptions_never_carry_an_accent_the_accent_tool_chooses_it(self):
+        class Accented(NarratorClient):
+            def complete(self, system, payload):
+                result = super().complete(system, payload)
+                if payload.get("mode") == "narrator_voices" and "accent" not in str(payload.get("correction", "")):
+                    result["v"] = [[row[0], f"{row[1]} Speaks with a broad Scottish accent.", "a soft Irish brogue",
+                                    "pitch=mid;accent=Scottish"] for row in result["v"]]
+                return result
+
+        client = Accented()
+        document = self.analyze(client, repair_attempts=1)
+        self.assertNotIn("narrator_accents", {call["mode"] for call in client.calls})
+        for voice in document["cast"]["voices"]:
+            self.assertNotIn("accent", f"{voice['description']} {voice.get('speechTraits', '')}".casefold())
+            self.assertNotIn("accent", {trait["name"] for trait in voice.get("traits", [])})
+        corrections = [call for call in client.calls if call.get("mode") == "narrator_voices" and "correction" in call]
+        self.assertIn("must not name or describe an accent", str(corrections[0]["correction"]))
+        # Nothing about accents goes to the voice design request either: no assigned accent in a voice's note.
+        self.assertFalse(any("accent:" in str(row[3]) for call in client.calls if call["mode"] == "narrator_voices"
+                             for row in call["voices"]))
 
     def test_configured_notes_combine_as_in_the_consensus_pipeline(self):
         from epub_tts_narrator.narrator_read import settings_notes
@@ -1399,7 +1407,7 @@ class NarratorCliTests(unittest.TestCase):
             self.assertRegex(voices[person["voice_id"]]["description"], r"^A clear (male|female) voice number \d+\.$")
         modes = {call.get("mode") for client in self.clients for call in client.calls}
         self.assertTrue(modes <= {"narrator_prep", "narrator_markup", "narrator_verify", "narrator_verify_tiebreak", "narrator_voices",
-                                  "narrator_merge_check", "narrator_series_check", "narrator_accents", "audition_script"}, modes)
+                                  "narrator_merge_check", "narrator_series_check", "audition_script"}, modes)
 
     def test_a_narrator_read_book_updates_its_new_chapters_with_the_narrator_read(self):
         with (self.root / "epub-tts-narrator.toml").open("a", encoding="utf-8") as handle:
@@ -1422,7 +1430,7 @@ class NarratorCliTests(unittest.TestCase):
         modes = {call.get("mode") for call in sent}
         self.assertIn("narrator_markup", modes)
         self.assertTrue(modes <= {"narrator_prep", "narrator_markup", "narrator_verify", "narrator_verify_tiebreak", "narrator_voices",
-                                  "narrator_merge_check", "narrator_series_check", "narrator_accents", "audition_script"}, modes)
+                                  "narrator_merge_check", "narrator_series_check", "audition_script"}, modes)
         # Only the new chapter is analyzed, with the configured notes.
         self.assertFalse(any("I heard you" in json.dumps(call) for call in sent
                              if call.get("mode", "").startswith("narrator_")))

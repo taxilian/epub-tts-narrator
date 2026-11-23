@@ -1,8 +1,8 @@
 """Book-wide accent assignment: group the cast by where they come from, one real accent per group.
 
-A voice description names an accent only when whoever wrote it (usually a
-model, one voice at a time) thought to, so descriptions are a poor source of
-accents: a whole cast can come out "General American". This asks the text
+Voice descriptions the analysis writes never name an accent (older books'
+descriptions may), and one written a voice at a time would make a poor
+source anyway: a whole cast can come out "General American". This asks the text
 model once for the whole cast: which characters come from the same place
 (from the story, their names, how they speak and who they are with), and a
 distinct real-world English accent for each group. A person's guidance
@@ -11,8 +11,9 @@ distinct real-world English accent for each group. A person's guidance
 The result is saved beside the book in ``voice-accent-assignments.json``
 (per voice, nearest book first, so a continued book keeps its inherited
 characters' accents and only new characters are assigned around them). Each
-voice's designed description and speech traits go with it as evidence:
-one or the other often already names the right accent. A cue a person
+voice's designed description and speech traits go with it as evidence, and
+so do the quotes the analysis kept about how the character sounds, where an
+accent the book gives them is found. A cue a person
 chose (``voice-accents.json``), or an accent named in vocal traits they
 set (``voice-traits.json``), always wins and is sent as fixed; ``accent_cues``
 falls back to a description's accent only for voices with no assignment.
@@ -43,6 +44,7 @@ MAX_WHY = 200
 MAX_EXAMPLES = 6
 MAX_NOTES = 2000
 MAX_INTRO = 2
+MAX_SOUND = 4  # recorded quotes about how a character sounds
 # What the model may ask for, once, about characters it cannot place.
 MAX_MORE = 12
 MORE_PASSAGES = 6
@@ -277,12 +279,15 @@ def _introductions(book, names, limit):
 def voice_entries(bundle, parents=(), known=None):
     """What the story says about each voice that speaks.
 
-    ``{voice_id: {"label", "names", "about", "intro", "line"}}``: the
+    ``{voice_id: {"label", "names", "about", "intro", "line", "sound"}}``: the
     character's names and aliases, the analysis's description (and the one
     from the earliest book they appear in, when it differs), the narration
     where the series first mentions them (where a story usually says who
     they are and where they come from; ``parents`` are earlier books' bundles,
-    nearest first), and one of their own lines as a dialect clue; ``more``
+    nearest first), one of their own lines as a dialect clue, and the quotes
+    the analysis kept about them (``characters[].evidence``: in a narrator
+    read, what the book says about how they sound, an accent it names
+    included, which never goes into a voice description); ``more``
     holds further passages naming them and more of their lines, sent only
     if the model asks about them. Derived
     voices (a character's later state) are left out; they take their main
@@ -332,11 +337,15 @@ def voice_entries(bundle, parents=(), known=None):
         about = "; ".join(character.get("description", "") for character in characters if character.get("description"))
         if not about:
             about = "; ".join(role.get("description", "") for role in roles if role.get("description"))
-        intro, first_about = [], ""
+        intro, first_about, sound = [], "", []
         for book in earliest_first:
             here = [character for character in book["cast"]["characters"] if character.get("voice_id") == voice_id]
             if not here:
                 continue
+            # The quotes the analysis kept about the character (a narrator read keeps how they sound).
+            sound += [quote for character in here for evidence in character.get("evidence", [])
+                      if isinstance(evidence, dict) and isinstance(evidence.get("quote"), str)
+                      and (quote := _clip(evidence["quote"])) not in sound]
             if not first_about:
                 first_about = "; ".join(character.get("description", "") for character in here
                                         if character.get("description"))
@@ -350,12 +359,9 @@ def voice_entries(bundle, parents=(), known=None):
             about = f"{first_about} (when first met); now: {about}" if about else first_about
         if narrates and characters:
             about += "; also narrates the book"
-        if not intro:
-            intro = [_clip(evidence["quote"]) for character in characters for evidence in character.get("evidence", [])
-                     if isinstance(evidence, dict) and isinstance(evidence.get("quote"), str)][:MAX_INTRO]
         lines = spoken.get(voice_id, [])
         entries[voice_id] = {"label": label[:120], "names": ", ".join(names)[:MAX_NAMES], "about": about[:MAX_ABOUT],
-                             "intro": intro, "line": lines[0] if lines else "",
+                             "intro": intro, "line": lines[0] if lines else "", "sound": list(dict.fromkeys(sound))[:MAX_SOUND],
                              # Sent only when the model asks about this character (request_assignment).
                              "more": {"passages": more, "lines": lines[1:]}}
     return entries
@@ -424,11 +430,11 @@ def request_assignment(bundle, requests, voice_ids, fixed, *, notes="", terms=fr
         entry = entries[voice_id]
         description, traits = clues.get(voice_id, ("", ""))
         rows.append([f"v{len(short)}", entry["names"], entry["about"], entry["intro"], entry["line"],
-                     description, traits])
+                     description, traits, entry.get("sound", [])])
     for voice_id, cue in fixed.items():
         if voice_id in entries:
             fixed_rows.append([f"f{len(fixed_rows) + 1}", entries[voice_id]["names"], cue])
-    payload = {"mode": "accent_assignment", "v": 4, "book": bundle["source"]["book"]["title"], "voices": rows}
+    payload = {"mode": "accent_assignment", "v": 5, "book": bundle["source"]["book"]["title"], "voices": rows}
     if fixed_rows:
         payload["fixed"] = fixed_rows
     decided = {_origin_key(item["origin"]): item["accent"] for item in origins}

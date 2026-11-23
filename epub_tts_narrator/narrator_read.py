@@ -29,13 +29,13 @@ import time
 from .narrator_ledger import (EFFECT_PRESETS, IDENTITY_CHANGES, apply_delta, character, contextual_series_evidence, exact_quote, ledger_id, merge,
                               name_index, new_ledger, recheck_aliases, render, tag_character, undo_merge, _clean, _norm)
 from .direction_policy import VERSION as DIRECTION_POLICY
-from .narrator_prompts import (ACCENTS, HINTS, MARKUP, MERGE_CHECK, PREP, SERIES_CHECK, VERIFY, VERIFY_TIEBREAK, VOICE,
+from .narrator_prompts import (HINTS, MARKUP, MERGE_CHECK, PREP, SERIES_CHECK, VERIFY, VERIFY_TIEBREAK, VOICE,
                                VERSION as PROMPT_VERSION)
 from .performance_plan import DELIVERY_TAGS, VOCAL_SOUNDS
 from .provider import OutputTruncatedError
 from .quote_spans import _NOT_NAMES, quote_spans, spans_by_block
 from .speech_cues import REASON as CUE_REASON, SCOPED_TONES, line_cues, speakers, tone_direction
-from .speech_traits import validate_speech_traits
+from .speech_traits import ACCENT_FREE, accent_words, validate_speech_traits
 
 VERSION = 1
 STRATEGY = "narrator_read"
@@ -1455,45 +1455,6 @@ def book_terms(source, ledger):
     return terms - _REAL_WORLD
 
 
-def assign_accents(source, requests, meter, rows, terms, voices=None, *, progress=lambda message: None):
-    """One request mapping the story's origins to distinct real-world accents.
-
-    Returns {ledger id: accent}. Voices are designed in batches; a book-wide map
-    keeps characters from the same place on one accent and gives different
-    backgrounds different ones. An accent naming a book term is dropped.
-    """
-    if not rows:
-        return {}
-    by_name = {row["name"]: row["id"] for row in rows}
-    characters = []
-    for row in rows:
-        note = row["note"]
-        if voices and row["id"] in voices:
-            note = f"{note}; already voiced: {voices[row['id']][:120]}"
-        characters.append([row["name"], note])
-    payload = {"mode": "narrator_accents", "v": PROMPT_VERSION, "book": source["book"]["title"],
-               "characters": characters}
-
-    def validate(response):
-        groups = _unwrap(response.get("a")) if isinstance(response, dict) else None
-        if not isinstance(groups, list):
-            raise ValueError('response must be {"a":[[origin,accent,[name,name]]]}')
-        result = {}
-        for group in groups:
-            if not isinstance(group, list) or len(group) < 3 or not isinstance(group[1], str):
-                continue
-            accent = " ".join(re.sub(r"[\[\]<>{}]", " ", group[1]).split())[:40]
-            if not accent or any(word.casefold() in terms for word in re.findall(r"[A-Za-z][\w'-]{2,}", accent)):
-                continue
-            for name in group[2] if isinstance(group[2], list) else []:
-                if isinstance(name, str) and name in by_name:
-                    result.setdefault(by_name[name], accent)
-        return result
-
-    progress(f"Narrator read: assigning accents across {len(rows)} character(s)")
-    return meter.run(requests, "voices", ACCENTS, payload, validate)
-
-
 def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1, progress=lambda message: None):
     """Fill descriptions/traits for voices that are not inherited series voices.
 
@@ -1531,13 +1492,6 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
     narration = ledger["narration"]
     entries, changes_by_short = [], {}
     terms = book_terms(source, ledger)
-    speaking_rows = [row for _voice, row in [*targets, *inherited_changes] if row is not None]
-    accents = assign_accents(source, requests, meter, speaking_rows, terms,
-                             {row["id"]: voice["description"] for voice, row in inherited_changes},
-                             progress=progress)
-
-    def with_accent(row, note):
-        return f"{note}; accent: {accents[row['id']]}" if row["id"] in accents else note
     for number, (voice, row) in enumerate(targets, 1):
         if row is None:
             entries.append([f"v{number}", "Narrator", "?", f"Main narrator; narration mode {narration['mode'] or 'unknown'}.", "", ""])
@@ -1546,7 +1500,7 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
                          if character(ledger, identifier) is not None]
         later = [change for change in row.get("changes", []) if change["kind"] in IDENTITY_CHANGES]
         name = f"{row['name']} (at the start of the book, before any change)" if later else row["name"]
-        entries.append([f"v{number}", name, row["sex"], with_accent(row, row["note"]),
+        entries.append([f"v{number}", name, row["sex"], row["note"],
                         " / ".join(item["quote"] for item in row["voice"][:4]), ", ".join(partner_names)])
         if later:
             changes_by_short[f"v{number}"] = f"start:{row['id']}"
@@ -1555,8 +1509,8 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
             short = f"v{len(targets) + len(changes_by_short) + 1}"
             changes_by_short[short] = change["id"]
             entries.append([short, f"{row['name']} (later: {change['instruction']})", row["sex"],
-                            with_accent(row, f"The same person after a {change['kind']} change: {change['instruction']}. "
-                                             "Keep their accent and manner; change only what this describes."),
+                            f"The same person after a {change['kind']} change: {change['instruction']}. "
+                            "Keep their manner; change only what this describes.",
                             "", ", ".join(partner_names)])
     for voice, row in inherited_changes:
         for change in (item for item in row["changes"] if item["kind"] in IDENTITY_CHANGES):
@@ -1564,7 +1518,7 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
             changes_by_short[short] = change["id"]
             entries.append([short, f"{row['name']} (later: {change['instruction']})", row["sex"],
                             f"Their voice so far: {voice['description'][:300]} Now the same person after a "
-                            f"{change['kind']} change: {change['instruction']}. Keep their accent and manner.",
+                            f"{change['kind']} change: {change['instruction']}. Keep their manner.",
                             "", ""])
     by_short = {f"v{number}": voice for number, (voice, _row) in enumerate(targets, 1)
                 if f"v{number}" not in changes_by_short}
@@ -1602,6 +1556,11 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
                     errors.append(f'{row[0]}: description must begin with "Male", "Female" or "Androgynous"')
                     continue
                 description = gendered[:600]
+                named = accent_words(f"{description} {row[2]}")
+                if named:
+                    # The accent tool chooses accents; the voice is designed with its choice.
+                    errors.append(f"{row[0]}: description and speech traits {ACCENT_FREE.format(words=', '.join(named))}")
+                    continue
                 used = sorted({word for word in re.findall(r"[A-Za-z][\w'-]{2,}", f"{description} {row[2]}")
                                if word.casefold() in terms})
                 if used:
@@ -1614,7 +1573,7 @@ def design_voices(source, requests, meter, ledger, cast, partners, *, workers=1,
                     name, _, value = pair.partition("=")
                     # "ReceivedPronunciation" -> "Received Pronunciation".
                     name, value = name.strip().lower()[:40], re.sub(r"(?<=[a-z])(?=[A-Z])", " ", value.strip())[:80]
-                    if name and value:
+                    if name and value and name != "accent":
                         traits.append({"name": name, "value": value, "basis": "casting", "evidence": []})
                 result[row[0]] = {"description": description, "speechTraits": speech, "traits": traits}
             missing = sorted(expected - set(result))

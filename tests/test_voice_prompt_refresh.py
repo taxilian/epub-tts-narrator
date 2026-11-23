@@ -207,6 +207,9 @@ class VoicePromptRefreshTests(unittest.TestCase):
                       {**RESPONSE, "description": "A voice.\u200b"},
                       {**RESPONSE, "description": '"A voice."'},
                       {**RESPONSE, "description": "A voice. " * 600},
+                      # The accent tool chooses each voice's accent; a description never names one.
+                      {**RESPONSE, "description": "A warm alto with a soft Irish accent."},
+                      {**RESPONSE, "description": "A clipped Received Pronunciation baritone."},
                       {**RESPONSE, "reason": ""}, {**RESPONSE, "reason": "x" * 1001}):
             with self.subTest(value=str(value)[:100]), self.assertRaises(ValueError):
                 validate_description(value)

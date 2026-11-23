@@ -1,7 +1,6 @@
 """Revising voice-design descriptions from a person's instructions (the cast screen's ``i``).
 
-A person types what should change ("remove every mention of accent; the cue
-adds it") and the analysis text model rewrites the chosen voices'
+A person types what should change ("make her sound older") and the analysis text model rewrites the chosen voices'
 descriptions accordingly. Each voice is sent with its current description
 and the accent cue the application adds by itself when the voice is
 designed (``speech_traits.with_accent``), so the model can tell which
@@ -29,6 +28,10 @@ def _plain(description, limit):
         raise ValueError("a description must be plain direction without brackets or markup")
     if len(text) > 1 and text[0] in "\"“" and text[-1] in "\"”":
         raise ValueError("a description must not be wrapped in quotation marks")
+    from ..speech_traits import ACCENT_FREE, accent_words
+    named = accent_words(text)
+    if named:
+        raise ValueError(f"a description {ACCENT_FREE.format(words=', '.join(named))}")
     return text
 
 

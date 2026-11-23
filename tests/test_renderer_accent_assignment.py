@@ -105,7 +105,18 @@ class AssignmentTests(BookTestCase):
         requests = FakeRequests(everyone("Yorkshire"))
         self.prepare(requests)
         row = next(row for row in requests.calls[0][1]["voices"] if row[1] == self.entries[voice_id]["names"])
-        self.assertEqual(row[-2:], ["Deep voice, sturdy Yorkshire baritone", "Sturdy Yorkshire; unhurried"])
+        self.assertEqual(row[5:7], ["Deep voice, sturdy Yorkshire baritone", "Sturdy Yorkshire; unhurried"])
+
+    def test_what_the_book_says_about_how_a_character_sounds_goes_with_it(self):
+        # The analysis keeps these quotes; an accent in them reaches only the accent request, never a description.
+        voice_id = self.voices[0]
+        character = next(c for c in self.bundle["cast"]["characters"] if c["voice_id"] == voice_id)
+        character["evidence"] = [{"block_id": "b1", "quote": "her voice had a thick northern burr"}]
+        requests = FakeRequests(everyone("Scottish"))
+        self.prepare(requests)
+        row = next(row for row in requests.calls[0][1]["voices"] if row[1] == self.entries[voice_id]["names"])
+        self.assertEqual(row[7], ["her voice had a thick northern burr"])
+        self.assertIn('"sound"', requests.calls[0][0])
 
     def test_an_accent_in_traits_a_person_set_is_their_choice(self):
         from epub_tts_narrator.renderer.speech_traits import save_speech_traits
@@ -125,7 +136,7 @@ class AssignmentTests(BookTestCase):
         again = FakeRequests(everyone("Irish", "the coast"))
         self.prepare(again)
         row = next(row for row in again.calls[0][1]["voices"] if row[1] == self.entries[voice_id]["names"])
-        self.assertEqual(row[-1], "cool measured pace, clipped consonants")
+        self.assertEqual(row[6], "cool measured pace, clipped consonants")
         self.assertEqual(accent_cues(self.bundle, self.config)[voice_id], "Irish accent")
 
     def test_groups_become_each_voices_cue_and_a_voice_left_out_gets_none(self):
