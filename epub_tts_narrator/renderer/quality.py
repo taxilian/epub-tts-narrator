@@ -30,13 +30,13 @@ QUALITY_DEFAULTS = {
     "max_internal_silence_seconds": 2.5,
     "max_clipped_fraction": 0.20,
     "max_wer": 0.0,
-    # Chapter speech only: the share of passage words that may differ in a
+    # Chapter speech and voice samples: the share of passage words that may differ in a
     # close transcript (close_match.py). 0 (strict) for direct callers; the
     # renderer configuration defaults it on (renderer/config.py DEFAULTS).
     "max_close_mismatch_fraction": 0.0,
 }
 QUALITY_VERSION = 19
-REFERENCE_VARIATION_VERSION = 7
+REFERENCE_VARIATION_VERSION = 8
 _SAMPLE_RATE = 44100
 _TIME_TOLERANCE = 0.05  # Whisper timestamps have coarser precision than samples.
 _ASR_OPTIONS = {
@@ -1275,8 +1275,10 @@ def _checked_audio_report(path, expected_text: str, verifier,
     phonetic = (phonetic_equivalence(expected_text, transcript)
                 if metrics["wer"] != 0 and spacing is None else None)
     close = None
-    if purpose == "speech" and metrics["wer"] != 0 and spacing is None and phonetic is None:
-        # Accent and name mishearings: accepted locally, before any judge.
+    if metrics["wer"] != 0 and spacing is None and phonetic is None:
+        # Accent and name mishearings: accepted locally, before any judge. A
+        # voice sample too: a recognizer that does not know a book's names
+        # ("Erutown" heard as "there a town") says nothing about the voice.
         from .close_match import close_transcript
         close = close_transcript(expected_text, transcript, settings["max_close_mismatch_fraction"])
     if spacing is not None:
@@ -1295,6 +1297,10 @@ def _checked_audio_report(path, expected_text: str, verifier,
         report["close_match"] = close
         report["verified_transcript"] = transcript
         report["text_confirmation_method"] = "close_match"
+        if purpose == "reference":
+            # The voice said the script; the differences are the recognizer's, so the
+            # script's own words stay the sample's text (the transcript would misspell the names).
+            report.update(reference_text=expected_text, reference_text_adjusted=False)
     elif metrics["wer"] != 0 and getattr(verifier, "reference_judge_identity", None) is not None:
         if not _confirm_text_variation(Path(path), verifier, report,
                                        settings["max_close_mismatch_fraction"] if purpose == "speech" else 0.0):

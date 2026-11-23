@@ -90,13 +90,30 @@ class CloseMatchVerificationTests(unittest.TestCase):
         self.assertEqual(report["verified_transcript"], self.HEARD)
         self.assertEqual(report["close_match"]["expected_words"], 12)
 
-    def test_references_and_the_strict_default_still_require_the_words(self):
+    def test_the_strict_default_still_requires_the_words(self):
         strict = validate_audio(self.audio, self.EXPECTED, consensus.PrimaryVerifier(self.HEARD), None)
         self.assertEqual(strict["reasons"], ["text_mismatch"])
-        reference = validate_audio(self.audio, self.EXPECTED, consensus.PrimaryVerifier(self.HEARD),
-                                   {"max_close_mismatch_fraction": 0.25}, purpose="reference")
-        self.assertNotIn("close_match", reference)
-        self.assertNotEqual(reference.get("text_confirmation_method"), "close_match")
+        for purpose in ("speech", "reference"):
+            report = validate_audio(self.audio, self.EXPECTED, consensus.PrimaryVerifier(self.HEARD), None,
+                                    purpose=purpose)
+            self.assertEqual(report["reasons"], ["text_mismatch"], purpose)
+
+    def test_a_voice_sample_with_misheard_names_passes_and_keeps_its_script(self):
+        # A recognizer that does not know a book's names says nothing about the voice being cloned.
+        expected = ("We reached Erutown by nightfall, and Lars said the gates would be shut before we could "
+                    "find an inn, so we camped by the river and waited for the light.")
+        heard = ("We reached there a town by nightfall, and laws said the gates would be shut before we could "
+                 "find an inn, so we camped by the river and waited for the light.")
+        report = validate_audio(self.audio, expected, consensus.PrimaryVerifier(heard),
+                                {"max_close_mismatch_fraction": 0.25}, purpose="reference")
+        self.assertTrue(report["passed"], report["reasons"])
+        self.assertEqual(report["text_confirmation_method"], "close_match")
+        # The voice said the script: the script, not the misspelled transcript, goes with the recording.
+        self.assertEqual((report["reference_text"], report["reference_text_adjusted"]), (expected, False))
+        # A word never said still fails, as for chapter speech.
+        missing = validate_audio(self.audio, expected, consensus.PrimaryVerifier(heard.replace(" by the river", "")),
+                                 {"max_close_mismatch_fraction": 0.25}, purpose="reference")
+        self.assertFalse(missing["passed"])
 
     def test_the_renderer_configuration_turns_it_on(self):
         self.assertEqual(QUALITY_DEFAULTS["max_close_mismatch_fraction"], 0.0)
