@@ -13,8 +13,16 @@ def take(candidate_id, *, selected=False, inherited=False, passed=True, clips=No
             "selected": selected, "inherited": inherited, "asset_hash": candidate_id}
 
 
+def failed_take(take_id, *, reasons=("text_mismatch",)):
+    """A saved sample that failed verification (``CastingSession.rejected_takes``)."""
+    return {"take_id": take_id, "attempt_file": f"/work/casting-candidates/{take_id}/attempt-001.json",
+            "audio": f"/work/casting-candidates/{take_id}/attempt-001.wav", "created": "2026-11-02 09:00",
+            "designer": "gemini_voice_design", "reasons": list(reasons),
+            "detail": "expected → heard: erutown → there a town"}
+
+
 def voice_row(voice_id, name, *, candidates=(), selected=None, canonical=None, derived=None,
-              regeneration=None, clips=3, clip_source="default", traits=""):
+              regeneration=None, clips=3, clip_source="default", traits="", rejected=()):
     return {
         "voice_id": voice_id, "canonical_voice_id": canonical or voice_id, "label": name,
         "derived_from": derived, "clone_stale": False, "characters": [name], "roles": [f"role-{voice_id}"],
@@ -23,6 +31,7 @@ def voice_row(voice_id, name, *, candidates=(), selected=None, canonical=None, d
         "prompt": f"A calm voice for {name}.", "reference_text": f"Hello, I am {name}.",
         "sample_source": {"kind": "book_excerpt", "chapter_title": "Chapter 1"},
         "selected": selected, "regeneration": regeneration, "candidates": list(candidates), "notice": "",
+        "rejected": list(rejected),
     }
 
 
@@ -69,6 +78,9 @@ class FakeSession:
 
     def accept(self, voice_id, candidate_id):
         self._call("accept", voice_id, candidate_id)
+
+    def accept_rejected(self, voice_id, attempt_file):
+        self._call("accept_rejected", voice_id, attempt_file)
 
     def update_prompt(self, voice_id, **fields):
         self._call("update_prompt", voice_id, **fields)

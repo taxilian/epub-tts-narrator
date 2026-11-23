@@ -32,6 +32,60 @@ MAX_PENDING_RECORD_BYTES = 4 * 1024 * 1024
 MAX_PENDING_AUDIO_BYTES = 128 * 1024 * 1024
 
 
+# A sample a person listened to and chose although it failed verification (``accept_rejected``).
+MANUAL_ACCEPTANCE = "manual_casting_acceptance"
+# Failures no listening can overrule: there is no usable voice in the audio.
+UNUSABLE_REASONS = frozenset({"invalid_audio", "silent_audio", "audio_too_short", "audio_too_quiet",
+                              "generation_or_verification_error"})
+
+
+def _unusable(report):
+    """Whether a report says the audio itself is unusable ("invalid_audio: …" counts by its name)."""
+    return any(str(reason).split(":")[0] in UNUSABLE_REASONS for reason in report.get("reasons") or [])
+
+
+def is_manual_acceptance(candidate):
+    """Whether a saved candidate is a person's choice of a sample that failed verification."""
+    report = (candidate or {}).get("verification") or {}
+    return (report.get("text_confirmation_method") == MANUAL_ACCEPTANCE
+            and report.get("ordinary_verification_passed") is False
+            and isinstance(((candidate or {}).get("creation") or {}).get("manual_acceptance"), dict))
+
+
+_ATTEMPTS = {}
+_ATTEMPTS_LOCK = threading.Lock()
+
+
+def _casting_attempts(root):
+    """Every saved casting attempt record under ``root``: [(path, record)], each file read again only when it changes."""
+    found = []
+    try:
+        folders = [folder for folder in root.iterdir() if folder.is_dir() and not folder.is_symlink()]
+    except OSError:
+        return found
+    for folder in folders:
+        for path in folder.glob("attempt-*.json"):
+            if path.is_symlink() or path.name.endswith("-generation.json"):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            key = (stat.st_size, stat.st_mtime_ns, stat.st_ino)
+            with _ATTEMPTS_LOCK:
+                cached = _ATTEMPTS.get(path)
+            if cached is None or cached[0] != key:
+                try:
+                    record = read_json(path)
+                except (OSError, ValueError):
+                    continue
+                cached = (key, record if isinstance(record, dict) else {})
+                with _ATTEMPTS_LOCK:
+                    _ATTEMPTS[path] = cached
+            found.append((path, cached[1]))
+    return found
+
+
 def _validate_text(value, label, limit):
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be nonempty text")
@@ -589,6 +643,7 @@ class CastingSession:
         from .voice_clip_counts import clip_choice, clip_overrides
         clip_counts = clip_overrides(self.bundle, self.config)
         several_clips = designer_records_several_clips(self.config)
+        attempts = self._attempts_by_voice()
         rows = []
         for voice_id in self._cast_ids:
             profile = self._profiles[voice_id]
@@ -655,6 +710,8 @@ class CastingSession:
                 "selected": selected,
                 "regeneration": self.store.regeneration_status(voice_id),
                 "candidates": self.store.list_candidates(voice_id),
+                # Samples that failed verification, kept for a person to listen to and accept (accept_rejected).
+                "rejected": self.rejected_takes(voice_id, attempts),
                 "notice": self.notice,
             })
         return rows
@@ -1699,6 +1756,98 @@ class CastingSession:
                     self.notify(f"Selected Gemini voice ID: {remote_id}")
                 return selected
 
+    def _saved_attempt(self, voice_id, attempt_path):
+        """A saved casting take's record, checked against its hashes, this series, voice and cast profile."""
+        profile = self._profile(voice_id)
+        voice_id = self.store.canonical_id(voice_id)
+        path = Path(attempt_path).absolute()
+        if (path.is_symlink() or not path.is_file()
+                or any(parent.is_symlink() for parent in path.parents)):
+            raise ValueError("Casting attempt must be a regular, nonsymlink file")
+        original_hash = file_hash(path)
+        record = read_json(path)
+        if not isinstance(record, dict) or not isinstance(record.get("request"), dict):
+            raise ValueError("Invalid casting attempt record")
+        request = record["request"]
+        if record.get("request_hash") != digest(request):
+            raise ValueError("Casting attempt request checksum changed")
+        if (request.get("kind") != "casting_candidate"
+                or request.get("series_id") != self.store.series_id
+                or request.get("voice_id") != voice_id):
+            raise ValueError("Casting attempt belongs to a different series or voice")
+        if request.get("profile") != profile:
+            raise ValueError("Casting attempt character profile does not match this cast")
+        prompt = _validate_text(request.get("prompt"), "Voice prompt", MAX_PROMPT_CHARACTERS)
+        text = _validate_text(request.get("text"), "Sample text", MAX_REFERENCE_CHARACTERS)
+        if (type(record.get("attempt")) is not int or record["attempt"] < 1
+                or type(record.get("seed")) is not int or not 0 <= record["seed"] < 2**32):
+            raise ValueError("Invalid casting attempt number or seed")
+        name = record.get("audio_file")
+        if (not isinstance(name, str) or not name or name != Path(name).name
+                or "\\" in name or not name.endswith(".wav")):
+            raise ValueError("Invalid casting attempt audio path")
+        wav = path.parent / name
+        if wav.is_symlink() or not wav.is_file():
+            raise ValueError("Casting attempt audio must be a regular, nonsymlink file")
+        audio_hash = record.get("audio_sha256")
+        if (not isinstance(audio_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", audio_hash)
+                or file_hash(wav) != audio_hash):
+            raise ValueError("Casting attempt audio checksum changed")
+        generated = record.get("engine_metadata", {})
+        if (not isinstance(generated, dict) or generated.get("description_applied") is not True
+                or generated.get("requested_description", prompt) != prompt
+                or generated.get("reference_text", text) != text):
+            raise RenderBlocked("Casting attempt has no matching applied voice description")
+        return {"voice_id": voice_id, "path": path, "original_hash": original_hash, "record": record,
+                "request": request, "prompt": prompt, "text": text, "name": name, "wav": wav,
+                "audio_hash": audio_hash, "generated": generated}
+
+    def _publish_attempt(self, saved, report, verifier, binding_identity, *, method, note, extra=None):
+        """Save a checked attempt as a candidate (once: the same attempt and decision give the same candidate)."""
+        voice_id, record, request = saved["voice_id"], saved["record"], saved["request"]
+        reference_text = report.get("reference_text", saved["text"])
+        if file_hash(saved["path"]) != saved["original_hash"] or file_hash(saved["wav"]) != saved["audio_hash"]:
+            raise RenderBlocked("Casting attempt changed while it was being verified")
+        identity = ({"recovered_casting_attempt": record, "reference_text": reference_text}
+                    if method == "recovered_casting_candidate" else
+                    {"manual_casting_acceptance": record, "reference_text": reference_text})
+        candidate_id = digest(identity)[:32]
+        candidate = next((item for item in self.store.list_candidates(voice_id)
+                          if item["candidate_id"] == candidate_id), None)
+        provenance = {
+            "attempt_file": str(saved["path"]), "attempt_sha256": saved["original_hash"],
+            "request_hash": record["request_hash"], "attempt": record["attempt"],
+            "audio_file": saved["name"], "audio_sha256": saved["audio_hash"],
+        }
+        if candidate is None:
+            metadata = {
+                **deepcopy(saved["generated"]),
+                "method": method, "candidate_id": candidate_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "requested_description": saved["prompt"], "description_applied": True,
+                "requested_reference_text": saved["text"], "reference_text": reference_text,
+                **({"sample_source": deepcopy(request["sample_source"])}
+                   if "sample_source" in request else {}),
+                "voice_design_supported": True, "seed": record["seed"],
+                "request_hash": record["request_hash"], "recovered_from": provenance,
+                "designer": deepcopy(request.get("designer", {})),
+                "engine": deepcopy(request["engine"]),
+                "verifier": deepcopy(verifier.identity) if verifier is not None else None,
+                "quality": deepcopy(self.config["quality"]),
+                "validation_key": (validation_key(reference_text, verifier, self.config["quality"], purpose="reference")
+                                   if verifier is not None else None),
+                "note": note, **(extra or {}),
+            }
+            candidate = self.store.publish_candidate(
+                voice_id, deepcopy(request["profile"]), saved["wav"], reference_text, binding_identity,
+                report, metadata, candidate_id=candidate_id)
+        elif (candidate["reference_sha256"] != saved["audio_hash"]
+              or candidate["reference_text"] != reference_text
+              or candidate.get("creation", {}).get("recovered_from", {}).get("attempt_sha256")
+              != saved["original_hash"]):
+            raise RenderBlocked("Recovered candidate provenance does not match the saved attempt")
+        return candidate
+
     @_about_voice
     def recover_attempt(self, voice_id, attempt_path, *, select=True):
         """Recheck and preserve a saved casting take without synthesizing again.
@@ -1708,47 +1857,9 @@ class CastingSession:
         candidate. Selecting a recovered take also requires the current draft to
         match, so recovering an older experiment cannot silently undo later edits.
         """
-        profile = self._profile(voice_id)
         with self._locked():
-            voice_id = self.store.canonical_id(voice_id)
-            path = Path(attempt_path).absolute()
-            if (path.is_symlink() or not path.is_file()
-                    or any(parent.is_symlink() for parent in path.parents)):
-                raise ValueError("Casting attempt must be a regular, nonsymlink file")
-            original_hash = file_hash(path)
-            record = read_json(path)
-            if not isinstance(record, dict) or not isinstance(record.get("request"), dict):
-                raise ValueError("Invalid casting attempt record")
-            request = record["request"]
-            if record.get("request_hash") != digest(request):
-                raise ValueError("Casting attempt request checksum changed")
-            if (request.get("kind") != "casting_candidate"
-                    or request.get("series_id") != self.store.series_id
-                    or request.get("voice_id") != voice_id):
-                raise ValueError("Casting attempt belongs to a different series or voice")
-            if request.get("profile") != profile:
-                raise ValueError("Casting attempt character profile does not match this cast")
-            prompt = _validate_text(request.get("prompt"), "Voice prompt", MAX_PROMPT_CHARACTERS)
-            text = _validate_text(request.get("text"), "Sample text", MAX_REFERENCE_CHARACTERS)
-            if (type(record.get("attempt")) is not int or record["attempt"] < 1
-                    or type(record.get("seed")) is not int or not 0 <= record["seed"] < 2**32):
-                raise ValueError("Invalid casting attempt number or seed")
-            name = record.get("audio_file")
-            if (not isinstance(name, str) or not name or name != Path(name).name
-                    or "\\" in name or not name.endswith(".wav")):
-                raise ValueError("Invalid casting attempt audio path")
-            wav = path.parent / name
-            if wav.is_symlink() or not wav.is_file():
-                raise ValueError("Casting attempt audio must be a regular, nonsymlink file")
-            audio_hash = record.get("audio_sha256")
-            if (not isinstance(audio_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", audio_hash)
-                    or file_hash(wav) != audio_hash):
-                raise ValueError("Casting attempt audio checksum changed")
-            generated = record.get("engine_metadata", {})
-            if (not isinstance(generated, dict) or generated.get("description_applied") is not True
-                    or generated.get("requested_description", prompt) != prompt
-                    or generated.get("reference_text", text) != text):
-                raise RenderBlocked("Casting attempt has no matching applied voice description")
+            saved = self._saved_attempt(voice_id, attempt_path)
+            voice_id, request, text, prompt = saved["voice_id"], saved["request"], saved["text"], saved["prompt"]
             if select:
                 draft = self._draft(voice_id, self.store.load(voice_id))
                 script_matches = (draft["reference_text"] == text or
@@ -1761,53 +1872,109 @@ class CastingSession:
             binding_identity = getattr(engine, "voice_binding_identity", engine.identity)
             self._check_engine(request.get("engine", {}), binding_identity)
             self.notify("Rechecking the saved voice sample")
-            report = validate_audio(wav, text, verifier, self.config["quality"], purpose="reference")
+            report = validate_audio(saved["wav"], text, verifier, self.config["quality"], purpose="reference")
             if not report.get("passed"):
                 _require_available_confirmation(report)
                 raise RenderBlocked("Saved voice sample failed current verification: "
                                     + ", ".join(report.get("reasons", [])))
-            reference_text = report.get("reference_text", text)
-            # Recheck after transcription before copying or selecting anything.
-            if file_hash(path) != original_hash or file_hash(wav) != audio_hash:
-                raise RenderBlocked("Casting attempt changed while it was being verified")
-            candidate_id = digest({"recovered_casting_attempt": record,
-                                   "reference_text": reference_text})[:32]
-            candidate = next((saved for saved in self.store.list_candidates(voice_id)
-                              if saved["candidate_id"] == candidate_id), None)
-            provenance = {
-                "attempt_file": str(path), "attempt_sha256": original_hash,
-                "request_hash": record["request_hash"], "attempt": record["attempt"],
-                "audio_file": name, "audio_sha256": audio_hash,
-            }
-            if candidate is None:
-                metadata = {
-                    **deepcopy(generated),
-                    "method": "recovered_casting_candidate", "candidate_id": candidate_id,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    "requested_description": prompt, "description_applied": True,
-                    "requested_reference_text": text, "reference_text": reference_text,
-                    **({"sample_source": deepcopy(request["sample_source"])}
-                       if "sample_source" in request else {}),
-                    "voice_design_supported": True, "seed": record["seed"],
-                    "request_hash": record["request_hash"], "recovered_from": provenance,
-                    "designer": deepcopy(request.get("designer", {})),
-                    "engine": deepcopy(request["engine"]),
-                    "verifier": deepcopy(verifier.identity), "quality": deepcopy(self.config["quality"]),
-                    "validation_key": validation_key(
-                        reference_text, verifier, self.config["quality"], purpose="reference"),
-                    "note": "Recovered without resynthesis after rechecking the original saved take.",
-                }
-                candidate = self.store.publish_candidate(
-                    voice_id, deepcopy(request["profile"]), wav, reference_text, binding_identity,
-                    report, metadata, candidate_id=candidate_id)
-            elif (candidate["reference_sha256"] != audio_hash
-                  or candidate["reference_text"] != reference_text
-                  or candidate.get("creation", {}).get("recovered_from", {}).get("attempt_sha256")
-                  != original_hash):
-                raise RenderBlocked("Recovered candidate provenance does not match the saved attempt")
+            candidate = self._publish_attempt(
+                saved, report, verifier, binding_identity, method="recovered_casting_candidate",
+                note="Recovered without resynthesis after rechecking the original saved take.")
             if not select:
                 return candidate
-            return self._accept_locked(voice_id, candidate_id)
+            return self._accept_locked(voice_id, candidate["candidate_id"])
+
+    def _attempts_by_voice(self):
+        """Every saved casting attempt record of this series, by the voice it was made for (one scan)."""
+        found = {}
+        for path, record in _casting_attempts(Path(self.config["render"]["work_dir"]) / "casting-candidates"):
+            request = record.get("request") or {}
+            if request.get("kind") == "casting_candidate" and request.get("series_id") == self.store.series_id:
+                found.setdefault(request.get("voice_id"), []).append((path, record))
+        return found
+
+    def rejected_takes(self, voice_id, attempts=None):
+        """This voice's saved samples that failed verification, newest first, for a person to listen to and accept.
+
+        ``[{"take_id", "attempt_file", "audio", "created", "designer", "reasons", "detail"}]``:
+        takes made for this voice with its current character profile, whose audio
+        is still saved, and that are not already one of its candidates. Reading
+        them makes no model call. ``attempts`` is ``_attempts_by_voice()``, when
+        the caller lists several voices.
+        """
+        voice_id = self.store.canonical_id(voice_id)
+        profile = self._profile(voice_id)
+        attempts = self._attempts_by_voice() if attempts is None else attempts
+        published = {candidate.get("reference_sha256") for candidate in self.store.list_candidates(voice_id)}
+        found = []
+        for path, record in attempts.get(voice_id, []):
+            request, report = record.get("request") or {}, record.get("report") or {}
+            if (request.get("profile") != profile
+                    or report.get("passed") is True or text_confirmation_unavailable(report)
+                    or not isinstance(record.get("audio_file"), str)
+                    or record.get("audio_sha256") in published
+                    or (record.get("engine_metadata") or {}).get("description_applied") is not True):
+                continue
+            audio = path.parent / Path(record["audio_file"]).name
+            if audio.is_symlink() or not audio.is_file():
+                continue
+            from .workflow import _verification_failure_detail
+            found.append({"take_id": "r" + digest(str(path))[:11], "attempt_file": str(path), "audio": str(audio),
+                          "created": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                          "designer": str((request.get("designer") or {}).get("engine") or ""),
+                          "reasons": list(report.get("reasons") or []),
+                          "detail": _verification_failure_detail(report)})
+        return sorted(found, key=lambda item: item["created"], reverse=True)
+
+    @_about_voice
+    def accept_rejected(self, voice_id, attempt_path):
+        """Use a saved sample that failed verification, because a person listened and chose it.
+
+        It is checked again under today's rules first and, if it passes, saved as an
+        ordinary recovered candidate. Otherwise it is saved as the person's choice
+        (``manual_casting_acceptance``): the report keeps the original failure,
+        says ordinary verification did not pass, and the script stays the
+        sample's text. Audio that cannot be used at all (empty, silent, corrupt)
+        is never accepted.
+        """
+        with self._locked():
+            saved = self._saved_attempt(voice_id, attempt_path)
+            engine = self._get_engine()
+            binding_identity = getattr(engine, "voice_binding_identity", engine.identity)
+            self._check_engine(saved["request"].get("engine", {}), binding_identity)
+            failed = saved["record"].get("report") or {}
+            if _unusable(failed):
+                raise RenderBlocked("This sample's audio cannot be used: " + ", ".join(failed["reasons"]))
+            verifier = report = None
+            try:
+                verifier = self._get_verifier()
+                self.notify("Rechecking the saved voice sample under the current rules")
+                report = validate_audio(saved["wav"], saved["text"], verifier, self.config["quality"],
+                                        purpose="reference")
+            except (RuntimeError, ValueError, OSError) as error:
+                self.notify(f"Could not recheck it ({type(error).__name__}); using it as your choice")
+            if report is not None and report.get("passed"):
+                candidate = self._publish_attempt(
+                    saved, report, verifier, binding_identity, method="recovered_casting_candidate",
+                    note="Recovered without resynthesis after rechecking the original saved take.")
+            else:
+                current = report if report is not None else failed
+                if _unusable(current):
+                    raise RenderBlocked("This sample's audio cannot be used: " + ", ".join(current["reasons"]))
+                chosen = {**deepcopy(current), "passed": True, "reasons": [], "purpose": "reference",
+                          "expected_text": saved["text"], "reference_text": saved["text"],
+                          "reference_text_adjusted": False,
+                          "text_confirmation_method": MANUAL_ACCEPTANCE, "ordinary_verification_passed": False,
+                          "original_failed_report": deepcopy(failed),
+                          **({"current_failed_report": deepcopy(report)} if report is not None else {})}
+                candidate = self._publish_attempt(
+                    saved, chosen, verifier, binding_identity, method=MANUAL_ACCEPTANCE,
+                    note="A person listened and chose this sample although it failed verification.",
+                    extra={"manual_acceptance": {"version": 1, "reasons": list(current.get("reasons") or []),
+                                                 "at": datetime.now(timezone.utc).isoformat()}})
+                self.notify("Accepted as your choice; it did not pass verification ("
+                            + ", ".join(current.get("reasons") or []) + ")")
+            return self._accept_locked(saved["voice_id"], candidate["candidate_id"])
 
     def generate_missing(self):
         """Make each unselected voice ready, reusing saved candidates first (only voices with lines; see ``rows``)."""
@@ -1833,14 +2000,20 @@ class CastingSession:
         candidate = self.store.load_candidate(voice_id, candidate_id)
         if candidate is None:
             raise ValueError("Voice candidate does not exist")
-        engine, verifier = self._get_engine(), self._get_verifier()
+        engine = self._get_engine()
+        manual = is_manual_acceptance(candidate)
+        # A person's choice needs no verifier: it is never rechecked.
+        verifier = None if manual else self._get_verifier()
         created = candidate.get("created_with", {})
         identity = engine.identity
         self._check_engine(created, getattr(engine, "voice_binding_identity", identity))
         creation = candidate.get("creation", {})
-        key = validation_key(candidate["reference_text"], verifier, self.config["quality"],
-                             purpose="reference")
-        if (creation.get("validation_key") == key and creation.get("quality") == self.config["quality"]
+        key = (creation.get("validation_key") if manual else
+               validation_key(candidate["reference_text"], verifier, self.config["quality"], purpose="reference"))
+        if manual:
+            # A person listened and chose it although it failed verification.
+            report = candidate["verification"]
+        elif (creation.get("validation_key") == key and creation.get("quality") == self.config["quality"]
                 and creation.get("verifier") == verifier.identity
                 and candidate["verification"].get("passed") is True):
             report = candidate["verification"]
@@ -1863,7 +2036,9 @@ class CastingSession:
             "candidate_id": candidate_id, "asset_hash": candidate["asset_hash"],
             "reference_sha256": file_hash(candidate["reference_audio"]),
             "previous_asset_hash": selected["asset_hash"] if selected else None,
-            "engine": identity, "verifier": verifier.identity, "quality": self.config["quality"],
+            "engine": identity, "verifier": verifier.identity if verifier is not None else creation.get("verifier"),
+            "quality": self.config["quality"],
+            **({"basis": MANUAL_ACCEPTANCE} if manual else {}),
             "validation_key": key, "report": report,
         }
         write_json(self.store.directory / "casting-acceptance" / (uuid.uuid4().hex + ".json"), audit)

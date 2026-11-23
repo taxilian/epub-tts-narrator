@@ -218,10 +218,15 @@ def recheck(path, reference_text, verification, verifier, policy):
 
     A joined reference (``basis: joined_verified_clips``) passes the current
     acoustic gates and keeps its clips' verification evidence; its words were
-    verified clip by clip and are not transcribed again. Any other reference
+    verified clip by clip and are not transcribed again. So does a sample a
+    person accepted although it failed verification. Any other reference
     is verified in full.
     """
-    if isinstance(verification, dict) and verification.get("basis") == JOINED_BASIS:
+    # A person's choice of a sample that failed its word check (casting ``accept_rejected``)
+    # stays their choice: like a joined reference, only the acoustic gates apply again.
+    chosen = (isinstance(verification, dict) and verification.get("ordinary_verification_passed") is False
+              and verification.get("text_confirmation_method") == "manual_casting_acceptance")
+    if isinstance(verification, dict) and (verification.get("basis") == JOINED_BASIS or chosen):
         from .quality import acoustic_check
         metrics, reasons = acoustic_check(path, policy)
         return {**verification, "passed": not reasons, "reasons": reasons, "metrics": metrics}

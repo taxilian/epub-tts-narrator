@@ -183,6 +183,46 @@ class CastingTests(unittest.TestCase):
         self.assertEqual(request["text"], script)
         self.assertEqual(request["prompt"], custom)
 
+    def test_a_person_can_accept_a_sample_that_failed_verification(self):
+        from epub_tts_narrator.renderer.casting import MANUAL_ACCEPTANCE, is_manual_acceptance
+        from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
+        self.verifier.wrong = True  # every sample is heard as other words
+        with self.assertRaises(SpeechVerificationFailed):
+            self.session.generate(self.voice_id)
+        row = next(row for row in self.session.rows() if row["voice_id"] == self.voice_id)
+        self.assertEqual(len(row["rejected"]), 2)
+        self.assertEqual(row["rejected"][0]["reasons"], ["text_mismatch"])
+        script = row["reference_text"]
+        before = len(self.verifier.calls)
+        selected = self.session.accept_rejected(self.voice_id, row["rejected"][1]["attempt_file"])
+        self.assertEqual(len(self.verifier.calls), before + 1)  # checked once more under today's rules
+        self.assertTrue(is_manual_acceptance(selected))
+        report = selected["verification"]
+        self.assertEqual((report["text_confirmation_method"], report["ordinary_verification_passed"]),
+                         (MANUAL_ACCEPTANCE, False))
+        self.assertEqual(report["original_failed_report"]["reasons"], ["text_mismatch"])
+        # The voice is cloned from the script it was asked to say, not the wrong transcript.
+        self.assertEqual(selected["reference_text"], script)
+        self.assertEqual(self.session.store.load(self.voice_id)["candidate_id"], selected["candidate_id"])
+        row = next(row for row in self.session.rows() if row["voice_id"] == self.voice_id)
+        self.assertEqual(len(row["rejected"]), 1)  # the accepted one is now a candidate
+        # Choosing it again is never vetoed by the checks it failed.
+        self.session.accept(self.voice_id, selected["candidate_id"])
+        self.assertEqual(len(self.verifier.calls), before + 1)
+
+    def test_a_failed_sample_that_passes_today_is_saved_as_an_ordinary_take(self):
+        from epub_tts_narrator.renderer.casting import is_manual_acceptance
+        from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
+        self.verifier.wrong = True
+        with self.assertRaises(SpeechVerificationFailed):
+            self.session.generate(self.voice_id)
+        attempt = next(row for row in self.session.rows() if row["voice_id"] == self.voice_id)["rejected"][0]
+        self.verifier.wrong = False  # the rules now hear it right
+        selected = self.session.accept_rejected(self.voice_id, attempt["attempt_file"])
+        self.assertFalse(is_manual_acceptance(selected))
+        self.assertEqual(selected["creation"]["method"], "recovered_casting_candidate")
+        self.assertIs(selected["verification"]["passed"], True)
+
     def test_established_creation_prompt_is_preserved_without_a_draft(self):
         custom = "  Established voice.\nKeep this wording.  "
         selected = {"creation": {"requested_description": custom},

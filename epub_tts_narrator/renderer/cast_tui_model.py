@@ -73,8 +73,12 @@ def voice_status(row, active=None):
         return "needs regeneration", note.strip()
     selected = row.get("selected")
     if selected is None:
-        return (("pending", f"{len(row['candidates'])} take(s), none accepted") if row.get("candidates")
-                else ("missing", "no voice yet; g generates one"))
+        if row.get("candidates"):
+            return "pending", f"{len(row['candidates'])} take(s), none accepted"
+        if row.get("rejected"):
+            count = len(row["rejected"])
+            return "missing", (f"{count} take(s) failed verification; Tab to listen, a accepts one that sounds right")
+        return "missing", "no voice yet; g generates one"
     if row.get("derived_from"):
         base = row["derived_from"].get("voice_id")
         stale = "; its main voice changed since cloning" if row.get("clone_stale") else ""
@@ -115,7 +119,11 @@ def _short(text, limit=60):
 
 
 def candidate_rows(row):
-    """The voice's takes for the comparison table, newest last, with the accepted one marked."""
+    """The voice's takes for the comparison table, newest last, with the accepted one marked.
+
+    Saved samples that failed verification follow, newest first, marked "no: <reasons>".
+    """
+    from .casting import is_manual_acceptance
     selected = row.get("selected") or {}
     result = []
     for candidate in row.get("candidates", []):
@@ -128,8 +136,17 @@ def candidate_rows(row):
             "created": str(creation.get("created_at") or "")[:16].replace("T", " "),
             "designer": str(designer.get("engine") or "").replace("_voice_design", ""),
             "clips": len(clips) if isinstance(clips, list) and clips else 1,
-            "verified": "yes" if (candidate.get("verification") or {}).get("passed") is True else "recheck",
+            "verified": ("chosen" if is_manual_acceptance(candidate)
+                         else "yes" if (candidate.get("verification") or {}).get("passed") is True else "recheck"),
             "audio": candidate.get("reference_audio"),
+        })
+    for take in row.get("rejected", []):
+        # A sample that failed verification: listen, and accept it if it sounds right (accept_rejected).
+        result.append({
+            "candidate_id": take["take_id"], "accepted": False, "created": take["created"],
+            "designer": take["designer"].replace("_voice_design", ""), "clips": 1,
+            "verified": "no: " + ", ".join(reason.split(":")[0] for reason in take["reasons"]),
+            "audio": take["audio"], "rejected": take,
         })
     if selected.get("inherited"):
         creation = selected.get("creation", {})
@@ -416,7 +433,7 @@ class CastController:
                 raise ValueError("That take has no saved audio")
             return item["audio"]
         if row.get("selected") is None:
-            if not row.get("candidates"):
+            if not row.get("candidates") and not row.get("rejected"):
                 raise ValueError(f"{label(row)} has no voice yet: press g to generate it")
             raise ValueError(f"{label(row)} has no accepted take yet: Tab to its takes to play or accept one")
         return row["selected"]["reference_audio"]
@@ -508,8 +525,18 @@ class CastController:
         if pool is not None:
             pool.close()
 
+    def rejected_take(self, row, candidate_id):
+        """The failed sample behind a takes-table row, or None for an ordinary take."""
+        item = next((item for item in candidate_rows(row) if item["candidate_id"] == candidate_id), None)
+        return (item or {}).get("rejected")
+
     def accept(self, row, candidate_id):
         voice_id = row["voice_id"]
+        rejected = self.rejected_take(row, candidate_id)
+        if rejected is not None:
+            # A person listened and chose it: checked again under today's rules, else saved as their choice.
+            return self._submit(f"Accept failed take {candidate_id} for {label(row)}",
+                                lambda: self.session.accept_rejected(voice_id, rejected["attempt_file"]), row)
         return self._submit(f"Accept take {candidate_id} for {label(row)}",
                             lambda: self.session.accept(voice_id, candidate_id), row)
 

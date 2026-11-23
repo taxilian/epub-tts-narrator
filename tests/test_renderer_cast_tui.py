@@ -224,6 +224,31 @@ class CastAppTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             self.assertEqual(self.session.calls, [("accept", ("v-ava", "c-ava-1"), {})])
 
+    async def test_a_take_that_failed_verification_can_be_heard_and_accepted_after_a_warning(self):
+        from cast_tui_fixtures import failed_take
+        from epub_tts_narrator.renderer.cast_tui_model import candidate_rows, voice_status
+        row = next(row for row in self.session._rows if row["voice_id"] == "v-ben")
+        row["rejected"] = [failed_take("r-ben-1")]
+        self.assertEqual(voice_status(row)[0], "missing")
+        self.assertIn("failed verification", voice_status(row)[1])
+        self.assertEqual(candidate_rows(row)[0]["verified"], "no: text_mismatch")
+        self.controller.refresh()
+        async with self.app.run_test(size=(160, 45)) as pilot:
+            await self.select(pilot, "v-ben")
+            takes = self.app.query_one("#takes", DataTable)
+            takes.focus()
+            takes.move_cursor(row=0)
+            await pilot.press("enter")
+            await self.settle(pilot)
+            self.assertEqual(self.player.started, ["/work/casting-candidates/r-ben-1/attempt-001.wav"])
+            await pilot.press("space", "a")
+            self.assertIsInstance(self.app.screen, ConfirmScreen)
+            self.assertIn("there a town", self.app.screen.message)
+            await pilot.press("y")
+            await self.settle(pilot)
+            self.assertEqual(self.session.calls, [
+                ("accept_rejected", ("v-ben", "/work/casting-candidates/r-ben-1/attempt-001.json"), {})])
+
     async def test_clip_count_sharing_and_unsharing(self):
         async with self.app.run_test(size=(160, 45)) as pilot:
             await self.select(pilot, "v-ben")

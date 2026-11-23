@@ -174,7 +174,7 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         Binding("greater_than_sign", "speed", "Speed",
                 tooltip="Play at 2x or 1x (pitch unchanged); also in every other listening screen"),
         Binding("g", "generate", "Generate", tooltip="Generate a new voice; choose the designer"),
-        Binding("a", "accept", "Accept", tooltip="Accept the highlighted take"),
+        Binding("a", "accept", "Accept", tooltip="Accept the highlighted take, a failed one too (Verified \"no\")"),
         Binding("m", "mark", "Mark A", show=False, tooltip="Mark the highlighted take as A for comparison"),
         Binding("x", "compare", "Compare", show=False,
                 tooltip="Play the other of take A and the highlighted take"),
@@ -542,6 +542,15 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         row, take = self.current_row(), self.current_take()
         if row is None or take is None:
             self.notify("Highlight a take in the takes table (Tab) to accept it", severity="warning")
+            return
+        rejected = self.controller.rejected_take(row, take)
+        if rejected is not None:
+            why = rejected["detail"] or ", ".join(rejected["reasons"])
+            self._confirm(f"Take {take} failed verification ({why}).\n\nUse it as the voice of {label(row)} anyway? "
+                          "It is checked again under the current rules first; if it still fails, it is kept as your "
+                          "choice and never rechecked.",
+                          lambda: self._attempt(lambda: self.controller.accept(row, take)),
+                          title="Accept a failed take?")
             return
         self._confirm(f"Accept take {take} as the voice of {label(row)}?",
                       lambda: self._attempt(lambda: self.controller.accept(row, take)))
