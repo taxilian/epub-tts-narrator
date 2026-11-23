@@ -147,6 +147,7 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
     """The casting screen. ``controller`` owns all state; this class only displays it."""
 
     TITLE = "Cast"
+    forced_exit = None  # Quit now's exit code (tui_support.quit_now); the launcher ends the process
     CSS = BASE_CSS + """
     #main { height: 1fr; }
     #left { width: 46%; min-width: 40; }
@@ -1046,6 +1047,9 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
             view["controller"].close()
 
     def action_quit_cast(self):
+        from epub_tts_narrator.tui_widgets import QuitWaitScreen
+        if any(isinstance(screen, QuitWaitScreen) for screen in self.screen_stack):
+            return  # Already quitting; its dialog offers Quit now.
         view = self._accents if isinstance(self._accents, dict) else None
         if view is not None and (view["controller"].busy() or view["controller"].planner.dirty):
             message = ("A model request for the accent plan is still running. Quit without saving the plan?"
@@ -1055,21 +1059,39 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         self._quit_cast()
 
     def _quit_cast(self):
-        running = self.controller.jobs.running()
-        if running is None:
-            self.exit()
+        from epub_tts_narrator.tui_widgets import QuitWaitScreen
+        if not self._running_work():  # every lane: generations, saves and model requests
+            if isinstance(self._accents, dict) and self._accents["controller"].busy():
+                # Its plan is not kept, so its model request is not waited for either.
+                self._quit_now()
+            else:
+                self.exit()
             return
-        self._confirm(f"“{running.label}” is still running. Quit when it finishes? Queued jobs are cancelled.",
-                      self._quit_after_job, title="Quit casting?")
+        cancelled = self.controller.jobs.cancel_queued()
+        self.push_screen(QuitWaitScreen(
+            self._running_work, waiting="Casting closes when this finishes" + (
+                f" ({len(cancelled)} queued job(s) were cancelled):" if cancelled else ":"),
+            consequence="Quit now ends at once: the running job's work is lost (a voice being generated is not "
+                        "saved); everything already saved stays."), self._quit_choice)
 
-    def _quit_after_job(self):
-        self.controller.jobs.cancel_queued()
-        self.notify("Quitting after the running job finishes…")
-        self.run_worker(self._wait_then_exit, thread=True, group="quit")
+    def _running_work(self):
+        now = time.monotonic()
+        return [f"{job.label} — {int(job.elapsed(now))} s" for job in self.controller.jobs.jobs()
+                if job.state == "running"]
 
-    def _wait_then_exit(self):
-        self.controller.jobs.wait_idle()
-        self.call_from_thread(self.exit)
+    def _quit_choice(self, choice):
+        if choice == "now":
+            self._quit_now()
+        elif choice == "done":
+            self.exit()
+        else:
+            self.notify("Not quitting; the running job carries on. Cancelled jobs stay cancelled (R retries one).")
+
+    def _quit_now(self):
+        from epub_tts_narrator.tui_support import quit_now
+        accents = self._accents["controller"] if isinstance(self._accents, dict) else None
+        quit_now(self, cleanup=[self.controller.jobs.cancel_queued, self.controller.stop,
+                                *([accents.close] if accents is not None else [])])
 
 
 # The cast's own actions; vim movement keys keep moving in the accent view.
@@ -1087,8 +1109,11 @@ def run_cast_tui(controller, *, title="Cast"):
         with prompt_streams(bridge.input, bridge.output):
             app.run()
     finally:
-        app.close_accents()
-        controller.close()
+        if getattr(app, "forced_exit", None) is None:
+            app.close_accents()
+            controller.close()
+    from epub_tts_narrator.tui_support import end_forced_quit
+    end_forced_quit(app)  # Quit now: end here, never waiting for the running job
     return 0
 
 

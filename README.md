@@ -23,7 +23,7 @@ uv pip install --python .venv-renderer/bin/python -r renderer.requirements.txt
 uv pip install --python .venv-renderer/bin/python -e .
 ```
 
-Both environments include [Textual](https://textual.textualize.io/) for the full-screen interfaces (casting and the run shell). An environment created before it was added gets it by rerunning the same install commands. Without it, or with `--plain`, or when output is redirected, every command prints plain lines as before.
+Both environments include [Textual](https://textual.textualize.io/) for the full-screen interfaces (casting and the run shell). An environment created before it was added gets it by rerunning the same install commands. Without it, or with `--plain`, or when output is redirected, every command prints plain lines as before. Quitting any full-screen interface while it is still working (a voice generating, a save, a model request, a render stopping) opens a dialog that says what is still running and how long it has waited; it closes and quits by itself when that finishes, Escape keeps working, and Quit now (`Q`) ends at once, losing only the work in progress: everything already saved stays and locks are released.
 
 Two commands come from one package: `epub-tts-narrator` (analysis; `epub-audiobook` remains a legacy alias) and `audiobook-render` (rendering). The module forms `python -m epub_tts_narrator` and `python -m epub_tts_narrator.renderer` work without installing.
 

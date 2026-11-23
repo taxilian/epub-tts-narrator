@@ -663,11 +663,14 @@ def run_accents_command(bundle, config, args, config_path):
         from .accent_tui import AccentApp
         from .accent_review import AccentController
         controller = AccentController(planner)
+        app = AccentApp(controller, title=bundle["source"]["book"]["title"],
+                        instructions=args.instructions if saved else None)
         try:
-            AccentApp(controller, title=bundle["source"]["book"]["title"],
-                      instructions=args.instructions if saved else None).run()
+            app.run()
         finally:
             controller.close()
+        from epub_tts_narrator.tui_support import end_forced_quit
+        end_forced_quit(app)  # quit while a model request ran: end here, never waiting for its reply
         print(f"Saved accents for {len(planner.pending)} voice(s)." if planner.saved else "Nothing saved.")
         return 0
     review_accent_lines(planner, saved=saved, instructions=args.instructions, apply=args.apply,

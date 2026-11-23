@@ -617,13 +617,22 @@ class AccentApp(VimKeysMixin, CapturePrintMixin, App):
     """``accents BOOK`` on a terminal: the accent screen as the whole app."""
 
     TITLE = "Accents"
+    forced_exit = None  # Quit now's exit code (tui_support.quit_now); the launcher ends the process
     CSS = BASE_CSS
     BINDINGS = [Binding("ctrl+q", "quit_accents", "Quit", show=False, priority=True)]
 
     def __init__(self, controller, *, title="Accents", instructions=None):
         super().__init__()
         self.controller = controller
-        self.accent_screen = AccentScreen(controller, title=title, instructions=instructions, on_close=self.exit)
+        self.accent_screen = AccentScreen(controller, title=title, instructions=instructions, on_close=self._close)
+
+    def _close(self):
+        """Quit; a model request still running is not waited for, since its plan is not kept (quit already asked)."""
+        if self.controller.busy():
+            from epub_tts_narrator.tui_support import quit_now
+            quit_now(self, cleanup=[self.controller.close])
+        else:
+            self.exit()
 
     def get_default_screen(self):
         return self.accent_screen

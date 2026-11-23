@@ -30,7 +30,7 @@ from .run_shell_model import CHAPTER_STATES, RunModel, next_severity, plain_fail
 from .tui_support import prompt_streams, screen_host
 from .tui_widgets import (
     BASE_CSS, CapturePrintMixin, ChoiceScreen, VimKeysMixin, ConfirmScreen, DetailScreen, KeysScreen, PromptBridge,
-    SEVERITY_STYLES, TextEditScreen, format_seconds, highlighted_key, sync_table,
+    QuitWaitScreen, SEVERITY_STYLES, TextEditScreen, format_seconds, highlighted_key, sync_table,
 )
 
 
@@ -1239,6 +1239,13 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
         if not self.model.running:
             self.exit()
             return
+        if any(isinstance(screen, QuitWaitScreen) for screen in self.screen_stack):
+            return  # Already quitting; its dialog offers Quit now.
+        if self.model.stopping:
+            # Already stopping at safe boundaries: quit when that is done (another stop request would force it).
+            self.exit_when_done = True
+            self._wait_to_quit()
+            return
         if self.model.holds:
             message = ("The run is waiting for you to retry failed chapters. Quit? It reports what still failed "
                        "and closes.")
@@ -1246,7 +1253,63 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
             message = ("The command is still running. Stop it at safe boundaries and quit when it has stopped? "
                        "Rerunning the same command resumes from what was saved.")
         self.push_screen(ConfirmScreen(message, title="Quit and stop the run?", danger=True, yes="Stop and quit"),
-                         lambda yes: yes and self._stop(then_exit=True))
+                         lambda yes: yes and (self._stop(then_exit=True), self._wait_to_quit()))
+
+    def _wait_to_quit(self):
+        """Show what the stop still waits for, with Quit now, until the command has stopped."""
+        if not self.model.running:
+            self.exit()
+            return
+        graceful = self.interrupt_scope is not raise_interrupts
+        self.push_screen(QuitWaitScreen(
+            self._still_running, title="Stopping…",
+            waiting=("Stopping at safe boundaries: takes in progress finish verification and are saved, then "
+                     "this closes." if graceful else "Stopping the command, then this closes:"),
+            consequence=("Quit now ends at once: takes in progress are lost; everything verified and saved stays "
+                         "and is reused when you run the same command again." if graceful else
+                         "Quit now ends at once: the step in progress is lost; what it already saved stays, and "
+                         "running the same command again resumes from there.")), self._quit_choice)
+
+    def _still_running(self):
+        model = self.model
+        if not model.running:
+            return []
+        if model.holds and not model.stopping:
+            return ["Finishing: reporting the chapters that still failed"]
+        if self.PROFILE == "task":
+            glance = model.task_glance()
+            step, detail = glance["Step"][0], glance["Step"][1]
+            lines = [f"Step: {step}" + (f" ({detail})" if detail else "")]
+            requests = glance["Model requests"][0]
+            if requests not in {"0", "—"}:
+                lines.append(f"Model requests in progress: {requests}")
+            return lines
+        counts = model.activity()
+        active = [f"{counts[name]} {label}" for name, label in (("generating", "generating"),
+                                                                ("verifying", "verifying or saving"),
+                                                                ("waiting", "waiting for a node"),
+                                                                ("other", "in other steps")) if counts[name]]
+        return ["Takes in progress: " + ", ".join(active)] if active else ["Finishing the stop"]
+
+    def _quit_choice(self, choice):
+        if choice == "now":
+            self._quit_now()
+        elif choice == "done":
+            self.exit()
+        else:
+            self.exit_when_done = False
+            self.notify("Not quitting; the run still stops at safe boundaries. R resumes it once stopped.",
+                        severity="warning", timeout=8)
+
+    def _quit_now(self):
+        """End at once: a render's own immediate stop (it ends its child processes), else the process exit."""
+        from .tui_support import quit_now
+        if self.request_stop is not None and self.interrupt_scope is not raise_interrupts:
+            if not self.model.stopping:
+                self._stop()
+            self._stop()  # a second stop request stops immediately, as a second Ctrl-C does
+            return
+        quit_now(self)
 
     # Resuming ------------------------------------------------------------------
 
@@ -1506,9 +1569,9 @@ def run_in_shell(command, *, title, graceful_render_stop=False, interactive_inpu
     for line in model.closing_lines():
         output(line)
     if app.forced_exit is not None:
-        # A second stop: the terminal is restored; blocked workers must not delay the exit.
-        from .renderer.interrupts import hard_exit
-        hard_exit(app.forced_exit)
+        # A second stop or Quit now: the terminal is restored; blocked workers must not delay the exit.
+        from .tui_support import end_forced_quit
+        end_forced_quit(app)
     if app.raised is not None:
         raise app.raised
     if model.running:

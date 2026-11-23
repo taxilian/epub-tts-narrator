@@ -90,6 +90,7 @@ def sentence_text(sentence, spans):
 
 class PronounceApp(VimKeysMixin, App):
     """Runs ``command(input_fn, output, playback_fn, observer)`` on a worker; its exit code is the result."""
+    forced_exit = None  # Quit now's exit code (tui_support.quit_now); the launcher ends the process
 
     CSS = BASE_CSS + """
     #pron-heading { text-style: bold; height: auto; padding: 0 1; }
@@ -104,7 +105,9 @@ class PronounceApp(VimKeysMixin, App):
     BINDINGS = [Binding("space", "stop_audio", "Stop audio"), Binding("escape", "quit_word", "Quit"),
                 Binding("greater_than_sign", "speed", "Speed"),
                 *[Binding(key, f"command('{key}')", show=False) for key in "pbainers"],
-                Binding("y", "command('y')", show=False), Binding("q", "quit_word", show=False)]
+                Binding("y", "command('y')", show=False), Binding("q", "quit_word", show=False),
+                # Textual's own Ctrl-Q would close the screen and then wait, unseen, for the running step.
+                Binding("ctrl+q", "quit_word", show=False, priority=True)]
 
     def __init__(self, command, *, title="pronounce"):
         super().__init__()
@@ -113,6 +116,7 @@ class PronounceApp(VimKeysMixin, App):
         self.stop_playback = threading.Event()
         self.state, self.waiting, self.result, self.raised = None, False, 0, None
         self.player, self.help_base = None, ""
+        self.status_text = ""
 
     def compose(self) -> ComposeResult:
         yield Static(Text(self.title_text), id="pron-heading")
@@ -188,6 +192,7 @@ class PronounceApp(VimKeysMixin, App):
             self.set_status(text if len(text) < 160 else text[:157] + "…")
 
     def set_status(self, text):
+        self.status_text = text
         self.query_one("#pron-status", Static).update(Text(text))
 
     def set_waiting(self, waiting):
@@ -307,9 +312,33 @@ class PronounceApp(VimKeysMixin, App):
         self.stop_playback.set()
 
     def action_quit_word(self):
+        self.request_quit()
+
+    def request_quit(self):
+        """Quit as ``q`` does; while a step runs (an audition being made or checked), wait for it with Quit now."""
+        from epub_tts_narrator.tui_widgets import QuitWaitScreen
         self.stop_playback.set()
         if self.waiting:
             self.answer("q")
+            return
+        if any(isinstance(screen, QuitWaitScreen) for screen in self.screen_stack):
+            return
+        self.push_screen(QuitWaitScreen(
+            lambda: [] if self.waiting else [self.status_text or "Working on the next step"],
+            waiting="Quitting when this step finishes (choices you made are saved):",
+            consequence="Quit now ends at once: the step in progress is lost; every choice already saved stays."),
+            self._quit_choice)
+
+    def _quit_choice(self, choice):
+        if choice == "done":
+            self.answer("q")
+        elif choice == "now":
+            from epub_tts_narrator.tui_support import quit_now
+            quit_now(self, cleanup=[self.stop_playback.set, self._stop_player])
+
+    def _stop_player(self):
+        if self.player is not None:
+            self.player.stop()
 
     def on_unmount(self):
         # Closing the screen ends input, which the tool treats as quitting with its draft kept.
@@ -321,6 +350,8 @@ def run_pronounce_app(command, *, title):
     """Run ``command`` (see ``PronounceApp``) full-screen; print its messages afterwards and return its code."""
     app = PronounceApp(command, title=title)
     result = app.run()
+    from epub_tts_narrator.tui_support import end_forced_quit
+    end_forced_quit(app)  # Quit now: end here, never waiting for the step in progress
     if app.raised is not None:
         raise app.raised
     return result if isinstance(result, int) else app.result
@@ -355,7 +386,8 @@ class PronunciationQueueApp(PronounceApp):
     #queue-detail { height: auto; border: round $primary-background; padding: 0 1; margin-bottom: 1; }
     """
     PLAYING = "▶ Listening… any key interrupts and goes back five words."
-    BINDINGS = [Binding("escape,q", "command('q')", "Quit"), Binding("s", "command('s')", "Listen"),
+    BINDINGS = [Binding("escape,q", "command('q')", "Quit"), Binding("ctrl+q", "command('q')", show=False, priority=True),
+                Binding("s", "command('s')", "Listen"),
                 Binding("greater_than_sign", "speed", "Speed"),
                 *[Binding(key, f"command('{key}')", show=False) for key in "becirop"],
                 Binding("O", "command('o all')", show=False)]
@@ -456,10 +488,14 @@ class PronunciationQueueApp(PronounceApp):
         if not self.waiting and len(self.screen_stack) == 1 and event.character != playback_speed.KEY:
             self.stop_playback.set()
             event.stop()
+            if event.key in {"q", "escape", "ctrl+q"}:
+                self.request_quit()
 
     COMMANDS = frozenset({"s", "play", "b", "e", "p", "c", "i", "r", "o", "o all", "q"})
 
     def action_command(self, key):
+        if key == "q" and not self.waiting:
+            return self.request_quit()
         if not self.waiting or key not in self.COMMANDS:
             return
         row = self._selected()
@@ -508,6 +544,8 @@ def _word_reading_check(key):
 def run_queue_app(command, *, title):
     app = PronunciationQueueApp(command, title=title)
     result = app.run()
+    from epub_tts_narrator.tui_support import end_forced_quit
+    end_forced_quit(app)  # Quit now: end here, never waiting for the step in progress
     if app.raised is not None:
         raise app.raised
     return result if isinstance(result, int) else app.result

@@ -259,6 +259,68 @@ class ConfirmScreen(Dialog):
         self.dismiss(event.button.id == "yes")
 
 
+class QuitWaitScreen(Dialog):
+    """Quitting waits for work in progress: say what it is, live, and offer to quit at once.
+
+    ``describe()`` returns the lines saying what is still running; it is called
+    every half second on the screen's thread, so it must be cheap. When it
+    returns nothing the work is done and the dialog closes with ``"done"``.
+    Quit now (``Q``) closes it with ``"now"`` and Don't quit (Escape, when
+    ``can_cancel``) with ``"cancel"``. ``consequence`` says what Quit now loses.
+    """
+
+    DEFAULT_CSS = BASE_CSS
+    BINDINGS = [Binding("Q", "answer('now')", "Quit now"), Binding("escape,n", "answer('cancel')", "Don't quit")]
+
+    def __init__(self, describe, *, title="Quitting…", waiting="Quitting when this finishes:",
+                 consequence="Quit now ends at once: work in progress is lost, and everything already saved stays.",
+                 can_cancel=True, clock=time.monotonic):
+        super().__init__()
+        self.describe, self.title_text, self.waiting = describe, title, waiting
+        self.consequence, self.can_cancel, self.clock = consequence, can_cancel, clock
+        self.started = clock()
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog"):
+            yield Label(Text(self.title_text), classes="dialog-title")
+            yield Static(Text(self.waiting))
+            yield Static("", id="quit-wait-work")
+            yield Static("", id="quit-wait-elapsed", classes="dialog-help")
+            with Horizontal(classes="dialog-buttons"):
+                if self.can_cancel:
+                    yield Button("Don't quit", id="cancel", variant="primary")
+                yield Button("Quit now", id="now", variant="error")
+            yield Static(Text(self.consequence + " Q quits now" + ("; Escape keeps working." if self.can_cancel
+                                                                     else ".")), classes="dialog-help")
+
+    def on_mount(self):
+        self.query_one("#cancel" if self.can_cancel else "#now", Button).focus()
+        self._refresh()
+        self.set_interval(0.5, self._refresh)
+
+    def _refresh(self):
+        if self._dismissed_once:
+            return
+        try:
+            lines = list(self.describe())
+        except Exception as error:  # noqa: BLE001 - the dialog must stay usable to quit now
+            lines = [f"(could not tell what is running: {type(error).__name__})"]
+        if not lines:
+            self.dismiss("done")
+            return
+        self.query_one("#quit-wait-work", Static).update(Text("\n".join("• " + line for line in lines)))
+        self.query_one("#quit-wait-elapsed", Static).update(
+            Text(f"Waiting {int(self.clock() - self.started)} s"))
+
+    def action_answer(self, value):
+        if value == "cancel" and not self.can_cancel:
+            return
+        self.dismiss(value)
+
+    def on_button_pressed(self, event):
+        self.action_answer(event.button.id)
+
+
 class KeysScreen(Dialog):
     """List every key an app binds, including ones the footer has no room for."""
 

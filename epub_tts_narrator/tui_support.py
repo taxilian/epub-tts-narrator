@@ -107,3 +107,52 @@ def screen_host(show):
 def active_screen_host():
     """The open full-screen UI's ``show(make_screen)``, or ``None``."""
     return _SCREEN_HOST
+
+
+# How long a closing screen may take to give the terminal back before Quit now ends the process anyway.
+FORCED_EXIT_GRACE_SECONDS = 3.0
+
+
+def quit_now(app, *, code=130, cleanup=(), grace=FORCED_EXIT_GRACE_SECONDS):
+    """Close a full-screen UI and end its process at once, without waiting for work in progress.
+
+    Quitting normally waits for running work, and Python itself waits at exit
+    for worker threads (Textual runs thread workers in the default executor).
+    ``cleanup`` steps (stopping audio, cancelling queued jobs) run first; each
+    must be quick, and a failing one never stops the exit. The screen then
+    closes the ordinary way, so Textual restores the terminal, and the
+    launcher calls ``end_forced_quit`` once ``App.run`` returns. A screen that
+    has not closed within ``grace`` seconds ends the process anyway. Nothing
+    else is lost: every save is atomic and every lock is released by the
+    operating system with the process (``run_locks`` uses ``flock``), and
+    long commands resume from what they saved. ``app.exit_process`` (tests)
+    replaces the real process exit.
+    """
+    import threading
+    for step in cleanup:
+        try:
+            step()
+        except Exception:  # noqa: BLE001 - nothing may delay the exit
+            pass
+    app.forced_exit = code
+    timer = threading.Timer(grace, _leave, (app, code))
+    timer.daemon = True
+    timer.start()
+    try:
+        app.call_from_thread(app.exit)
+    except RuntimeError:  # Already on the screen's own thread.
+        app.exit()
+
+
+def end_forced_quit(app):
+    """After ``app.run()``: when the person chose Quit now, end the process here (the terminal is restored)."""
+    code = getattr(app, "forced_exit", None)
+    if code is not None:
+        _leave(app, code)
+
+
+def _leave(app, code):
+    leave = getattr(app, "exit_process", None)
+    if leave is None:
+        from .renderer.interrupts import hard_exit as leave
+    leave(code)

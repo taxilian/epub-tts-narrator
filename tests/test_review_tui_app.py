@@ -241,6 +241,33 @@ class ReviewTuiAppTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(key, keys)
 
 
+    async def test_quitting_during_a_save_waits_in_a_dialog_that_can_quit_now(self):
+        import threading
+        from epub_tts_narrator.tui_widgets import QuitWaitScreen
+        root = self.root
+        for key, forced in (("none", None), ("Q", 130)):
+            self.root = root / key  # each pass publishes its own book
+            self.root.mkdir()
+            app = self.make()
+            app.exit_process = []
+            app.exit_process = app.exit_process.append
+            release = threading.Event()
+            self.addCleanup(release.set)
+            async with app.run_test(size=(150, 45)) as pilot:
+                app.run_worker(lambda: release.wait(10), thread=True, group="save")  # a save still writing
+                await pilot.pause(0.2)
+                await pilot.press("q")
+                await self.wait_for(pilot, lambda: isinstance(app.screen, QuitWaitScreen))
+                self.assertIn("Saving your edits", app.screen.describe())
+                if key == "none":
+                    release.set()
+                else:
+                    await pilot.press(key)
+                await self.wait_for(pilot, lambda: not app.is_running)
+            release.set()
+            self.assertEqual(app.forced_exit, forced)
+
+
 class ReviewUiCliTests(unittest.TestCase):
     def test_a_terminal_opens_the_full_screen_review_and_plain_keeps_curses(self):
         book = Path("/books/fixture")

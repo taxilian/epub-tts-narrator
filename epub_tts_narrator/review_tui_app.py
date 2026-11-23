@@ -44,6 +44,7 @@ def _severity(notice, ok=True):
 
 class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
     """Browse and edit a published book. ``controller`` owns all state; this class only displays it."""
+    forced_exit = None  # Quit now's exit code (tui_support.quit_now); the launcher ends the process
 
     TITLE = "Review"
     CSS = BASE_CSS + """
@@ -427,10 +428,37 @@ class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
                 self.exit()
         self.call_from_thread(done)
 
-    def action_quit_review(self):
-        if not self.controller.pending:
-            self.action_stop()
+    BUSY_WORK = {"save": "Saving your edits", "takes": "Switching the accepted take"}
+
+    def _busy_work(self):
+        """What a background save or take switch is still doing; empty when nothing runs."""
+        return [self.BUSY_WORK[worker.group] for worker in self.workers
+                if worker.group in self.BUSY_WORK and worker.is_running]
+
+    def _quit_when_idle(self):
+        """Quit; while a save or take switch runs, wait for it in a dialog that offers Quit now."""
+        from .tui_widgets import QuitWaitScreen
+        self.action_stop()
+        if not self._busy_work():
             self.exit()
+            return
+        if any(isinstance(screen, QuitWaitScreen) for screen in self.screen_stack):
+            return
+
+        def chosen(choice):
+            if choice == "done":
+                self.exit()
+            elif choice == "now":
+                from .tui_support import quit_now
+                quit_now(self, cleanup=[self.action_stop])
+        self.push_screen(QuitWaitScreen(
+            self._busy_work, waiting="Quitting when this finishes:",
+            consequence="Quit now ends at once: a save in progress may not finish, so its edits may need saving "
+                        "again; everything saved before stays."), chosen)
+
+    def action_quit_review(self):
+        if not self.controller.pending or self._busy_work():
+            self._quit_when_idle()
             return
 
         def chosen(value):
@@ -438,8 +466,7 @@ class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
                 self._log("Saving…")
                 self.run_worker(lambda: self._save(then_exit=True), thread=True, exclusive=True, group="save")
             elif value == "discard":
-                self.action_stop()
-                self.exit()
+                self._quit_when_idle()
         count = len(self.controller.pending)
         self.push_screen(ChoiceScreen(
             f"{count} unsaved edit(s). Save them before quitting?",
@@ -606,5 +633,8 @@ def run_review_tui(directory, *, player_command=None):
     controller = ReviewApp(directory, document, revise_directories=revise_directories,
                            related_directories=related_directories,
                            player=_audio_player(player_command or ["/usr/bin/afplay"]))
-    ReviewTuiApp(controller).run()
+    app = ReviewTuiApp(controller)
+    app.run()
+    from .tui_support import end_forced_quit
+    end_forced_quit(app)  # Quit now: end here, never waiting for a save in progress
     return controller
