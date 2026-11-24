@@ -355,6 +355,23 @@ class PronunciationsTests(unittest.TestCase):
         self.assertEqual({entry["word"]: entry["status"] for entry in load_pronunciations(directory, group_cases=False)},
                          {"Mara": "ignored", "mara": "ignored", "Marah": "pending"})
 
+    def test_a_large_book_manifest_and_source_do_not_hit_the_registry_size_limit(self):
+        directory = self.root / "large"
+        directory.mkdir()
+        document = {"source": {"book": {"id": "large-test"}, "blocks": [{"id": "b1", "text": "Mara spoke."}]}, "cast": {}}
+        write_json(directory / "source.json", document["source"])
+        write_json(directory / "manifest.json", {"source_fingerprint": fingerprint(document["source"])})
+        save_candidates(directory, document, [candidate()])
+        for name in ("source.json", "manifest.json"):
+            # Long analysis provenance makes real books' manifests larger than any pronunciation file.
+            with (directory / name).open("a", encoding="utf-8") as handle:
+                handle.write(" " * (17 * 1024 * 1024))
+        self.assertEqual([entry["word"] for entry in load_pronunciations(directory)], ["Mara"])
+        with (directory / "pronunciations.json").open("a", encoding="utf-8") as handle:
+            handle.write(" " * (17 * 1024 * 1024))
+        with self.assertRaisesRegex(ValueError, "exceeds its size limit"):
+            load_pronunciations(directory)
+
 
 if __name__ == "__main__":
     unittest.main()

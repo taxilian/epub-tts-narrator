@@ -317,10 +317,11 @@ def _plain(value, maximum):
             and not any(unicodedata.category(character) in {"Cc", "Cf", "Cs"} for character in value))
 
 
-def _regular_json(path):
+def _regular_json(path, *, limited=True):
+    """Read a JSON file; ``limited=False`` for the book's own source and manifest, whose size the analysis sets."""
     if path.is_symlink() or not path.is_file():
         raise ValueError("Name pronunciation metadata must be stored in a regular file")
-    if path.stat().st_size > 32 * 1024 * 1024:
+    if limited and path.stat().st_size > 32 * 1024 * 1024:
         raise ValueError("Name pronunciation metadata exceeds its size limit")
     def reject(value):
         raise ValueError("Name pronunciation metadata contains a non-finite value")
@@ -328,7 +329,7 @@ def _regular_json(path):
 
 
 def _book_id(directory):
-    source = _regular_json(Path(directory) / "source.json")
+    source = _regular_json(Path(directory) / "source.json", limited=False)
     if not isinstance(source, dict) or not isinstance(source.get("book"), dict) or not isinstance(source["book"].get("id"), str):
         raise ValueError("Name pronunciations require this book's source")
     return source["book"]["id"]
@@ -467,7 +468,7 @@ def _fold_keys(record):
 def _owners(directory):
     directory = Path(directory).resolve()
     manifest = directory / "manifest.json"
-    if manifest.exists() and isinstance(_regular_json(manifest).get("continuation"), dict):
+    if manifest.exists() and isinstance(_regular_json(manifest, limited=False).get("continuation"), dict):
         from .analysis_directory import continuation_directories
         return [directory, *continuation_directories(directory)]
     return [directory]

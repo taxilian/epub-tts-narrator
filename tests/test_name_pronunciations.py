@@ -214,6 +214,18 @@ class StorageTaggingAndRenderTests(unittest.TestCase):
                 for control in chunk.get("expressive_performance", {}).get("controls", [])
                 if control["kind"] == "pronunciation"]
 
+    def test_a_large_book_manifest_and_source_do_not_hit_the_record_size_limit(self):
+        save_definition(self.directory, "Rose", "R OW1 Z", status="confirmed", source="manual")
+        for name in ("source.json", "manifest.json"):
+            # Long analysis provenance makes real books' manifests larger than any pronunciation record.
+            with (self.directory / name).open("a", encoding="utf-8") as handle:
+                handle.write(" " * (33 * 1024 * 1024))
+        self.assertEqual(effective_definitions(self.directory)["rose"]["phonemes"], "R OW1 Z")
+        with (self.directory / FILENAME).open("a", encoding="utf-8") as handle:
+            handle.write(" " * (33 * 1024 * 1024))
+        with self.assertRaisesRegex(ValueError, "exceeds its size limit"):
+            effective_definitions(self.directory)
+
     def test_draft_checkpoints_never_change_rendering_until_confirmed(self):
         before = make_plan(self.bundle, self.config)
         save_definition(self.directory, "Rose", ROSE, status="draft", source="model", respelling="SAL")

@@ -107,10 +107,11 @@ def validate_entry(entry, source):
     return deepcopy(entry)
 
 
-def _regular_json(path):
+def _regular_json(path, *, limited=True):
+    """Read a JSON file; ``limited=False`` for the book's own source and manifest, whose size the analysis sets."""
     if path.is_symlink() or not path.is_file():
         raise ValueError("Pronunciation metadata must be stored in a regular file")
-    if path.stat().st_size > 16 * 1024 * 1024:
+    if limited and path.stat().st_size > 16 * 1024 * 1024:
         raise ValueError("Pronunciation metadata exceeds its size limit")
     def reject(value):
         raise ValueError("Pronunciation metadata contains a non-finite value")
@@ -118,13 +119,13 @@ def _regular_json(path):
 
 
 def _source(directory):
-    source = _regular_json(directory / "source.json")
+    source = _regular_json(directory / "source.json", limited=False)
     if (not isinstance(source, dict) or not isinstance(source.get("book"), dict)
             or not isinstance(source["book"].get("id"), str) or not isinstance(source.get("blocks"), list)):
         raise ValueError("Pronunciation metadata requires this book's source")
     manifest_path = directory / "manifest.json"
     if manifest_path.exists() or manifest_path.is_symlink():
-        manifest = _regular_json(manifest_path)
+        manifest = _regular_json(manifest_path, limited=False)
         if manifest.get("source_fingerprint") != fingerprint(source):
             raise ValueError("Pronunciation source differs from the book manifest")
     return source
@@ -188,7 +189,7 @@ def load_pronunciations(directory, *, group_cases=True, scope=None):
     manifest_path = directory / "manifest.json"
     ancestors = []
     if manifest_path.exists() or manifest_path.is_symlink():
-        manifest = _regular_json(manifest_path)
+        manifest = _regular_json(manifest_path, limited=False)
         if manifest.get("continuation") is not None:
             from .analysis_directory import continuation_directories
             ancestors = continuation_directories(directory)
