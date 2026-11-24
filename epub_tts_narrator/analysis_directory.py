@@ -12,7 +12,7 @@ import stat
 import threading
 
 from .analysis_progress import CACHE_DIRNAME, PENDING_DIRNAME, is_pending_directory
-from .contracts import readiness, review_items, validate_document
+from .contracts import manifest_provenance, readiness, review_items, validate_document
 from .pipeline import fingerprint, write_json
 from .series import load_registry, save_registry, validate_registry
 
@@ -237,7 +237,7 @@ def _check_completed_directory(directory):
         if (manifest.get("source_fingerprint") != source_hash
                 or manifest.get("book") != document["source"]["book"]
                 or manifest.get("chapters") != document["source"]["chapters"]
-                or manifest.get("provenance") != document["provenance"]
+                or manifest.get("provenance") not in (manifest_provenance(document["provenance"]), document["provenance"])
                 or not _readiness_matches(manifest.get("readiness"), state)
                 or _read_json(directory / "source.json") != document["source"]
                 or _read_json(directory / "cast.json") != document["cast"]

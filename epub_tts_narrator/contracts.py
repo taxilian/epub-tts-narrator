@@ -499,6 +499,26 @@ def has_assigned_speakers(segment: Any) -> bool:
                for key in ("role_id", "voice_id"))
 
 
+# Provenance sections that only audit how the analysis decided its cast and voices (every
+# identity case and vote, the candidate ledger, every voice pair compared). Nothing reads them
+# back, so a bundle manifest leaves them out; the analysis document (``analysis.json``) keeps them.
+AUDIT_ONLY_PROVENANCE = ("identity_consensus", "voice_ensemble", "casting")
+
+
+def manifest_provenance(provenance: Any) -> Any:
+    """``provenance`` as a bundle manifest stores it: without the audit-only sections.
+
+    Book update records also drop their ``analysis``, the delta analysis's own complete provenance.
+    """
+    if not isinstance(provenance, dict):
+        return provenance
+    kept = {key: value for key, value in provenance.items() if key not in AUDIT_ONLY_PROVENANCE}
+    if isinstance(kept.get("book_updates"), list):
+        kept["book_updates"] = [{key: value for key, value in update.items() if key != "analysis"}
+                                if isinstance(update, dict) else update for update in kept["book_updates"]]
+    return kept
+
+
 def review_items(document: Any) -> list[dict[str, Any]]:
     """Return advisory issues and flagged or unassigned segments for optional edits."""
     if not isinstance(document, dict):

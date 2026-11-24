@@ -109,6 +109,33 @@ class AnalysisDirectoryTests(unittest.TestCase):
         self.assertEqual(self.read(output / "analysis.json"), document)
         self.assertFalse(list(self.root.glob(".audiobook-analysis-*")))
 
+    def test_manifest_leaves_the_audit_trail_to_the_analysis_and_older_full_manifests_still_load(self):
+        output = self.root / "audited"
+        registry = fresh_registry(output)
+        document = link_analysis(fixture(), registry)
+        audit = {"cases": [{"verdicts": ["same"] * 3}]}
+        document["provenance"].update(identity_consensus=audit, voice_ensemble={"contrast_findings_before": []},
+                                      casting={"candidate_ledger": {}},
+                                      book_updates=[{"version": 2, "epub_sha256": "e" * 64, "analysis": {"casting": {}}}])
+        publish_directory(document, registry, output, export_bundle)
+        manifest = self.read(output / "manifest.json")
+        for section in ("identity_consensus", "voice_ensemble", "casting"):
+            self.assertNotIn(section, manifest["provenance"])
+        self.assertEqual(manifest["provenance"]["book_updates"], [{"version": 2, "epub_sha256": "e" * 64}])
+        self.assertEqual(manifest["provenance"]["series"], document["provenance"]["series"])
+        saved = self.read(output / "analysis.json")
+        self.assertEqual(saved["provenance"]["identity_consensus"], audit)
+        self.assertEqual(saved["provenance"]["book_updates"][0]["analysis"], {"casting": {}})
+        _completed_directory(output)
+        # A book saved before the manifest left the audit out carries all of it there.
+        manifest["provenance"] = saved["provenance"]
+        write_json(output / "manifest.json", manifest, overwrite=True)
+        _completed_directory(output)
+        manifest["provenance"] = dict(saved["provenance"], identity_consensus={"cases": []})
+        write_json(output / "manifest.json", manifest, overwrite=True)
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            _completed_directory(output)
+
     def test_assigned_analysis_is_ready_with_advisory_notes_preserved(self):
         output = self.root / "draft"
         registry = fresh_registry(output)

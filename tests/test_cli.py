@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.cli import export_bundle, main, read_json
+from epub_tts_narrator.contracts import manifest_provenance
 from epub_tts_narrator.pipeline import fingerprint, write_json
 from epub_tts_narrator.provider import ProviderError
 from epub_tts_narrator.series import link_analysis, load_registry, save_registry
@@ -455,7 +456,7 @@ class CLITests(unittest.TestCase):
             self.assertEqual(before, {key: row[key] for key in before})
         self.assertEqual(read_json(target / "source.json"), doc["source"])
         self.assertEqual(read_json(target / "cast.json"), doc["cast"])
-        self.assertEqual(manifest["provenance"], doc["provenance"])
+        self.assertEqual(manifest["provenance"], manifest_provenance(doc["provenance"]))
         self.assertEqual(set(manifest["sha256"]),
                          {"source.json", "cast.json", "review.json", *(entry["path"] for entry in entries)})
         self.assertEqual({str(path.relative_to(target)) for path in target.rglob("*") if path.is_file()},

@@ -15,7 +15,7 @@ import sys
 from . import __version__
 from .chapter_partitions import script_partitions
 from .config import load_config, resolve_config_path
-from .contracts import readiness, review_items, validate_document
+from .contracts import manifest_provenance, readiness, review_items, validate_document
 from .epub import extract_epub
 from .source_epub import SOURCE_EPUB_HINT, copy_source_epub_hint, remember_source_epub
 from .pipeline import (CachedRequests, analyze, apply_edits, check_cast, fingerprint,
@@ -163,7 +163,7 @@ def export_bundle(document, output, *, allow_review=False, source_epub=None, sou
             "files": {"source": "source.json", "cast": "cast.json", "review": "review.json",
                       "scripts": scripts},
             "sha256": {name: hashlib.sha256((staging / name).read_bytes()).hexdigest() for name in names},
-            "provenance": document["provenance"],
+            "provenance": manifest_provenance(document["provenance"]),
         }
         write_json(staging / "manifest.json", manifest)
         if {path.name for path in output.iterdir()} - {staging.name}:
