@@ -98,6 +98,20 @@ class ReadingCostTests(unittest.TestCase):
         self.assertFalse(said_right(reading, "l a n z ɑː k i"))  # "ah" is still another vowel
         self.assertFalse(said_right(reading, "l a n s k iː"))  # and a dropped stressed syllable a misreading
 
+    def test_the_main_stress_may_move_back_to_an_earlier_secondary_stress(self):
+        reading = "Z AE2 N D R AH0 M AH1 S"  # zan-druh-MUS
+        for heard in ("z æ n d ɹ ə m ɪ s", "z æ n d ɚ m ɪ s", "w ɜː z æ n d ɹ ɚ m ɪ s ɪ"):  # ZAN-druh-mis, marked good
+            with self.subTest(heard=heard):
+                self.assertTrue(said_right(reading, heard))
+        for heard in ("z a n d ɹ ɑː m ɪ s",  # zan-DRAH-mis, marked bad: the stress went to an unstressed syllable
+                      "z eɪ n d ɹ ə m ɪ s",  # the syllable it moved to keeps its own vowel
+                      "z æ n d ɹ ə m s"):  # and the one that lost it is still said
+            with self.subTest(heard=heard):
+                self.assertFalse(said_right(reading, heard))
+        # Never forward: HET-ar is not "huh-TAR", nor DAH-reen "duh-REEN".
+        self.assertFalse(said_right("HH EH1 T AA2 R", "h ə t ɑː ɹ"))
+        self.assertFalse(said_right("D AA1 R IY2 N", "d ə ɹ iː n"))
+
     def test_tokens_of_other_languages_are_read_as_english_phones(self):
         self.assertTrue(said_right(READING, "m ə5 ɹ ɛ n ts. ɹ ə"))  # tone digit, stray period
         self.assertTrue(said_right("V AE0 L AO1 R AH0 N", "v ə l oːɹ ɹ ə n"))  # an r-coloured vowel before its R

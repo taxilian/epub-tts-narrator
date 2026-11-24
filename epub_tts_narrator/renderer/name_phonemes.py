@@ -27,7 +27,10 @@ before an R ("Mary", "marry", "merry"), as do the back vowels ("lore",
 "lower"); an L ending a syllable may be swallowed and colours the vowel before
 it ("Pulgara" for P AH1 L G ...); an R or L inside a consonant cluster may be
 swallowed; a stop may slip in between a nasal and the fricative after it
-("prince" said as "prints", N Z heard as "n d z"); two neighbouring vowels may glide into one ("TAH-or" heard as one
+("prince" said as "prints", N Z heard as "n d z"); the main stress may move
+back to an earlier syllable the reading gives secondary stress, the one that
+lost it heard weak ("ZAN-druh-mis" for Z AE2 N D R AH0 M AH1 S), but never
+forward ("huh-TAR" for HH EH1 T AA2 R); two neighbouring vowels may glide into one ("TAH-or" heard as one
 syllable); an ER vowel may be said without its R ("DAH-nik") or written with
 it after the vowel; a nasal beside a vowel or a breath the reading lacks costs
 little; a consonant at the name's very edge, where word timings clip the
@@ -64,13 +67,14 @@ import threading
 
 # Verdicts' identity: saved verdicts and the verdict store are read only
 # under this version, so any change to how a name is heard bumps it.
-VERSION = 7
+VERSION = 8
 # Bumped only when the check may fail a take it passed before: it names the
 # check in validation keys and in the sweep of takes in use, so a change that
 # only accepts more never re-verifies or re-sweeps a book. (3: an R written
 # twice is one sound. 4: ER without its R, a nasal or breath beside a vowel,
 # another language's sounds are uncertain. 7: a stop between a nasal and a
-# fricative costs little; a stressed EH may be heard as "a". Strictness 3: a secondary-stressed
+# fricative costs little; a stressed EH may be heard as "a". 8: the main stress
+# may move back to an earlier secondary stress. Strictness 3: a secondary-stressed
 # vowel may not cross to the other side of the mouth. Strictness 4: the wider
 # window counts only a match heard mostly on the name, not on other words.)
 STRICTNESS = 4
@@ -133,6 +137,14 @@ _ASPIRATED = {"t", "k", "p", "tɕ", "ts", "ʈ"}
 _EPENTHETIC = {"N": {"d", "t"}, "M": {"p", "b"}, "NG": {"k", "ɡ"}}
 _FRICATIVES = frozenset({"S", "Z", "SH", "ZH", "TH", "DH", "F", "V"})
 _EPENTHETIC_COST = 0.2
+# The weak vowel a syllable that lost its stress is heard with (eSpeak writes it several ways).
+_REDUCED = frozenset({"ə", "ɪ", "ᵻ", "ɨ", "ɐ"})
+_STRESS_MOVE_COST = 0.2
+
+
+def _full(phone):
+    """A long or gliding vowel: one a listener hears as stressed."""
+    return phone.endswith("ː") or phone in {"aɪ", "aʊ", "eɪ", "oʊ", "ɔɪ", "oɪ", "əʊ"}
 _R_SYMBOLS = {"r", "ʁ", "ɻ"}
 
 
@@ -231,14 +243,48 @@ def core(reading, phones):
     return tuple(_normalize(phones)[start:end])
 
 
+def _secondary(reading):
+    """Per target of ``_targets(reading)``: whether it is a vowel with secondary stress."""
+    from ..performance_plan import phoneme_symbols
+    return [symbol.endswith("2") for symbol in phoneme_symbols(reading)
+            if symbol.rstrip("012") in _KINDS or symbol.rstrip("012") in _CONSONANTS]
+
+
 def _align(reading, phones):
-    """``(cost, start, end)``: the cheapest alignment and the stretch of normalized ``phones`` it covers."""
+    """``(cost, start, end)``: the cheapest alignment and the stretch of normalized ``phones`` it covers.
+
+    The reading is aligned as written and, for each vowel before the main
+    stress that it gives secondary stress, with the main stress moved back
+    there (``_aligned``); the cheapest wins.
+    """
     targets = _targets(reading)
     if not targets:
         return 0.0, 0, 0
-    from ..performance_plan import phoneme_symbols
-    secondary = [symbol.endswith("2") for symbol in phoneme_symbols(reading)
-                 if symbol.rstrip("012") in _KINDS or symbol.rstrip("012") in _CONSONANTS]
+    secondary = _secondary(reading)
+    primary = next((index for index, (sort, _, stressed) in enumerate(targets) if sort == "vowel" and stressed), 0)
+    moves = [index for index in range(primary) if targets[index][0] == "vowel" and secondary[index]]
+    return min((_aligned(reading, phones, moved_to) for moved_to in [None, *moves]), key=lambda found: found[0])
+
+
+def _aligned(reading, phones, moved_to=None):
+    """``_align`` for one stress placement: as written, or with the main stress on vowel ``moved_to``.
+
+    English speakers often move a word's main stress back to an earlier
+    syllable that carries secondary stress (as in "JAP-a-nese GAR-den"), and
+    in a name a listener hears the same name: "ZAN-druh-mis" for Z AE2 N D R
+    AH0 M AH1 S. Never forward: "huh-TAR" is not HH EH1 T AA2 R. With the
+    stress moved, that vowel must keep its kind, the vowel that lost the
+    stress must still be heard, weak (``_REDUCED``), and no other vowel may be
+    heard long or gliding (``_full``) or as a full extra vowel, which would put
+    the stress somewhere else again ("zan-DRAH-mis").
+    """
+    targets = _targets(reading)
+    secondary = _secondary(reading)
+    reduced = [False] * len(targets)
+    if moved_to is not None:
+        reduced = [sort == "vowel" and stressed for sort, _, stressed in targets]
+        targets = [(sort, symbol, index == moved_to) for index, (sort, symbol, _) in enumerate(targets)]
+        secondary[moved_to] = False
     phones = _normalize(phones)
     count = len(targets)
 
@@ -259,6 +305,10 @@ def _align(reading, phones):
             return 0.3 if phone in _VOICING.get(symbol, ()) else 1.0
         if not _is_vowel(phone):
             return 1.0
+        if reduced[index]:
+            return 0.0 if phone in _REDUCED else 1.0
+        if moved_to is not None and not stressed and not secondary[index] and _full(phone):
+            return 1.0
         if secondary[index] and phone not in _KINDS[symbol] and _crosses(symbol, phone):
             # A secondary stress keeps its side of the mouth: "seh-" may reduce
             # to "sih-"/"suh-" (ə) but not become "soo-" or "sur-".
@@ -273,6 +323,8 @@ def _align(reading, phones):
 
     def drop(index):  # a reading sound not heard
         sort, symbol, stressed = targets[index]
+        if reduced[index]:
+            return 1.0  # the syllable that lost the stress is still said
         if sort == "vowel":
             # A secondary stress is a syllable a listener hears: dropping it
             # and hearing another vowel instead is not cheaper than swapping.
@@ -284,6 +336,8 @@ def _align(reading, phones):
         return 0.5 if index in (0, count - 1) else 1.0
 
     def extra(phone):  # a heard sound the reading lacks, inside the name
+        if moved_to is not None and _is_vowel(phone) and phone not in _REDUCED | {"ɚ"}:
+            return 1.0  # a full syllable of its own: the stress moved elsewhere
         return 0.3 if _is_vowel(phone) else _WEAK_EXTRA.get(phone, 1.0)
 
     def glides(index, phone):  # two reading vowels heard as one gliding vowel
@@ -313,6 +367,8 @@ def _align(reading, phones):
             table[i][j] = min(options, key=lambda option: option[0])
     end = min(range(cols + 1), key=lambda j: table[rows][j][0])
     spent, start = table[rows][end]
+    if moved_to is not None:
+        spent += _STRESS_MOVE_COST
     return round(spent, 2), start, end
 
 
