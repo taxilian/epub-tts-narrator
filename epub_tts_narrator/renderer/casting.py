@@ -1902,8 +1902,9 @@ class CastingSession:
         them makes no model call. ``attempts`` is ``_attempts_by_voice()``, when
         the caller lists several voices.
         """
-        voice_id = self.store.canonical_id(voice_id)
+        # The profile by this book's voice ID: an inherited voice's canonical ID is an earlier book's.
         profile = self._profile(voice_id)
+        voice_id = self.store.canonical_id(voice_id)
         attempts = self._attempts_by_voice() if attempts is None else attempts
         published = {candidate.get("reference_sha256") for candidate in self.store.list_candidates(voice_id)}
         found = []
