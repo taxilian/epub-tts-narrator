@@ -214,6 +214,13 @@ def _sound_alike(expected, actual):
         return False
 
 
+def _phoneme_misread(report):
+    """Whether a report failed only because the phoneme check heard a chosen reading said otherwise."""
+    words = (report.get("name_phonemes") or {}).get("words") if isinstance(report.get("name_phonemes"), dict) else None
+    return (report.get("reasons") == ["pronunciation_mismatch"] and not isinstance(report.get("name_shape"), dict)
+            and isinstance(words, list) and any(isinstance(word, dict) and word.get("ok") is False for word in words))
+
+
 def _verification_failure_detail(report):
     """Summarize a few contiguous lexical edits without dumping the script.
 
@@ -221,7 +228,9 @@ def _verification_failure_detail(report):
     others are not, the ones that actually failed come first, with a word of
     context on each side, so a dropped word is not hidden behind "+N more".
     """
-    if isinstance(report.get("name_shape"), dict):
+    if isinstance(report.get("name_shape"), dict) or _phoneme_misread(report):
+        # A chosen pronunciation rejected by its shape or its phonemes: what
+        # was heard for the name, not the word transcript that passed.
         from .name_shape import describe
         return describe(report)
     alignment = report.get("metrics", {}).get("alignment", [])
@@ -441,13 +450,21 @@ def _rechecks_under_new_policy(previous, validation_key, text, *, stall_limit=No
     rules. So may a take rejected only for one long pause that stall recovery
     (``stall_recovery``) has never assessed, or judged too long under a lower
     limit, when it is available and the pause is within its limit. Checking unchanged audio again costs one recognition,
-    while a new take costs a synthesis. History echoes and other acoustic
-    failures are never rechecked, and neither recheck repeats.
+    while a new take costs a synthesis. So may a take the phoneme check
+    (``name_phonemes``) rejected under an earlier version of its rules, which
+    may hear the name as said right today. History echoes and other acoustic
+    failures are never rechecked, and no recheck repeats.
     """
     from .history_echo import attempt_evidence
     report = previous.get("report")
     if not isinstance(report, dict) or report.get("passed") is True:
         return False
+    if _phoneme_misread(report):
+        from . import name_phonemes
+        return (name_phonemes.available() and report["name_phonemes"].get("version") != name_phonemes.VERSION
+                and isinstance(previous.get("audio_file"), str)
+                and isinstance(previous.get("audio_sha256"), str)
+                and attempt_evidence(report, previous.get("engine_metadata"), text) is None)
     if stall_limit is not None and (stall_recovery.stalled_only(report)
                                     or stall_recovery.reassessable(report, stall_limit)):
         longest = (report.get("metrics") or {}).get("longest_internal_silence_seconds")
@@ -960,6 +977,7 @@ def _verified_take(text, generate, directory, request, verifier, config, *, noti
                 why = ("one long pause" if stall_recovery.stalled_only(previous.get("report"))
                        or stall_recovery.reassessable(previous.get("report"), stall_recovery.limit_seconds(
                            config, request, text, performance_options.get("performance")))
+                       else "a name under an earlier phoneme check" if _phoneme_misread(previous.get("report") or {})
                        else "its words under an earlier verification policy")
                 notify(f"  Rechecking saved take {attempt}, rejected for {why}, before making a new take.")
             metadata = previous.get("engine_metadata", {})

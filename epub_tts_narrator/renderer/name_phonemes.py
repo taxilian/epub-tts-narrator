@@ -26,7 +26,8 @@ Regular variation in English speech is not a misreading: front vowels merge
 before an R ("Mary", "marry", "merry"), as do the back vowels ("lore",
 "lower"); an L ending a syllable may be swallowed and colours the vowel before
 it ("Pulgara" for P AH1 L G ...); an R or L inside a consonant cluster may be
-swallowed; two neighbouring vowels may glide into one ("TAH-or" heard as one
+swallowed; a stop may slip in between a nasal and the fricative after it
+("prince" said as "prints", N Z heard as "n d z"); two neighbouring vowels may glide into one ("TAH-or" heard as one
 syllable); an ER vowel may be said without its R ("DAH-nik") or written with
 it after the vowel; a nasal beside a vowel or a breath the reading lacks costs
 little; a consonant at the name's very edge, where word timings clip the
@@ -63,12 +64,13 @@ import threading
 
 # Verdicts' identity: saved verdicts and the verdict store are read only
 # under this version, so any change to how a name is heard bumps it.
-VERSION = 6
+VERSION = 7
 # Bumped only when the check may fail a take it passed before: it names the
 # check in validation keys and in the sweep of takes in use, so a change that
 # only accepts more never re-verifies or re-sweeps a book. (3: an R written
 # twice is one sound. 4: ER without its R, a nasal or breath beside a vowel,
-# another language's sounds are uncertain. Strictness 3: a secondary-stressed
+# another language's sounds are uncertain. 7: a stop between a nasal and a
+# fricative costs little; a stressed EH may be heard as "a". Strictness 3: a secondary-stressed
 # vowel may not cross to the other side of the mouth. Strictness 4: the wider
 # window counts only a match heard mostly on the name, not on other words.)
 STRICTNESS = 4
@@ -101,7 +103,8 @@ _KINDS = {
     "AO": {"ɔ", "ɔː", "ɑ", "ɑː", "o", "oː", "ɒ", "ʌ"},
     "AW": {"aʊ", "a", "ɑ"},
     "AY": {"aɪ", "a", "ɑ"},
-    "EH": _FRONT_MID,
+    # eSpeak writes the "cat" vowel, which "eh" already accepts as "æ", as "a" in other English voices.
+    "EH": _FRONT_MID | {"a"},
     # "ER" also as said without its R ("DAH-nik", "DOH-nik" for D ER1 N IH0 K).
     "ER": {"ɜː", "ɜ", "ɚ", "œ", "ə", "ʌ", "ɔ", "ɛ", "ø", "øː", "ɐ", "a", "aː", "ɑ", "ɑː", "o", "oː"},
     "EY": {"eɪ", "e", "eː", "ɛ"},
@@ -125,6 +128,11 @@ _BEFORE_DARK_L = {"u", "uː", "ʊ", "o", "oː", "oʊ", "ʉ", "ɔ", "ɔː", "ʌ",
 # beside a vowel (a nasalised vowel written as vowel + n) and breath.
 _WEAK_EXTRA = {"n": 0.5, "m": 0.5, "ŋ": 0.5, "h": 0.3}
 _ASPIRATED = {"t", "k", "p", "tɕ", "ts", "ʈ"}
+# A stop that slips in between a nasal and the fricative after it, made where
+# the nasal is ("prince" said as "prints", "Lanzecki" as "lan-dzecki").
+_EPENTHETIC = {"N": {"d", "t"}, "M": {"p", "b"}, "NG": {"k", "ɡ"}}
+_FRICATIVES = frozenset({"S", "Z", "SH", "ZH", "TH", "DH", "F", "V"})
+_EPENTHETIC_COST = 0.2
 _R_SYMBOLS = {"r", "ʁ", "ɻ"}
 
 
@@ -294,6 +302,9 @@ def _align(reading, phones):
             options = [(table[i - 1][j - 1][0] + substitute(i - 1, phones[j - 1]), table[i - 1][j - 1][1]),
                        (table[i - 1][j][0] + drop(i - 1), table[i - 1][j][1]),
                        (table[i][j - 1][0] + extra(phones[j - 1]), table[i][j - 1][1])]
+            if (i < rows and phones[j - 1] in _EPENTHETIC.get(base(i - 1), ())
+                    and base(i) in _FRICATIVES):
+                options.append((table[i][j - 1][0] + _EPENTHETIC_COST, table[i][j - 1][1]))
             if glides(i - 1, phones[j - 1]):
                 options.append(table[i - 2][j - 1])
             if phones[j - 1] == "ɹ" and base(i - 1) == "ER" and j >= 2:
@@ -636,5 +647,6 @@ def judge(record, directory):
 
 
 def describe(words):
-    """``Marendra heard as m ɑ ɹ n ɛ d ɹ ə`` for the readings not said as chosen."""
-    return "; ".join(f"{word['text']} heard as {word['heard']}" for word in words or [] if not word.get("ok"))
+    """``Marendra sounded like "m ɑ ɹ n ɛ d ɹ ə", not M AH0 R EH1 N D R AH0`` for the readings not said as chosen."""
+    return "; ".join(f"{word['text']} sounded like \"{word['heard']}\"" + (f", not {word['key']}" if word.get("key") else "")
+                     for word in words or [] if not word.get("ok"))

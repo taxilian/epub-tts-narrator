@@ -1,5 +1,6 @@
 """A chosen reading is heard by its phonemes: said as chosen, or misread."""
 
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -80,6 +81,22 @@ class ReadingCostTests(unittest.TestCase):
             with self.subTest(heard=heard):
                 self.assertFalse(said_right(reading, heard))
         self.assertTrue(said_right("M AE0 L AO1 R IY0 AH0 N", "m ʌ l ɔ ɹ i ə n"))  # unstressed stays free
+
+    def test_a_stop_between_a_nasal_and_a_fricative_is_not_a_misreading(self):
+        reading = "L AE2 N Z EH1 K IY0"
+        self.assertTrue(said_right(reading, "aʊ t l æ n d z ɛ k i"))  # "lan-dzecki", heard right by a listener
+        self.assertTrue(said_right("P R IH1 N S", "p ɹ ɪ n t s"))  # "prince" as "prints"
+        self.assertTrue(said_right("K AH1 M F ER0 T", "k ʌ m p f ɚ t"))
+        self.assertFalse(said_right(reading, "l æ n k z ɛ k i"))  # a stop made elsewhere still counts
+        self.assertFalse(said_right(reading, "l æ n z d ɛ k i"))  # and so does one after the fricative
+
+    def test_a_stressed_eh_may_be_written_as_the_open_front_a(self):
+        reading = "L AE2 N Z EH1 K IY0"
+        for heard in ("l a n z a k i s", "l a e n z a k i s", "m a n z a k iː s"):  # marked good by a listener
+            with self.subTest(heard=heard):
+                self.assertTrue(said_right(reading + " Z", heard))
+        self.assertFalse(said_right(reading, "l a n z ɑː k i"))  # "ah" is still another vowel
+        self.assertFalse(said_right(reading, "l a n s k iː"))  # and a dropped stressed syllable a misreading
 
     def test_tokens_of_other_languages_are_read_as_english_phones(self):
         self.assertTrue(said_right(READING, "m ə5 ɹ ɛ n ts. ɹ ə"))  # tone digit, stray period
@@ -253,6 +270,73 @@ class ConfirmedSoundTests(unittest.TestCase):
         # Outside that book's render work nothing is confirmed.
         [elsewhere] = heard_as("m ə ɹ eɪ n d ɹ ə", Path(temporary.name) / "other" / "clips" / ("d" * 64))
         self.assertFalse(elsewhere["ok"])
+
+
+class RecheckTests(unittest.TestCase):
+    """A take the phoneme check rejected under earlier rules is heard again, not remade."""
+    TEXT = "Lanzecki’s office was quiet."
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name) / "render-work" / "clips" / ("a" * 64)
+        self.directory.mkdir(parents=True)
+        self.generated = []
+        self.request = {"chunk": {"spoken_text": self.TEXT, "expressive_direction": "",
+                                  "expressive_performance": performance(self.TEXT, "Lanzecki’s", "L AE2 N Z EH1 K IY0 Z")}}
+
+    def take(self, verdict_version, ok):
+        import test_renderer_reference_consensus as consensus
+        from test_renderer_stall_recovery import config, write_take
+        from epub_tts_narrator.renderer.workflow import verified_take
+
+        def generate(path, seed):
+            self.generated.append(path)
+            write_take(path, 0.1)
+            return {"seed": seed}
+
+        def judged(report, path, performance):
+            if report.get("passed") is not True:
+                return report
+            words = [{"text": "Lanzecki’s", "key": "L AE2 N Z EH1 K IY0", "heard": "l a n z a k i s",
+                      "cost": 0.0 if ok else 1.0, "ok": ok}]
+            report = {**report, "name_phonemes": {"version": verdict_version, "words": words}}
+            return report if ok else {**report, "passed": False, "reasons": ["pronunciation_mismatch"]}
+        verifier = consensus.PrimaryVerifier(self.TEXT)
+        with mock.patch("epub_tts_narrator.renderer.workflow.normalize_clip",
+                        side_effect=lambda raw, wav, **kw: Path(wav).write_bytes(Path(raw).read_bytes())), \
+                mock.patch.object(name_phonemes, "available", return_value=True), \
+                mock.patch.object(name_phonemes, "apply", side_effect=judged):
+            return verified_take(self.TEXT, generate, self.directory, self.request, verifier, config(),
+                                 purpose="speech", notify=lambda _: None)
+
+    def test_a_take_rejected_under_earlier_rules_is_heard_again_without_a_new_take(self):
+        from epub_tts_narrator.renderer.common import read_json
+        from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed, _verification_failure_detail
+        with self.assertRaises(SpeechVerificationFailed):
+            self.take(name_phonemes.VERSION - 1, ok=False)
+        self.assertEqual(len(self.generated), 2)
+        rejected = read_json(self.directory / "attempt-001.json")["report"]
+        # The failure names what the phoneme check heard, not the word transcript that passed.
+        self.assertEqual(_verification_failure_detail(rejected),
+                         "Lanzecki’s sounded like \"l a n z a k i s\", not L AE2 N Z EH1 K IY0")
+        _, accepted = self.take(name_phonemes.VERSION, ok=True)
+        self.assertEqual(len(self.generated), 2)  # nothing new was synthesized
+        self.assertEqual(accepted["attempt"], 1)
+        self.assertEqual(read_json(self.directory / "attempt-001.json")["policy_recheck"]["previous_report"]["reasons"],
+                         ["pronunciation_mismatch"])
+
+    def test_a_take_rejected_under_todays_rules_is_not_heard_again(self):
+        from epub_tts_narrator.renderer.common import read_json
+        from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
+        with self.assertRaises(SpeechVerificationFailed):
+            self.take(name_phonemes.VERSION, ok=False)
+        with self.assertRaises(SpeechVerificationFailed):
+            self.take(name_phonemes.VERSION, ok=False)
+        self.assertEqual(len(self.generated), 2)
+        self.assertNotIn("policy_recheck", read_json(self.directory / "attempt-001.json"))
 
 
 class CommandScopeTests(unittest.TestCase):
