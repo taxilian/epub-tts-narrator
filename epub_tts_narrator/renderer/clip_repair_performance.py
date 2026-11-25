@@ -90,12 +90,15 @@ def _control_token_ranges(pronunciations, source_tokens):
 def project_plan_performance(request, plan):
     """Return runtime-owned performance records for every approved plain part.
 
-    Only pronunciation controls are currently recoverable across a model-authored
-    repair. The plan may change punctuation, delivery and part boundaries, but its
-    exact word sequence (order and case included) must match the confirmed source
-    record. A control covering several words must survive wholly inside one part
-    with its exact interior text; a part boundary through it rejects the plan.
-    Model-authored control fields are never accepted.
+    Pronunciation controls are recoverable across a model-authored repair: the
+    plan may change punctuation, delivery and part boundaries, but its exact word
+    sequence (order and case included) must match the confirmed source record. A
+    control covering several words must survive wholly inside one part with its
+    exact interior text; a part boundary through it rejects the plan. The line's
+    scoped delivery (style spans, whispers, sounds, pauses, emphasis) is what a
+    repair re-decides: each part's own reviewed delivery replaces it, so those
+    controls do not carry over and never block a repair. Model-authored control
+    fields are never accepted.
     """
     records = source_performance_records(request)
     parts = plan["parts"]
@@ -106,11 +109,6 @@ def project_plan_performance(request, plan):
     chunk = request["chunk"]
     text = chunk["spoken_text"]
     canonical = validate_performance(records[0], text)
-    unsupported = sorted({control["kind"] for control in canonical["controls"]
-                          if control["kind"] != "pronunciation"})
-    if unsupported:
-        raise ValueError("Clip repair cannot preserve unsupported performance control(s): "
-                         + ", ".join(unsupported))
     pronunciations = [control for control in canonical["controls"] if control["kind"] == "pronunciation"]
     if not pronunciations:
         return [None] * len(parts)

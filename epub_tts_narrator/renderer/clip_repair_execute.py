@@ -27,10 +27,8 @@ def execute_plan(session, generate, verifier, config, *, budget, episode, reserv
     plan = approved(request, state['audit'])
     try:
         projected_performance = project_plan_performance(request, plan)
-    except ValueError as exc:
-        state.update(phase='rejected', error_code=(
-            'unsupported_performance_controls'
-            if str(exc).startswith('Clip repair cannot preserve') else 'invalid_control_projection'))
+    except ValueError:
+        state.update(phase='rejected', error_code='invalid_control_projection')
         session.save()
         return None
     maximum = config.get('verification', {}).get('max_resolution_attempts', 12)

@@ -48,6 +48,11 @@ class ClipRepairState:
             if saved.get('record_sha256') != digest(body) or body.get('binding') != self.binding:
                 raise ValueError('Saved clip repair binding changed; refusing to discard its progress')
             self.state = body
+            if body.get('phase') == 'rejected' and body.get('error_code') == 'unsupported_performance_controls':
+                # Refused only because the line had scoped delivery controls, which a repair now
+                # replaces with its parts' own delivery: its received proposal goes on to review.
+                self.state = {key: value for key, value in body.items() if key != 'error_code'}
+                self.state['phase'] = 'pending'
 
     def save(self):
         if self.path.exists() or self.path.is_symlink():
@@ -103,10 +108,8 @@ class ClipRepairState:
         try:
             from .clip_repair_performance import project_plan_performance
             project_plan_performance(self.request, plan)
-        except ValueError as exc:
-            self.state.update(phase='rejected', error_code=(
-                'unsupported_performance_controls'
-                if str(exc).startswith('Clip repair cannot preserve') else 'invalid_control_projection'))
+        except ValueError:
+            self.state.update(phase='rejected', error_code='invalid_control_projection')
             self.save()
             return None
         missing = [number for number in (1, 2) if audit['reviews'][number - 1] is None]

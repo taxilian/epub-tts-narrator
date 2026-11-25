@@ -351,21 +351,54 @@ class ControlledClipRepairTests(unittest.TestCase):
         self.assertEqual(len(self.engine.calls), 3)
         self.assertEqual(len(self.client.review_calls), 0)
 
-    def test_controlled_plan_with_unsupported_scoped_control_is_rejected_without_claiming_recovery(self):
+    def test_a_line_s_scoped_delivery_gives_way_to_the_repair_s_own_delivery(self):
+        # A whispered span (like a spelling repair's "drawn-out" style span) is delivery a repair re-decides:
+        # the reviewed repair runs, the confirmed pronunciation stays exact and the whisper is the parts' own call.
         self.set_controlled_polgara()
         record = self.chunk['expressive_performance']
         record['controls'].append({'kind': 'delivery', 'start': 1, 'end': 25, 'text': 'Forgive me, Lady Polgara',
                                    'tag': 'whisper', 'direction': ''})
         self.client.plan = {'parts': [{'text': '"Forgive me, Lady Polgara."',
-                                      'delivery': 'croaked', 'speech_traits': ''}],
+                                      'delivery': 'croaked whisper', 'speech_traits': ''}],
                             'reason': 'Remove the trailing comma while preserving every word.'}
-        with self.assertRaisesRegex(ValueError, 'No physically usable.*did not finish'):
-            self.render_chunk()
-        self.assertEqual(len(self.engine.calls), 3)
-        self.assertEqual(len(self.client.review_calls), 0)
-        state = read_json(next((self.work / 'clips').glob('*/clip-repair.json')))
-        self.assertEqual(state['phase'], 'rejected')
-        self.assertEqual(state['error_code'], 'unsupported_performance_controls')
+        result, acceptance = self.render_chunk()
+        self.assertTrue(acceptance['report']['passed'])
+        self.assertEqual(sorted(row['reviewer'] for row in self.client.review_calls), [1, 2])
+        repaired = self.engine.calls[-1]
+        self.assertIn('<|phoneme_start|>P AH1 L G EH0 R AH0<|phoneme_end|>', repaired['compiled'])
+        self.assertNotIn('<whisper>', repaired['compiled'])
+        self.assertEqual(repaired['direction'], 'croaked whisper')
+
+    def test_a_repair_refused_only_for_scoped_delivery_reopens_for_review(self):
+        from epub_tts_narrator.renderer.clip_repair_state import ClipRepairState
+        self.set_controlled_polgara()
+        request = speech_request(self.voice, self.chunk['spoken_text'])
+        request['chunk'] = self.chunk
+        directory = self.work / 'refused'
+        directory.mkdir()
+        session = ClipRepairState(directory, request, self.client)
+        session.state.update(phase='rejected', error_code='unsupported_performance_controls',
+                             proposal_received=True, audit={'proposal': {'parts': []}})
+        session.save()
+        reopened = ClipRepairState(directory, request, self.client)
+        self.assertEqual(reopened.state['phase'], 'pending')
+        self.assertNotIn('error_code', reopened.state)
+        self.assertEqual(reopened.state['audit'], {'proposal': {'parts': []}}, 'its received proposal is kept')
+
+    def test_a_line_with_only_drawn_out_style_spans_can_be_repaired(self):
+        # "Wheeerrrrrre… herrrr…", spoken "Where… her…" with each repaired word drawn out: the runaway takes left
+        # no audio and no sentence split exists, so a repair splitting the two words must be allowed to run.
+        text = '"Where… her…"'
+        request = speech_request(self.voice, text)
+        request['chunk']['expressive_performance'] = {'version': 1, 'text_sha256': text_sha256(text), 'controls': [
+            {'kind': 'delivery', 'tag': 'style', 'direction': 'drawn-out delivery', 'start': 1, 'end': 6,
+             'text': 'Where'},
+            {'kind': 'delivery', 'tag': 'style', 'direction': 'drawn-out delivery', 'start': 8, 'end': 11,
+             'text': 'her'}]}
+        plan = {'parts': [{'text': 'Where…', 'delivery': 'soft moaning whisper, drawn out', 'speech_traits': ''},
+                          {'text': 'her…', 'delivery': 'the same faint drawn-out whisper', 'speech_traits': ''}]}
+        self.assertEqual(project_plan_performance(request, plan), [None, None])
+        self.assertIsNone(controlled_repair_guidance(request), 'its repair request keeps the plain payload')
 
     def test_controlled_repair_respects_shared_generation_cap(self):
         self.set_controlled_polgara()
