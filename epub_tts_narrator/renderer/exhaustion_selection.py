@@ -164,6 +164,32 @@ def selected_generation_identity(request, voices, metadata):
     return generation_identity(request, voices)
 
 
+def _attempts_note(directory, retained):
+    """How many takes there were to choose from: retained takes with audio, and attempts that made none."""
+    import re
+    reasons = {'length': 'ran to the length limit without ending', 'silence': 'went silent with nothing kept'}
+    empty, why = 0, {}
+    for path in sorted(Path(directory).glob('attempt-*.json')):
+        try:
+            record = read_json(regular_file(path))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict) or record.get('audio_file') is not None:
+            continue
+        report = record.get('report') if isinstance(record.get('report'), dict) else {}
+        if report.get('reasons') == ['generation_incomplete']:
+            continue
+        empty += 1
+        finished = re.search(r"did not finish the text: '([a-z_]+)'", str(report.get('error', '')))
+        label = reasons.get(finished.group(1), 'did not finish') if finished else 'failed'
+        why[label] = why.get(label, 0) + 1
+    if not empty:
+        return ''
+    detail = ', '.join(f'{count} {label}' for label, count in why.items())
+    return (f'; {len(retained)} take(s) with audio to choose from, and {empty} other attempt(s) made no audio '
+            f'({detail})')
+
+
 def _failure_context(failure_report):
     if not isinstance(failure_report, dict):
         return ''
@@ -220,7 +246,7 @@ def select_retained(directory, request, client, *, failure_report=None):
                   and item['summary']['candidate_id'] not in stopped and item['summary']['candidate_id'] not in misread
                   and item['summary']['candidate_id'] not in tonal]
     if not candidates:
-        context = _failure_context(failure_report) + f'. Inspect {directory}'
+        context = _attempts_note(directory, retained) + _failure_context(failure_report) + f'. Inspect {directory}'
         if tonal and not misread:
             raise NoUsableTake('Every usable retained take carries a steady high-pitched tone, so none is published'
                              + context)

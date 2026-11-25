@@ -204,5 +204,23 @@ class SilenceStoppedTakeTests(unittest.TestCase):
             select_retained(directory, request, self.client)
 
 
+class BlockedMessageTests(unittest.TestCase):
+    def test_a_blocked_passage_says_how_many_attempts_made_no_audio(self):
+        # Three runaway takes (Drama 3 ran to its length limit) left no audio and one stopped on silence: the
+        # block must not read as if several takes were heard and refused.
+        import json, tempfile
+        from epub_tts_narrator.renderer.exhaustion_selection import _attempts_note
+        with tempfile.TemporaryDirectory() as folder:
+            runaway = {"audio_file": None, "report": {"passed": False, "reasons": ["generation_or_verification_error"],
+                       "error": "Fish HTTP 500: EngineError: Drama 3 did not finish the text: 'length'"}}
+            for number in (1, 2, 4):
+                Path(folder, f"attempt-{number:03d}.json").write_text(json.dumps(runaway))
+            Path(folder, "attempt-003.json").write_text(json.dumps({"audio_file": "take.wav", "report": {}}))
+            Path(folder, "attempt-005.json").write_text(json.dumps(
+                {"audio_file": None, "report": {"passed": False, "reasons": ["generation_incomplete"]}}))
+            note = _attempts_note(folder, ["the stopped take"])
+        self.assertIn("1 take(s) with audio", note)
+        self.assertIn("3 other attempt(s) made no audio (3 ran to the length limit without ending)", note)
+
 if __name__ == "__main__":
     unittest.main()
