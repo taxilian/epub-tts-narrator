@@ -60,8 +60,10 @@ class NarratorClient:
 
     def __init__(self, model="fixture", base_url="http://offline.invalid/v1", *, verify_answer="first",
                  merge_answer="y", series_answer="y", duplicate_answer="y", names=None, review_answer="keep",
-                 drop_first_markup_label=False, **kwargs):
+                 drop_first_markup_label=False, personal_names=None, **kwargs):
         self.model, self.base_url = model, base_url
+        # Listed name -> the personal name this fake says the book gives it (name_review).
+        self.personal_names = dict(personal_names or {})
         self.identity = {"model": model, "base_url": base_url}
         self.calls = []
         self.verify_answer = verify_answer
@@ -104,6 +106,16 @@ class NarratorClient:
                     voice.append(["Mara", int(number), "Her voice was husky and low."])
                     voice.append(["Mara", int(number), "not in the paragraph"])
             return {"new": new, "voice": voice, "nar": ["third", None]}
+        if mode == "name_review_nominate":
+            rows = [line.split("|") for line in payload["cast"].splitlines()]
+            return {"r": [[row[0], self.personal_names[row[1]]] for row in rows if row[1] in self.personal_names]}
+        if mode == "name_review_check":
+            answers = []
+            for item in payload["items"]:
+                line = next(line for line in item["text"].splitlines() if item["name"] in line.partition("|")[2])
+                number, _, text = line.partition("|")
+                answers.append([item["id"], "y", int(number), text])
+            return {"r": answers}
         if mode == "inline_performance_review":
             return {"decisions": [{"id": item["id"], "verdict": self.review_answer} for item in payload["proposals"]]}
         if mode == "narrator_duplicate_check":
@@ -939,6 +951,33 @@ class NarratedAnalyzeTests(unittest.TestCase):
         ledger = apply_delta(new_ledger(), {"new": [["Anderson Royce", "Anders;Royce", "m", "", 1]]},
                              {"b000001": "Anderson and Anders and Royce."}, {1: "b000001"})
         self.assertEqual(alias_conflicts(make_source([[("Anderson and Anders and Royce.", "p")]]), ledger), [])
+
+    def test_an_entry_listed_under_a_description_takes_the_personal_name_the_book_gives(self):
+        self.source = make_source([[('"Good morning," the Beacon said. "I believe my name is Aurora."', "p")],
+                                   [('"Hello," Aurora said.', "p")]])
+
+        class Described(NarratorClient):
+            def complete(inner, system, payload):
+                result = super().complete(system, payload)
+                if payload.get("mode") == "narrator_prep" and "Beacon" in payload["text"]:
+                    result = {"new": [["Eosian Beacon", "the Beacon;Aurora", "f", "newly woken Beacon", 1]],
+                              "nar": ["third", None]}
+                return result
+
+        client = Described(names={}, personal_names={"Eosian Beacon": "Aurora"})
+        document = self.analyze(client)
+        character = next(row for row in document["cast"]["characters"] if row["name"] == "Aurora")
+        self.assertIn("the Beacon", character["aliases"])
+        self.assertNotIn("Aurora", character["aliases"])
+        self.assertEqual([(row["from"], row["to"]) for row in document["provenance"]["narrator_read"]["names"]],
+                         [("Eosian Beacon", "Aurora")])
+        self.assertNotIn("character_renames", document["provenance"], "the analysis's own choice, not a rename")
+
+        # Without a name on hand nothing is asked.
+        self.cache = self.cache.parent / "cache-no-names"
+        plain = NarratorClient()
+        self.analyze(plain)
+        self.assertFalse(any(call.get("mode", "").startswith("name_review") for call in plain.calls))
 
     def test_operator_notes_reach_cast_and_attribution_requests_only_when_configured(self):
         from epub_tts_narrator.narrator_prompts import HINTS

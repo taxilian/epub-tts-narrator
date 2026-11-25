@@ -41,8 +41,12 @@ def used_in_text(document, name):
     return any(pattern.search(block["text"]) for block in document["source"]["blocks"])
 
 
-def rename_document(document, character_id, new_name, *, old_name=None):
-    """``document`` with ``character_id`` called ``new_name`` (``old_name``: the name to replace, default its current one)."""
+def rename_document(document, character_id, new_name, *, old_name=None, basis=None):
+    """``document`` with ``character_id`` called ``new_name`` (``old_name``: the name to replace, default its current one).
+
+    ``basis="analysis"`` records a rename the analysis made (``name_review``: the name the book gives); a
+    record without a basis is a person's, which the analysis never renames again.
+    """
     new_name = clean_name(new_name)
     revised = deepcopy(document)
     cast = revised["cast"]
@@ -69,8 +73,13 @@ def rename_document(document, character_id, new_name, *, old_name=None):
     if isinstance(samples, dict) and "cast_fingerprint" in samples:
         from .pipeline import fingerprint
         samples["cast_fingerprint"] = fingerprint(cast)
-    revised["provenance"].setdefault("character_renames", []).append(
-        {"version": 1, "character_id": character_id, "from": old, "to": new_name, "old_name_kept_as_alias": keep_old})
+    record = {"version": 1, "character_id": character_id, "from": old, "to": new_name,
+              "old_name_kept_as_alias": keep_old}
+    if basis is not None:
+        if basis != "analysis":
+            raise ValueError("A rename's basis is a person's (none) or \"analysis\"")
+        record["basis"] = basis
+    revised["provenance"].setdefault("character_renames", []).append(record)
     return revised
 
 
@@ -84,7 +93,8 @@ def validate_character_rename(document, candidate):
     for record in after[len(before):]:
         if not isinstance(record, dict) or not isinstance(record.get("character_id"), str):
             raise ValueError("Invalid provenance.character_renames record")
-        expected = rename_document(expected, record["character_id"], record.get("to"), old_name=record.get("from"))
+        expected = rename_document(expected, record["character_id"], record.get("to"), old_name=record.get("from"),
+                                   basis=record.get("basis"))
         if expected["provenance"]["character_renames"][-1] != record:
             raise ValueError("A character rename record does not match the rename it describes")
     if candidate != expected:

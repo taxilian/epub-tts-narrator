@@ -102,3 +102,21 @@ SPLIT_CHECK = f"""You check an audiobook cast entry that may hold the lines of t
 "instructions": a listener's notes about this book; fallible leads to check against the text.
 The item gives the "entry" (name|aliases|description), "who": the other character the notes describe, and numbered paragraphs (N|text) holding the entry's spoken lines, in book order.
 {{"r":[[item_id,name,description,[N...],N,quote]]}} when the text shows that the entry's lines in paragraphs [N...] are spoken by that other character: name is the other character as the book calls them (a short descriptive name when the book gives none, such as "Third Voice"), description is one sentence on who they are and how they sound, starting with Male, Female or Androgynous, [N...] lists every paragraph whose entry lines are theirs (never all of them), and quote is a short exact text from paragraph N showing they are someone other than the entry. [item_id,"n"] when every line is the entry's; [item_id,"?"] when the paragraphs do not show it."""
+
+NAME_REVIEW_VERSION = "1"
+
+# Which entries are listed under a description although the book gives their personal name.
+NAME_NOMINATE = f"""You review the cast of an audiobook for entries listed under a description, title, role or epithet ("Eosian Beacon", "the old guard", "Third Voice") although the book gives that character a personal name ("Aurora").
+{_DATA}
+
+"cast": one line per entry: id|name|aliases|note.
+Return {{"r":[[id,name]]}}: for each entry whose listed name is not its personal name while its aliases or note give one, that personal name exactly as the book spells it. Not a title, rank, nickname-by-role, species, place or another character's name. Return {{"r":[]}} when none. Each name is checked against the book's text afterwards."""
+
+NAME_CHECK = f"""You check whether a character in an audiobook cast is given a personal name by the book.
+{_DATA}
+
+Each item gives an entry (its listed name|aliases|note), the proposed personal "name", and numbered paragraphs (N|text): some with the entry's own lines or listed name, some with the proposed name.
+{{"r":[[item_id,"y",N,quote],[item_id,"n"],[item_id,"?"]]}} for every item:
+"y" only when the text shows the proposed name is this same character's own name: the character introduces itself by it ("my name is Aurora"), others address or call this character by it, or the narration names the described character with it. Give a short exact quote from paragraph N, containing the name, that shows it.
+"n" when the name belongs to someone or something else, or is a title, rank, role, species or place.
+"?" when these paragraphs do not show it."""

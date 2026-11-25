@@ -173,6 +173,7 @@ class WholeBookRecheckTests(AttributionCLIHarness):
     """``analyze BOOK --recheck`` (or yes when asked): every check again with fresh answers, resumable."""
 
     STEPS = {"cast": "epub_tts_narrator.cast_review.review_cast",
+             "names": "epub_tts_narrator.name_review.review_names",
              "genders": "epub_tts_narrator.gender_review.review_genders",
              "group-tags": "epub_tts_narrator.group_check.review_group_tags",
              "joint-lines": "epub_tts_narrator.joint_lines.review_joint_lines",
@@ -215,12 +216,13 @@ class WholeBookRecheckTests(AttributionCLIHarness):
         self.assertIsNotNone(caches["genders"])
         self.assertEqual(caches["attribution"], "not run")
         pending = recheck.pending(self.book, DEFAULTS["analysis"])
-        self.assertEqual(pending.done, ["cast"], "the finished step is remembered, the interrupted one is not")
+        self.assertEqual(pending.done, ["cast", "names"], "finished steps are remembered, the interrupted one is not")
         run_cache = caches["cast"]
 
         caches, output = self.rerun()
         self.assertIn("Resuming the recheck of the whole book", output)
         self.assertIsNone(caches["cast"], "a finished step is not asked again")
+        self.assertIsNone(caches["names"])
         self.assertEqual(caches["genders"], run_cache, "the interrupted step replays its answers so far")
         self.assertTrue(all(caches[step] == run_cache for step in ("group-tags", "joint-lines", "attribution",
                                                                    "directions")))

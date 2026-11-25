@@ -229,7 +229,8 @@ def skip_rerun_reviews(testcase):
                    "epub_tts_narrator.joint_lines.review_joint_lines",
                    "epub_tts_narrator.character_split.review_splits",
                    "epub_tts_narrator.direction_review.review_book_directions",
-                   "epub_tts_narrator.gender_review.review_genders"):
+                   "epub_tts_narrator.gender_review.review_genders",
+                   "epub_tts_narrator.name_review.review_names"):
         patcher = patch(target, return_value=False)
         patcher.start()
         testcase.addCleanup(patcher.stop)

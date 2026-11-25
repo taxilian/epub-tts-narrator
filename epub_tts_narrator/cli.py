@@ -545,6 +545,13 @@ def main(argv=None, *, in_shell=False):
             if changed:
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # An entry listed under a description is called by the personal name the book gives it.
+            from .name_review import review_names
+            changed = review_names(directory, config, provider_client, progress, recheck_cache=fresh("names"))
+            done("names")
+            if changed:
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # An entry your instructions say holds two characters' lines is split (asked first).
             from .character_split import review_splits
             if review_splits(directory, config, provider_client, progress, instructions=args.instructions,

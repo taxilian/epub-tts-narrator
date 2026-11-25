@@ -74,8 +74,8 @@ def _sidecars(path, original, candidate, voice_id, name):
     return records
 
 
-def plan_rename(bundle, who, new_name):
-    """Work out the rename without writing anything; ``describe(plan)`` shows it."""
+def plan_rename(bundle, who, new_name, *, basis=None):
+    """Work out the rename without writing anything; ``describe(plan)`` shows it (``basis``: see ``rename_document``)."""
     from ..analysis_directory import _completed_directory
     from ..analysis_revision import related_directories
     directory = Path(bundle["directory"] if isinstance(bundle, dict) else bundle).resolve()
@@ -86,7 +86,7 @@ def plan_rename(bundle, who, new_name):
     document, registry = loaded[directory][0], loaded[directory][1]
     character = resolve_character(document, who)
     old = character["name"]
-    candidate = rename_document(document, character["id"], new_name)
+    candidate = rename_document(document, character["id"], new_name, basis=basis)
     books = [RenameBook(directory, document["source"]["book"].get("title") or directory.name, document, candidate,
                         _sidecars(directory, document, candidate, character["voice_id"], new_name))]
     skipped = []
@@ -101,7 +101,7 @@ def plan_rename(bundle, who, new_name):
         if name_key(row["name"]) != name_key(old):
             skipped.append(f"{title} (calls them {row['name']})")
             continue
-        renamed = rename_document(later, row["id"], new_name)
+        renamed = rename_document(later, row["id"], new_name, basis=basis)
         books.append(RenameBook(path, title, later, renamed, _sidecars(path, later, renamed, row["voice_id"], new_name)))
     earlier = [book["book"].get("title") or book["source_fingerprint"][:12] for book in registry["books"][:-1]
                if any(row["id"] == character["id"] for row in book["cast"]["characters"])]

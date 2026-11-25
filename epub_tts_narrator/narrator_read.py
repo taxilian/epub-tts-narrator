@@ -2292,6 +2292,13 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
         else:
             for row in document["segments"]:
                 row.pop("inline_proposals", None)
+        # An entry first met by a description is called by the personal name the book gives it.
+        from .name_review import apply_names
+        document, named = stage("identity_check", 0.97, lambda: apply_names(
+            document, lambda prompt, payload, validate: meter.run(requests, "identity_check", prompt, payload,
+                                                                 validate),
+            workers=min(5, workers), progress=progress))
+        document["provenance"]["narrator_read"]["names"] = named
         metrics = meter.summary()
         metrics["wall_seconds"] = round(time.monotonic() - started_all, 3)
         metrics["cache_hits"] = requests.cache_hits
