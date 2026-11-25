@@ -10,6 +10,8 @@ the line prompt takes, so the answer goes through the review's own code:
   character whose voice exists: [F] fix / [L] leave.
 * ``NarratorScreen`` — the narrator check's sections and point-of-view
   readers: [A] apply / [L] leave.
+* ``JointLineScreen`` — the joint-line check's "do they say this together?"
+  for a line a person gave to one speaker: [J] together / [K] keep / [L] later.
 
 Escape answers like the end of input on a terminal: decide later / leave.
 Nothing here changes the book.
@@ -196,3 +198,29 @@ class NarratorScreen(QuestionScreen):
                 rows.append(f"\n{' ' * (width + 2)}“{row['quote']}”", style="dim italic")
         yield Static(Text("Sections and who reads their narration", style="dim"))
         yield Static(rows, classes="narrator-sections")
+
+
+class JointLineScreen(QuestionScreen):
+    """A line a person gave to one speaker that the book says several say together."""
+
+    DEFAULT_CSS = QUESTION_CSS + """
+    JointLineScreen .joint-line { border: round $primary-background; padding: 0 1; height: auto; }
+    """
+    CHOICES = (("j", "Say it together", "primary"), ("k", "Keep it as it is", "default"),
+               ("l", "Decide later", "default"))
+    BINDINGS = [Binding("j", "choose('j')", "Together", priority=True),
+                Binding("k", "choose('k')", "Keep", priority=True),
+                Binding("l,escape", "later", "Decide later", priority=True)]
+
+    def body(self):
+        view = self.view
+        yield Static(Text(view["line"], style="bold italic"), classes="joint-line")
+        yield Static(Text(view["paragraph"]), classes="question-why")
+        now = Text("Now: ", style="dim")
+        now.append(view["now"])
+        yield Static(now)
+        together = Text("Together: ", style="dim")
+        together.append(view["together"], style="bold")
+        yield Static(together)
+        yield Static(Text(view["why"]), classes="question-why")
+        yield Static(Text(view["afterwards"]), classes="question-note")

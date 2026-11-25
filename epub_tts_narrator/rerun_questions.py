@@ -116,3 +116,19 @@ def narrator_view(document, revised, book_sections, chosen, answers, notes, *, l
                     "accent.")
     return {"title": "Read narration in the point-of-view character's voice?", "notes": " ".join(notes.split()),
             "sections": rows, "moved": moved, "summary": summary}
+
+
+def joint_view(document, row, speakers, quote):
+    """The joint-line check's question about a line a person gave to one speaker."""
+    roles = {role["id"]: role for role in document["cast"]["roles"]}
+    names = {character["id"]: character["name"] for character in document["cast"]["characters"]}
+
+    def name(role_id):
+        return names.get(roles.get(role_id, {}).get("character_id"), role_id)
+    paragraph = next(block["text"] for block in document["source"]["blocks"] if block["id"] == row["block_id"])
+    together = [name(role_id) for role_id in speakers]
+    return {"title": "Do they say this together?", "line": row["text"], "paragraph": " ".join(paragraph.split()),
+            "now": f"{name(row['role_id'])} alone (you chose)", "together": ", ".join(together),
+            "speakers": together, "why": f"The book: “{quote}”.",
+            "afterwards": "Saying it together renders the line in every one of these voices at once; only this "
+                          "line changes. Keeping it is remembered and not asked again."}

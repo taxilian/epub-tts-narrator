@@ -534,6 +534,11 @@ def main(argv=None, *, in_shell=False):
             if review_group_tags(directory, config, provider_client, progress):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # A line several of the scene's characters say together ("the voices all shouted") is given to all of them.
+            from .joint_lines import review_joint_lines
+            if review_joint_lines(directory, config, provider_client, progress):
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every paragraph's speakers and split are checked once, and again after it changes.
             from .attribution_recheck import recheck_attributions
             if recheck_attributions(directory, config, provider_client, progress):

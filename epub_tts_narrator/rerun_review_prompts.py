@@ -77,3 +77,11 @@ GROUP_CHECK = f"""You check audiobook cast entries whose lines are sometimes tag
 
 Each item gives an entry (name|aliases) and numbered paragraphs (N|text) with its lines.
 {{"r":[[item_id,"y",N,quote]]}} when the text shows this entry is several people who speak together or as one (a group, a crowd, a council, a chorus), with a short exact quote from paragraph N that shows several people speaking; [item_id,"n"] when the entry is one person (a plural tag then belongs to a different line or speaker); [item_id,"?"] when these paragraphs do not show it. A name alone is no evidence either way: only what the text says about who speaks."""
+
+JOINT_REVIEW_VERSION = "1"
+
+JOINT_CHECK = f"""You check audiobook lines whose speech tag says several people speak but which were given to one character.
+{_DATA}
+
+Each item gives the "line", its "tag", "speakers" (number|name: the characters who speak in this scene, the line's current speaker first) and the scene's numbered paragraphs (N|text), the line's own paragraph last.
+{{"r":[[item_id,[numbers],N,quote]]}} when the text shows that two or more of these speakers say these exact words together (all at once, as one, in chorus), with their speaker numbers and a short exact quote from paragraph N that shows them speaking together; [item_id,"n"] when the line is one speaker's, or is said by people who are not among these speakers; [item_id,"?"] when the paragraphs do not show who says it. Name only speakers the text shows taking part: "the voices all shouted" means the voices heard in this scene, not every character present."""
