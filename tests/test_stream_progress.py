@@ -5,7 +5,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from epub_tts_narrator.stream_progress import StreamConsole
+from epub_tts_narrator.stream_progress import StreamConsole, activate, step_progress, time_left
 
 
 class TTY(io.StringIO):
@@ -79,11 +79,33 @@ class StreamConsoleTests(unittest.TestCase):
         console.observe({"request_id": "req-1", "phase": "started"})
         console.set_progress(1.0, "Validation")
         console.set_check(3, 8, "each character's gender")
-        self.assertIn("step 3/8 Checking the book 25% · each character's gender", output.getvalue()[-600:])
+        self.assertIn("step 3/8 Checking the book 0% · each character's gender", output.getvalue()[-600:])
+        previous = activate(console)
+        try:
+            step_progress(2, 4, "jury votes")
+        finally:
+            activate(previous)
+        self.assertIn("step 3/8 Checking the book 50% · each character's gender · 2/4 jury votes",
+                      output.getvalue()[-600:])
         console.end_checks()
         console.set_progress(1.0, "Validation")
         self.assertIn("step 4/4", output.getvalue()[-600:])
         console.observe({"request_id": "req-1", "phase": "failed"})
+
+    def test_time_left_is_estimated_from_the_step_s_own_pace(self):
+        self.assertIsNone(time_left(10, 0.5), "too early to tell")
+        self.assertIsNone(time_left(60, 0.01), "too little done to tell")
+        self.assertEqual(time_left(60, 0.25), 180)
+        output = TTY()
+        clock = [100.0]
+        with patch("epub_tts_narrator.stream_progress.monotonic", side_effect=lambda: clock[0]):
+            console = StreamConsole(output, width=240, draw_interval=0)
+            console.observe({"request_id": "req-1", "phase": "started"})
+            console.set_check(6, 8, "every paragraph's speakers")
+            console.set_step_progress(0, 40, "scan batches")
+            clock[0] += 120
+            console.set_step_progress(10, 40, "scan batches")
+        self.assertIn("step 6/8 Checking the book 25% (~6:00 left in this step)", output.getvalue()[-600:])
 
     def test_ordinary_log_writes_scroll_before_redrawn_status(self):
         output = TTY()

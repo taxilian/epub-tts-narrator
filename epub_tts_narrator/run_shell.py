@@ -535,7 +535,8 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
         progress = self.model.progress if self.model.running else None
         return "" if not progress else "\n".join(line for line in (
             f"Step {progress['step']}/{progress['steps']}: {progress['step_name']} "
-            f"{progress['step_fraction']:.0%} · {progress['stage']}",
+            f"{progress['step_fraction']:.0%}" + (f" (~{progress['left']})" if progress.get("left") else "")
+            + f" · {progress['stage']}",
             progress.get("activity", ""), progress.get("totals", "")) if line)
 
     def _draw_glance(self):

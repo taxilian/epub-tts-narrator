@@ -518,8 +518,14 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
             return found, record
         found, record = scan_part(batches[index], 0)
         report(f"Attribution semantic scan {index + 1}/{len(batches)}: {len(found)} proposed block correction(s)")
+        with progress_lock:
+            finished["scan"] += 1
+            step_progress(finished["scan"], len(batches), "scan batches")
         return {"batch_index": index, **record, "corrections": found}
     report(f"Attribution semantic review: scanning {len(batches)} source batch(es), up to {workers} concurrent requests")
+    from .stream_progress import step_progress
+    finished = {"scan": 0, "jury": 0}
+    step_progress(0, len(batches), "scan batches")
     scans = _bounded_map(list(range(len(batches))), scan, workers)
     tasks = [(scan_result, reviewer, lens) for scan_result in scans if scan_result["corrections"] for reviewer, lens in LENSES]
     def vote(task, cancelled):
@@ -560,6 +566,9 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
                       "request_fingerprint": payload_hash, "proposed_segments_fingerprint": fingerprint(row["proposed_segments"])}
                      for row in proposals]
         report(f"Attribution semantic jury batch {index + 1}/{len(batches)}: {reviewer} completed")
+        with progress_lock:
+            finished["jury"] += 1
+            step_progress(finished["jury"], len(tasks), "jury votes")
         return votes
     all_votes = _bounded_map(tasks, vote, workers)
     votes_by_block = {}

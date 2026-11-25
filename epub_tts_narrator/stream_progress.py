@@ -17,6 +17,31 @@ def _size(value):
     return f"{value / 1024:.1f} KiB"
 
 
+# The console of the running command, for work that reports its own batches (``step_progress``).
+_ACTIVE = None
+
+
+def activate(console):
+    """Make ``console`` the one ``step_progress`` reports to; returns the previous one."""
+    global _ACTIVE
+    previous, _ACTIVE = _ACTIVE, console
+    return previous
+
+
+def step_progress(done, total, what=""):
+    """Report how much of the running check is done ("12 of 40 scan batches"); nothing without a console."""
+    console = _ACTIVE
+    if console is not None:
+        console.set_step_progress(done, total, what)
+
+
+def time_left(elapsed, fraction):
+    """An estimate of the time left from the time taken so far, or None while too little is done to tell."""
+    if fraction < 0.03 or fraction >= 1 or elapsed < 15:
+        return None
+    return elapsed * (1 - fraction) / fraction
+
+
 def _clean(text):
     text = "".join(" " if unicodedata.category(char).startswith("C") else char
                    for char in text)
@@ -46,6 +71,10 @@ class StreamConsole:
         self._stage = ""
         # (number, count, name) while the saved book's checks run (``set_check``), else None.
         self._check = None
+        # (done, total, what) the running check reported (``step_progress``), else None.
+        self._check_progress = None
+        # When the shown step (or the part of a check reporting progress) started, for the time left.
+        self._step_key, self._step_started = None, monotonic()
 
     def set_progress(self, fraction, stage):
         if not self.enabled:
@@ -66,7 +95,17 @@ class StreamConsole:
             return
         with self._lock:
             self._check = (number, count, name)
+            self._check_progress = None
             self._stage = name
+            self._after_check_locked()
+
+    def set_step_progress(self, done, total, what=""):
+        if not self.enabled or not self._check or type(total) is not int or total < 1:
+            return
+        with self._lock:
+            self._check_progress = (min(max(0, done), total), total, str(what))
+            name = self._check[2]
+            self._stage = f"{name} · {done}/{total} {what}".rstrip()
             self._after_check_locked()
 
     def end_checks(self):
@@ -74,6 +113,7 @@ class StreamConsole:
             return
         with self._lock:
             self._check = None
+            self._check_progress = None
 
     def _after_check_locked(self):
         if self._active:
@@ -187,7 +227,10 @@ class StreamConsole:
     def _step_status(self):
         if self._check is not None:
             number, count, name = self._check
-            return number, count, "Checking the book", (number - 1) / count
+            if self._check_progress is not None:
+                done, total, _ = self._check_progress
+                return number, count, "Checking the book", done / total
+            return number, count, "Checking the book", 0.0
         start = 0.0
         for index, (end, name) in enumerate(self._STEPS, 1):
             if self._overall <= end or end == self._STEPS[-1][0]:
@@ -195,6 +238,16 @@ class StreamConsole:
                 return index, len(self._STEPS), name, min(1.0, max(0.0, fraction))
             start = end
         return len(self._STEPS), len(self._STEPS), self._STEPS[-1][1], 1.0
+
+    def _time_left(self, now):
+        """ "(~4:10 left in this step)" once enough of the step is done to estimate it, else "". """
+        step, _, name, fraction = self._step_status()
+        what = self._check_progress[2] if self._check is not None and self._check_progress else ""
+        key = (step, name, what)
+        if key != self._step_key:
+            self._step_key, self._step_started = key, now
+        left = time_left(now - self._step_started, fraction)
+        return "" if left is None else f"(~{_seconds(left)} left in this step)"
 
     def _terminal_width(self):
         try:
@@ -238,8 +291,9 @@ class StreamConsole:
         if quiet >= 1:
             first += f" · quiet {_seconds(quiet)}"
         step, step_count, step_name, step_fraction = self._step_status()
+        left = self._time_left(now)
         second = (f"LLM {len(states)} active | step {step}/{step_count} {step_name} "
-                  f"{step_fraction:.0%} · {self._stage} | elapsed {_seconds(now - oldest)} | "
+                  f"{step_fraction:.0%}{' ' + left if left else ''} · {self._stage} | elapsed {_seconds(now - oldest)} | "
                   f"{events} events | thought {reasoning:,} chars | "
                   f"answer {content:,} chars | {_size(received)} received")
         return first, second
@@ -295,9 +349,11 @@ class BusStreamConsole(StreamConsole):
     def _draw_locked(self, now):
         lines = self._status_lines(now)
         step, step_count, step_name, step_fraction = self._step_status()
+        left = self._time_left(now)
         self.bus.publish("progress", data={
             "overall": self._overall, "stage": self._stage, "step": step, "steps": step_count,
-            "step_name": step_name, "step_fraction": step_fraction, "streams": len(self._active),
+            "step_name": step_name, "step_fraction": step_fraction, "left": left[1:-1] if left else "",
+            "streams": len(self._active),
             "received": sum(state["received"] for state in self._active.values()),
             "activity": lines[0] if lines else "", "totals": lines[1] if lines else ""})
         self._last_draw = now

@@ -129,8 +129,19 @@ def review_directions(document, requests, block_ids, *, workers=1, progress=lamb
         return requests.run(DIRECTION_CHECK, payload, validate)
 
     progress(f"Direction review: reviewing {len(targets)} line(s) in {len(groups)} chapter group(s)")
+    from threading import Lock
+    from .stream_progress import step_progress
+    lock, finished = Lock(), [0]
+
+    def counted(group):
+        result = run(group)
+        with lock:
+            finished[0] += 1
+            step_progress(finished[0], len(groups), "chapter groups")
+        return result
+    step_progress(0, len(groups), "chapter groups")
     corrections = {}
-    for result in _parallel(run, groups, workers):
+    for result in _parallel(counted, groups, workers):
         corrections.update(result)
     changed = []
     for qid, direction in corrections.items():

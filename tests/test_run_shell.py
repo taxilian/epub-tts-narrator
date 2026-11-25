@@ -1316,6 +1316,7 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             print("Could not prepare an extra script; the voice keeps fewer clips")
             self.bus.publish("progress", data={"overall": 0.6, "stage": "attribution", "step": 2, "steps": 4,
                                                "step_name": "Attribution", "step_fraction": 0.25, "streams": 3,
+                                               "left": "6:00 left in this step",
                                                "received": 4096, "activity": "Thinking: …", "totals": "LLM 3 active"})
             release.wait(10)
             return 0
@@ -1333,6 +1334,7 @@ class RunShellScreenTests(unittest.IsolatedAsyncioTestCase):
             tabs = [pane.id for pane in app.query("TabPane")]
             self.assertEqual(tabs, ["summary", "log-tab", "errors-tab"])
             self.assertIn("Attribution 25%", str(app.query_one("#tile-step").render()))
+            self.assertIn("~6:00 left in this step", str(app.query_one("#tile-step").render()))
             self.assertIn("4.0 KiB received", str(app.query_one("#tile-model-requests").render()))
             self.assertIn("1", str(app.query_one("#tile-warnings").render()))
             self.assertEqual(len(app.query_one("#recent").lines), 2)

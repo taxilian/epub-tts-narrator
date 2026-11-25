@@ -373,6 +373,8 @@ def main(argv=None, *, in_shell=False):
     # Inside the full-screen run shell, the same live status goes to its screen.
     stream_console = BusStreamConsole(bus) if bus is not None else StreamConsole(original_stderr)
     previous_observer = set_default_stream_observer(stream_console.observe)
+    from .stream_progress import activate
+    previous_console = activate(stream_console)
     if stream_console.enabled and bus is None:
         # (The run shell already captures stderr, including speaker questions.)
         sys.stderr = stream_console
@@ -1090,4 +1092,5 @@ def main(argv=None, *, in_shell=False):
         if sys.stderr is stream_console:
             sys.stderr = original_stderr
         set_default_stream_observer(previous_observer)
+        activate(previous_console)
         stream_console.close()

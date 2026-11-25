@@ -1090,6 +1090,7 @@ class RunModel:
         if progress.get("step_name"):
             step = f"{progress['step_name']} {progress.get('step_fraction', 0):.0%}"
             detail = f"step {progress.get('step')} of {progress.get('steps')}" + (
+                f" · ~{progress['left']}" if progress.get("left") else "") + (
                 f" · {progress['stage']}" if progress.get("stage") else "")
         requests = progress.get("streams") or 0
         received = progress.get("received")
@@ -1235,7 +1236,8 @@ class RunModel:
             progress = self.progress
             if progress and self.running:
                 parts.append(f"step {progress['step']}/{progress['steps']} {progress['step_name']} "
-                             f"{progress['step_fraction']:.0%}")
+                             f"{progress['step_fraction']:.0%}"
+                             + (f" (~{progress['left']})" if progress.get("left") else ""))
                 if progress.get("streams"):
                     parts.append(f"{progress['streams']} model request(s) active")
             active = sum(1 for row in self.rows.values()
