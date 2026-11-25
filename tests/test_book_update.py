@@ -582,6 +582,39 @@ class BookUpdateTests(unittest.TestCase):
         row = next(row for row in document["segments"] if row["id"] == hello["id"])
         self.assertEqual((row["role_id"], row["voice_id"], row["attribution"]["basis"]), (role, voice, "user"))
 
+    def test_a_check_blocked_by_a_book_in_use_waits_and_the_rerun_goes_on(self):
+        from epub_tts_narrator.analysis_revision import BookBusy
+        self.seed()
+        calls = []
+
+        def busy_once(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise BookBusy("Rendering is active; finish it before revising analysis: later book (lock)")
+            return False
+        with patch("epub_tts_narrator.cast_review.review_cast", side_effect=busy_once), \
+                patch("epub_tts_narrator.busy_retry.interactive", return_value=True), \
+                patch("epub_tts_narrator.busy_retry.WAIT_SECONDS", 0), \
+                patch("builtins.input", side_effect=lambda prompt: "w"), \
+                patch("epub_tts_narrator.recheck.ask", return_value=False):
+            status, stdout, stderr = self.run_cli("analyze", self.book)
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("a book this needs is in use, so nothing was saved yet", stdout + stderr)
+        self.assertIn("Waiting until the book is free", stdout + stderr)
+
+    def test_a_skipped_check_is_named_and_left_for_a_later_rerun(self):
+        from epub_tts_narrator.analysis_revision import BookBusy
+        self.seed()
+        with patch("epub_tts_narrator.gender_review.review_genders",
+                   side_effect=BookBusy("Rendering is active; finish it before revising analysis: book (lock)")), \
+                patch("epub_tts_narrator.busy_retry.interactive", return_value=True), \
+                patch("builtins.input", side_effect=lambda prompt: "s"), \
+                patch("epub_tts_narrator.recheck.ask", return_value=False):
+            status, stdout, stderr = self.run_cli("analyze", self.book)
+        self.assertEqual(status, 0, stderr + stdout)
+        self.assertIn("skipped while a book was in use: each character's gender", stdout + stderr)
+
     def test_removed_paragraph_needs_no_model_and_moves_pronunciation_evidence(self):
         from epub_tts_narrator import pronunciations
         from epub_tts_narrator.pipeline import write_json

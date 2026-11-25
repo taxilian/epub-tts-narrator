@@ -203,6 +203,38 @@ class AnalysisRevisionTests(unittest.TestCase):
         revised, _, _ = _completed_directory(self.paths[0])
         self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
 
+    def hold_live_render(self, book):
+        lock, held, release, child = self.live_render_lock(book)
+
+        def stop():
+            release.write_text("go")
+            self.assertEqual(child.wait(timeout=15), 0)
+            held.unlink(missing_ok=True)
+        self.addCleanup(stop)
+        deadline = time.monotonic() + 15
+        while not held.exists():
+            self.assertIsNone(child.poll())
+            self.assertGreater(deadline, time.monotonic(), "lock holder never signaled")
+
+    def test_a_later_book_s_render_does_not_block_a_change_to_an_earlier_book(self):
+        from epub_tts_narrator.analysis_revision import reserve_revision_scope
+        self.hold_live_render(self.paths[1])
+        with reserve_revision_scope([self.paths[0]], scope="voice-profiles"):
+            pass
+        saved = _completed_directory(self.paths[0])[0]
+        revise_directories({self.paths[0]: saved}, scope="voice-profiles", progress=lambda _: None)
+        _completed_directory(self.paths[1])  # the later book is re-linked and still loads
+
+    def test_a_render_of_the_book_itself_still_blocks_it_as_a_busy_book(self):
+        from epub_tts_narrator.analysis_revision import BookBusy, reserve_revision_scope
+        self.hold_live_render(self.paths[0])
+        with self.assertRaisesRegex(BookBusy, "Rendering is active"):
+            with reserve_revision_scope([self.paths[0]], scope="voice-profiles"):
+                pass
+        saved = _completed_directory(self.paths[0])[0]
+        with self.assertRaisesRegex(BookBusy, "Rendering is active"):
+            revise_directories({self.paths[0]: saved}, scope="voice-profiles", progress=lambda _: None)
+
     def test_a_receipt_binds_only_the_books_it_names_and_later_books_are_taken_as_they_are(self):
         # A change to the first book also re-links the later book; a receipt that names only the first
         # book must not refuse because the later book has no entry (or saved meanwhile).

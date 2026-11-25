@@ -220,7 +220,7 @@ class ManualSpeakerRevisionTests(unittest.TestCase):
         before = self.managed()
 
         @contextmanager
-        def refresh_became_pending(directory):
+        def refresh_became_pending(directory, **options):
             (self.paths[0] / PROFILE_STATE).write_text("{}", encoding="utf-8")
             yield
 

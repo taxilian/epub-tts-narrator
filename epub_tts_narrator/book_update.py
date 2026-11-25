@@ -43,7 +43,7 @@ import shutil
 import uuid
 
 from .analysis_directory import _completed_directory, _read_json
-from .analysis_revision import _hash, _install, _render_active, _snapshot, related_directories
+from .analysis_revision import BookBusy, _hash, _install, _render_active, _snapshot, related_directories
 from .contracts import readiness, validate_document
 from .pipeline import fingerprint, write_json
 from .series import validate_registry
@@ -917,18 +917,18 @@ def publish_update(directory, document, *, expected_manifest_sha256, progress=pr
     directory = Path(directory).resolve()
     require_valid_profiles(directory)
     with ExitStack() as stack:
-        stack.enter_context(refresh_locks(directory))
+        stack.enter_context(refresh_locks(directory, renders_in_chain=False))
         original, registry, bundle_names = _completed_directory(directory)
         manifest = _read_json(directory / "manifest.json")
         if _hash(directory / "manifest.json") != expected_manifest_sha256:
             raise ValueError("The saved book changed while its new chapters were analyzed; rerun the update")
         if reason := _render_active(directory):
-            raise ValueError(f"Rendering is active; finish it before updating the book: {directory} ({reason})")
+            raise BookBusy(f"Rendering is active; finish it before updating the book: {directory} ({reason})")
         lock_path = directory / ".analysis-update.lock"
         try:
             lock = acquire_directory_lock(lock_path)
         except FileExistsError as exc:
-            raise ValueError(
+            raise BookBusy(
                 f"Analysis revision is already active, or the lock cannot be proven stale: {lock_path}. "
                 f"A marked lock left by a crashed process is reclaimed automatically when you rerun.") from exc
         stack.callback(lock.rmdir)
@@ -981,7 +981,7 @@ def publish_update(directory, document, *, expected_manifest_sha256, progress=pr
             if any(_hash(directory / name) != checksum for name, checksum in original_hashes.items()):
                 raise ValueError(f"The saved book changed before publication: {directory}")
             if reason := _render_active(directory):
-                raise ValueError(f"Rendering started during the update: {directory} ({reason})")
+                raise BookBusy(f"Rendering started during the update: {directory} ({reason})")
             journal["status"] = "applying"
             write_json(transaction / "revision.json", journal, overwrite=True)
             for name in added:
@@ -1075,7 +1075,7 @@ def ensure_updatable(directory, comparison=None):
     """Refuse only updates the book's dependents could not survive."""
     directory = Path(directory).resolve()
     if reason := _render_active(directory):
-        raise ValueError(f"Rendering is active; finish it before updating the book: {directory} ({reason})")
+        raise BookBusy(f"Rendering is active; finish it before updating the book: {directory} ({reason})")
     related = related_directories([directory])
     if (related != [directory] and comparison is not None
             and comparison.get("appended_chapters")):

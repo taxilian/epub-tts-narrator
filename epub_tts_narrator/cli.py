@@ -421,6 +421,15 @@ def main(argv=None, *, in_shell=False):
             return 2
         return status
 
+    def _when_free(step, label):
+        """A book update, waited for or retried while a book it changes is in use; it resumes its saved progress."""
+        from .busy_retry import SKIPPED, run_when_free
+        result = run_when_free(step, label, output=progress)
+        if result is SKIPPED:
+            print("The update is saved as pending progress; rerun the same command to finish it.")
+            return None
+        return result
+
     def resume_book(directory, config, *, after_fresh=False):
         """Reuse the saved cast; check the book, repair narration boundaries and remaining speakers.
 
@@ -484,10 +493,10 @@ def main(argv=None, *, in_shell=False):
                     print("Saved analysis is complete; no source text or chapter-title changes. "
                           "The saved analysis is unchanged.")
                     return _speaker_completion_status(original)
-                updated = update_book(
+                updated = _when_free(lambda: update_book(
                     directory, title_source, config=config, input_path=args.input, strategy=args.strategy,
                     client_factory=provider_client, announce_cache=announce_cache, progress=progress,
-                    config_path=resolve_config_path(args.config))
+                    config_path=resolve_config_path(args.config)), "saving the new chapter titles")
                 return _speaker_completion_status(updated if updated is not None else original)
             same_chapters = (fingerprint(source) == fingerprint(original["source"])
                              or fingerprint(merged_source(original["source"], source)) == fingerprint(original["source"]))
@@ -497,10 +506,11 @@ def main(argv=None, *, in_shell=False):
                 if args.edits:
                     raise ValueError("--edits cannot be combined with updating the book from a new EPUB; "
                                      "update the book first")
-                updated = update_book(
+                updated = _when_free(lambda: update_book(
                     directory, source, config=config, input_path=args.input, strategy=args.strategy,
                     client_factory=provider_client, speaker_judge=_speaker_judge(config),
-                    announce_cache=announce_cache, progress=progress, config_path=resolve_config_path(args.config))
+                    announce_cache=announce_cache, progress=progress, config_path=resolve_config_path(args.config)),
+                    "updating the book with the new and edited chapters")
                 return _speaker_completion_status(updated if updated is not None else original)
             if args.input.suffix.lower() == ".epub":
                 accepted = accepted_epub_digests(original)
@@ -531,6 +541,16 @@ def main(argv=None, *, in_shell=False):
                 number = planned.index(step) + 1
                 stream_console.set_check(number, len(planned), labels[step])
                 progress(f"Check {number} of {len(planned)}: {labels[step]}")
+            from .busy_retry import SKIPPED, run_when_free
+            skipped = []
+
+            def free(step, key):
+                """Run one check; while a book it changes is in use, wait, retry or skip it (asked in a terminal)."""
+                result = run_when_free(step, labels[key], output=progress)
+                if result is SKIPPED:
+                    skipped.append(key)
+                    return False
+                return result
             if after_fresh:
                 progress(f"The analysis is saved. Checking it now, the way rerunning analyze would: {len(planned)} "
                          "checks. A later rerun checks only what changes.")
@@ -540,11 +560,10 @@ def main(argv=None, *, in_shell=False):
             check("splits")
             from .book_update import misread_splits, reread_misread_splits
             repaired, misread = misread_splits(directory)
-            if misread and reread_misread_splits(directory, config, client_factory=provider_client,
-                                                 speaker_judge=_speaker_judge(config), announce_cache=announce_cache,
-                                                 progress=progress, strategy=args.strategy,
-                                                 document=repaired, misread=misread,
-                                                 config_path=resolve_config_path(args.config)):
+            if misread and free(lambda: reread_misread_splits(
+                    directory, config, client_factory=provider_client, speaker_judge=_speaker_judge(config),
+                    announce_cache=announce_cache, progress=progress, strategy=args.strategy, document=repaired,
+                    misread=misread, config_path=resolve_config_path(args.config)), "splits"):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A recheck asks every check again with fresh answers (--recheck, or yes when asked).
@@ -564,13 +583,13 @@ def main(argv=None, *, in_shell=False):
                 return recheck.cache(step) if recheck is not None else None
 
             def done(step):
-                if recheck is not None:
+                if recheck is not None and step not in skipped:
                     recheck.finished(step)
             # Cast entries that are one person are merged (asked first when a voice would change).
             check("cast")
             from .cast_review import review_cast
-            changed = review_cast(directory, config, args.config, provider_client, progress,
-                                  instructions=args.instructions, recheck_cache=fresh("cast"))
+            changed = free(lambda: review_cast(directory, config, args.config, provider_client, progress,
+                                               instructions=args.instructions, recheck_cache=fresh("cast")), "cast")
             done("cast")
             if changed:
                 original = _completed_directory(directory)[0]
@@ -578,7 +597,8 @@ def main(argv=None, *, in_shell=False):
             # An entry listed under a description is called by the personal name the book gives it.
             check("names")
             from .name_review import review_names
-            changed = review_names(directory, config, provider_client, progress, recheck_cache=fresh("names"))
+            changed = free(lambda: review_names(directory, config, provider_client, progress,
+                                                recheck_cache=fresh("names")), "names")
             done("names")
             if changed:
                 original = _completed_directory(directory)[0]
@@ -587,15 +607,15 @@ def main(argv=None, *, in_shell=False):
             if "character-splits" in planned:
                 check("character-splits")
             from .character_split import review_splits
-            if review_splits(directory, config, provider_client, progress, instructions=args.instructions,
-                             reconsider_choices=args.reconsider_choices):
+            if free(lambda: review_splits(directory, config, provider_client, progress, instructions=args.instructions,
+                                          reconsider_choices=args.reconsider_choices), "character-splits"):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A voice description whose gender the book (or a person's notes) contradicts is fixed.
             check("genders")
             from .gender_review import review_genders
-            changed = review_genders(directory, config, args.config, provider_client, progress,
-                                     recheck_cache=fresh("genders"))
+            changed = free(lambda: review_genders(directory, config, args.config, provider_client, progress,
+                                                  recheck_cache=fresh("genders")), "genders")
             done("genders")
             if changed:
                 original = _completed_directory(directory)[0]
@@ -604,19 +624,20 @@ def main(argv=None, *, in_shell=False):
             if "narrators" in planned:
                 check("narrators")
             from .narrator_review import review_narrators
-            if review_narrators(directory, config, provider_client, progress, instructions=args.instructions):
+            if free(lambda: review_narrators(directory, config, provider_client, progress,
+                                             instructions=args.instructions), "narrators"):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Groups the tags show (a chorus, a crowd) are proposed; a person casts them (cast C).
             check("groups")
             from .group_proposals import review_groups
-            if review_groups(directory, progress):
+            if free(lambda: review_groups(directory, progress), "groups"):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A character the tags leave unclear (one "they said") is asked about; "y" proposes it as a group.
             from .group_check import review_group_tags
-            changed = review_group_tags(directory, config, provider_client, progress,
-                                        recheck_cache=fresh("group-tags"))
+            changed = free(lambda: review_group_tags(directory, config, provider_client, progress,
+                                                     recheck_cache=fresh("group-tags")), "groups")
             done("group-tags")
             if changed:
                 original = _completed_directory(directory)[0]
@@ -624,9 +645,9 @@ def main(argv=None, *, in_shell=False):
             # A line several of the scene's characters say together ("the voices all shouted") is given to all of them.
             check("joint-lines")
             from .joint_lines import review_joint_lines
-            changed = review_joint_lines(directory, config, provider_client, progress,
-                                         reconsider_choices=args.reconsider_choices,
-                                         recheck_cache=fresh("joint-lines"))
+            changed = free(lambda: review_joint_lines(directory, config, provider_client, progress,
+                                                      reconsider_choices=args.reconsider_choices,
+                                                      recheck_cache=fresh("joint-lines")), "joint-lines")
             done("joint-lines")
             if changed:
                 original = _completed_directory(directory)[0]
@@ -634,9 +655,10 @@ def main(argv=None, *, in_shell=False):
             # Every paragraph's speakers and split are checked once, and again after it changes.
             check("attribution")
             from .attribution_recheck import recheck_attributions
-            changed = recheck_attributions(directory, config, provider_client, progress, notes=args.instructions,
-                                           reconsider_choices=args.reconsider_choices,
-                                           recheck_cache=fresh("attribution"))
+            changed = free(lambda: recheck_attributions(directory, config, provider_client, progress,
+                                                        notes=args.instructions,
+                                                        reconsider_choices=args.reconsider_choices,
+                                                        recheck_cache=fresh("attribution")), "attribution")
             done("attribution")
             if changed:
                 original = _completed_directory(directory)[0]
@@ -644,19 +666,21 @@ def main(argv=None, *, in_shell=False):
             # Directions made with older rules are directed again; typed ones stay.
             check("directions")
             from .direction_refresh_command import refresh_outdated_directions
-            if refresh_outdated_directions(directory, config, provider_client, progress):
+            if free(lambda: refresh_outdated_directions(directory, config, provider_client, progress), "directions"):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every line's direction is reviewed in its scene; only wrong ones are replaced.
             from .direction_review import review_book_directions
-            changed = review_book_directions(directory, config, provider_client, progress,
-                                             recheck_cache=fresh("directions"))
+            changed = free(lambda: review_book_directions(directory, config, provider_client, progress,
+                                                          recheck_cache=fresh("directions")), "directions")
             done("directions")
             if changed:
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             stream_console.end_checks()
-            progress(f"Checks finished ({len(planned)} of {len(planned)}).")
+            progress(f"Checks finished ({len(planned)} of {len(planned)})." if not skipped else
+                     f"Checks finished; skipped while a book was in use: {', '.join(labels[key] for key in skipped)}. "
+                     "Rerunning analyze on the book does them.")
             if after_fresh:
                 # This command completed the speakers and asked its questions a moment ago.
                 return _speaker_completion_status(original)

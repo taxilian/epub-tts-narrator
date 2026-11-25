@@ -26,6 +26,15 @@ def _read(path):
 
 
 _RENDER_LOCKS = (".audio-render.lock", ("render-work", ".render.lock"))
+
+
+class BookBusy(ValueError):
+    """A book this change needs is in use (rendering, casting, another save): try again once it is free.
+
+    Nothing was changed. The step that raised it can run again as it is: its
+    model answers are cached, so ``analyze`` offers to wait and retry instead
+    of ending the run (``busy_retry.run_when_free``).
+    """
 # How long a revision waits for another process's save of a book in its chain (held for seconds).
 LOCK_WAIT_SECONDS = 60.0
 LOCK_POLL_SECONDS = 0.5
@@ -69,20 +78,24 @@ def reserve_revision_scope(directories, *, scope="attribution"):
     """
     from .renderer.run_locks import acquire_directory_lock
     paths = related_directories(directories)
+    # A render blocks a change to the book it renders, not one to another book of the series: the books
+    # around it are only relinked to the revised history, which a running render tolerates as it does a
+    # speaker revision. A later book the change itself rewrites is checked when it is published.
+    own = [Path(path).resolve() for path in directories]
     locks = {}
     try:
         if scope != "attribution":
-            _require_renderers_idle(paths)
+            _require_renderers_idle(own)
         for path in paths:
             lock_path = path / ".analysis-update.lock"
             try:
                 locks[path] = acquire_directory_lock(lock_path)
             except FileExistsError as exc:
-                raise ValueError(
+                raise BookBusy(
                     f"Analysis revision is already active, or the lock cannot be proven stale: {lock_path}. "
                     f"A marked lock left by a crashed process is reclaimed automatically when you rerun.") from exc
         if scope != "attribution":
-            _require_renderers_idle(paths)
+            _require_renderers_idle(own)
         yield dict(locks)
     finally:
         for lock in reversed(list(locks.values())):
@@ -93,7 +106,7 @@ def _require_renderers_idle(paths):
     for path in paths:
         reason = _render_active(path)
         if reason:
-            raise ValueError(f"Rendering is active; finish it before revising analysis: {path} ({reason})")
+            raise BookBusy(f"Rendering is active; finish it before revising analysis: {path} ({reason})")
 
 
 def _require_owned_reservation(path, lock):
@@ -316,7 +329,7 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
         for path in paths:
             if path in covered:
                 continue
-            stack.enter_context(refresh_locks(path))
+            stack.enter_context(refresh_locks(path, renders_in_chain=False))
             covered.update(related_directories([path]))
             covered.update(continuation_directories(path))
         for path in covered:
@@ -497,8 +510,9 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes)
         if readiness(candidate)["errors"]:
             raise ValueError("Cannot publish an invalid speaker revision")
-        if scope not in {"attribution", "narrators", "character-rename"} and not reserved and (reason := _render_active(path)):
-            raise ValueError(f"Rendering is active; finish it before revising analysis: {path} ({reason})")
+        if (scope not in {"attribution", "narrators", "character-rename"} and path in revisions
+                and (reason := _render_active(path))):
+            raise BookBusy(f"Rendering is active; finish it before revising analysis: {path} ({reason})")
     locks = []
     transaction = None
     installed = []
@@ -516,7 +530,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                 except FileExistsError as exc:
                     # Another process (an analysis of a later book saving a step) holds it for seconds.
                     if waited >= LOCK_WAIT_SECONDS:
-                        raise ValueError(
+                        raise BookBusy(
                             f"Analysis revision is already active, or the lock cannot be proven stale: {lock_path}. "
                             f"A marked lock left by a crashed process is reclaimed automatically when you "
                             f"rerun.") from exc
@@ -590,8 +604,9 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
         for path in paths:
             if any(_hash(path / name) != checksum for name, checksum in original_hashes[path].items()):
                 raise ValueError(f"Analysis changed before publication: {path}")
-            if scope not in {"attribution", "narrators", "character-rename"} and not reserved and (reason := _render_active(path)):
-                raise ValueError(f"Rendering started during revision: {path} ({reason})")
+            if (scope not in {"attribution", "narrators", "character-rename"} and path in revisions
+                    and (reason := _render_active(path))):
+                raise BookBusy(f"Rendering started during revision: {path} ({reason})")
         # A reservation destroyed or replaced after entry cannot write: each
         # handle must still prove exclusive ownership immediately before the
         # first install, with no silent reacquisition of stale ownership.

@@ -42,9 +42,14 @@ def _require_ready(directory, *, marker_only=False):
 
 
 @contextmanager
-def refresh_locks(directory):
+def refresh_locks(directory, *, renders_in_chain=True):
+    """Hold the chain's refresh locks; refuse while a book in it is rendered, cast or saved.
+
+    ``renders_in_chain=False`` (a change to ``directory`` alone, which only relinks the others) refuses
+    only a render of ``directory`` itself; a profile refresh of the whole chain keeps every render out.
+    """
     from .analysis_directory import continuation_directories
-    from .analysis_revision import related_directories, _render_active
+    from .analysis_revision import BookBusy, related_directories, _render_active
     from .renderer.run_locks import acquire_directory_lock, directory_lock_status
     directory = Path(directory).resolve()
     paths = sorted(set(related_directories([directory]) + continuation_directories(directory)))
@@ -62,10 +67,11 @@ def refresh_locks(directory):
             sentinels.extend((path / "voices").glob("*/.lock"))
             held = [f"{marker}: {reason}" for marker in sentinels
                     if (marker.exists() or marker.is_symlink()) and (reason := directory_lock_status(marker))]
-            if reason := _render_active(path):
+            # A change to this book alone only relinks the others (see reserve_revision_scope).
+            if (renders_in_chain or path == directory) and (reason := _render_active(path)):
                 held.insert(0, reason)
             if held:
-                raise ValueError(f"Rendering, casting, or analysis revision is active in the refresh chain: {path} "
+                raise BookBusy(f"Rendering, casting, or analysis revision is active in the refresh chain: {path} "
                                  f"({'; '.join(held)}). Let it finish, then rerun.")
         yield
     finally:
