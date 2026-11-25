@@ -303,13 +303,15 @@ class EnsembleCastScreenTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await pilot.press("C")
                 self.assertIsInstance(app.screen, ChoiceScreen)
-                await pilot.press("enter")                      # several voices
+                await pilot.press("down", "enter")              # choose how many and how they speak
                 self.assertIsInstance(app.screen, ChoiceScreen)
                 await pilot.press("down", "down", "enter")      # 4 voices (the proposal)
                 await pilot.press("enter")                      # unison first: the proposed mode
                 await pilot.press("down", "down", "down", "enter")  # crowd mix
+                self.assertIsInstance(app.screen, ChoiceScreen)
+                await pilot.press("down", "enter")              # some are characters in the cast
                 self.assertIsInstance(app.screen, MultiChoiceScreen)
-                await pilot.press("enter")                      # no named characters
+                await pilot.press("enter")                      # none of them after all
                 self.assertIsInstance(app.screen, ConfirmScreen)
                 self.assertFalse(apply.called, "nothing is saved before the person confirms")
                 await pilot.press("y")
@@ -319,6 +321,48 @@ class EnsembleCastScreenTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(apply.called)
         self.assertTrue(controller.reopen)
 
+
+    async def test_shift_c_first_offers_the_group_its_own_proposed_voices_in_one_step(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from cast_tui_fixtures import FakePlayer, FakeSession, voice_row
+        from epub_tts_narrator.renderer.cast_tui import CastApp
+        from epub_tts_narrator.renderer.cast_tui_model import CastController
+        from epub_tts_narrator.tui_widgets import ChoiceScreen, ConfirmScreen
+        from textual.widgets import DataTable
+        asyncio.get_running_loop().slow_callback_duration = 10
+        session = FakeSession(rows=[voice_row("v-jotun", "dead jotun"), voice_row("v-mara", "Mara")])
+        session.store = None
+        session.bundle = {"cast": {"characters": []}}
+        controller = CastController(session, FakePlayer(), describe_error=str)
+        self.addCleanup(controller.close)
+        asked = []
+        controller.ensemble_view = lambda row: {
+            "name": "dead jotun", "group": {"proposed_voices": 4}, "ensemble": None, "voices": 4, "mode": "unison",
+            "mix": None, "named_members": [], "choosable": [("v-mara", "Mara")],
+            "evidence": ["several said in unison"]}
+
+        def plan(row, **choice):
+            asked.append(choice)
+            return SimpleNamespace(name="dead jotun", summary="dead jotun: 4 voices", path=None, hashes={},
+                                   candidate={}, added=())
+        controller.ensemble_plan = plan
+        app = CastApp(controller, title="Fixture Book", startup=False)
+        with patch("epub_tts_narrator.renderer.ensemble_command.apply"):
+            async with app.run_test(size=(160, 45)) as pilot:
+                app.query_one("#voices", DataTable).focus()
+                await pilot.pause()
+                await pilot.press("C")
+                self.assertIsInstance(app.screen, ChoiceScreen)
+                self.assertIn("Give it its own 4 voices, unison (proposed from the book)",
+                              str(app.screen.options[0][1]))
+                await pilot.press("enter")
+                self.assertIsInstance(app.screen, ConfirmScreen)
+                await pilot.press("y")
+                controller.jobs.wait_idle(5)
+                await pilot.pause(1)
+        self.assertEqual(asked, [{"voices": 4, "mode": "unison", "mix": None, "named": []}])
 
     async def test_a_groups_voices_are_listed_under_it_and_notes_go_to_the_group(self):
         import asyncio

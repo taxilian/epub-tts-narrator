@@ -717,7 +717,10 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         from .cast_tui_model import MODE_WORDS
         from ..ensembles import DEFAULT_RECIPES
         quote = f" The book: “{shown['evidence'][0]}”." if shown["evidence"] else ""
-        start = [("set", "Hear it as several voices"), ("single", "Keep it as one voice")]
+        # A group is first offered voices of its own: the count and way of speaking the book suggests.
+        proposal = " (proposed from the book)" if (shown["group"] or {}).get("proposed_voices") else ""
+        start = [("own", f"Give it its own {shown['voices']} voices, {shown['mode']}{proposal}"),
+                 ("set", "Choose how many voices and how they speak"), ("single", "Keep it as one voice")]
         if shown["ensemble"] and shown["ensemble"].get("members"):
             start = [("hear", "Listen to a line in all its voices"), ("murmur", "Listen to its murmur"),
                      ("set", "Change its voices"), ("single", "Keep it as one voice")]
@@ -726,6 +729,8 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
             if choice in {"hear", "murmur"}:
                 self._attempt(lambda: self.controller.hear_ensemble(row, murmur=choice == "murmur"))
                 return
+            if choice == "own":
+                return confirm(shown["voices"], shown["mode"], shown["mix"], [])
             if choice == "single":
                 plan = self._attempt(lambda: self.controller.ensemble_decline(row))
                 if plan is not None:
@@ -762,11 +767,26 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         def named(voices, mode, mix):
             if not shown["choosable"]:
                 return confirm(voices, mode, mix, [])
-            options = [(None, "No named characters: new voices for the group")] + [
-                (voice_id, f"{name} ({voice_id})") for voice_id, name in shown["choosable"]]
-            self.push_screen(MultiChoiceScreen(
-                "Are named characters among the voices (e.g. the twins)? Space marks several", options),
-                lambda chosen: chosen is not None and confirm(voices, mode, mix, chosen))
+
+            def pick():
+                options = [(None, "None of them: new voices for the group")] + [
+                    (voice_id, f"{name} ({voice_id})") for voice_id, name in shown["choosable"]]
+                self.push_screen(MultiChoiceScreen(
+                    "Which characters in the cast are among the voices? Space marks several", options,
+                    selected=shown["named_members"]),
+                    lambda chosen: chosen is not None and confirm(voices, mode, mix, chosen))
+            if shown["named_members"]:
+                return pick()
+            # Its own voices unless a person says some are characters the cast already has (the twins).
+            whose = [("own", f"{voices - 1} new voice(s) of its own, beside this one"),
+                     ("named", "Some of them are characters in the cast (e.g. the twins)")]
+
+            def answered(answer):
+                if answer == "own":
+                    confirm(voices, mode, mix, [])
+                elif answer == "named":
+                    pick()
+            self.push_screen(ChoiceScreen(f"Whose voices are {shown['name']}'s?", whose, filterable=False), answered)
 
         def confirm(voices, mode, mix, members):
             plan = self._attempt(lambda: self.controller.ensemble_plan(row, voices=voices, mode=mode, mix=mix,

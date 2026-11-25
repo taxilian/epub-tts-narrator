@@ -390,7 +390,7 @@ Every phase in §8 is implemented:
   - casting offers and auditions member voices, and pool voices follow the group's accent;
   - `plan` reports `collective_voices`, including murmurs and the groups they wait for, and `render` names uncast proposals.
 - **Cast screen `C`:**
-  - set-up choices: voice count, mode, mix, named members, decline;
+  - set-up choices: first the group's own proposed voices in one step, else voice count, mode, mix, and whether named cast members are among them; decline;
   - previews of a line in all voices and of the murmur;
   - published through revision scope `ensembles`, with new pool voices described separately;
   - a pool voice a named member keeps is shared with `d`.
