@@ -653,7 +653,8 @@ class CastApp(VimKeysMixin, CapturePrintMixin, App):
         def chosen(other_id):
             if other_id is None:
                 return
-            other = self.controller.row(other_id)
+            # An earlier book's character has no row here; its ID stands for it (and it is always kept).
+            other = self.controller.row(other_id) or other_id
             plan = self._attempt(lambda: self.controller.merge_plan(row, other))
             if plan is None:
                 return

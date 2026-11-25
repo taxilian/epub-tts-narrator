@@ -272,6 +272,45 @@ class CharacterMergeTests(unittest.TestCase):
                          [(self.keeper["id"], "The stranger", ["The keeper"])])
         validate_registry(registry)
 
+    def test_an_entry_may_be_merged_into_a_character_only_an_earlier_book_has(self):
+        # Book 1's Mara returns in book 2 under another name, and the series check never compared them.
+        self.publish(later_characters=(("stranger", "The stranger", ()),),
+                     later=[[("A stranger spoke. ", None), ("“Hello,”", "stranger")],
+                            [("“Still here,”", "stranger")]])
+        bundle = load_bundle(self.paths[1])
+        store = SimpleNamespace(canonical_id=lambda voice: voice,
+                                load=lambda voice: {"inherited": True} if voice == self.mara["voice_id"] else None)
+        from epub_tts_narrator.renderer.cast_tui_model import CastController
+        session = SimpleNamespace(bundle=bundle, config=None, store=store, rows=lambda: [
+            {"voice_id": row["voice_id"], "label": row["name"], "characters": [row["name"]], "candidates": [],
+             "selected": None} for row in bundle["cast"]["characters"]])
+        controller = CastController(session, SimpleNamespace(stop=lambda: None), describe_error=str)
+        self.addCleanup(controller.close)
+        controller.refresh()
+        stranger = next(row for row in bundle["cast"]["characters"] if row["name"] == "The stranger")
+        options = dict(controller.merge_options(controller.row(stranger["voice_id"])))
+        self.assertIn("Mara — from The Lantern, not in this book", options[self.mara["id"]])
+        self.assertEqual(set(options), {self.mara["id"], self.keeper["id"]},
+                         "both earlier characters this book lacks, never the entry itself")
+        plan = controller.merge_plan(controller.row(stranger["voice_id"]), self.mara["id"])
+        self.assertEqual((plan.kept["id"], plan.fixed, plan.books[0].took_in), (self.mara["id"], "The Lantern", True))
+        self.assertIn("from The Lantern, not in this book yet", plan.text)
+        self.assertIn("2 line(s) move to Mara's voice", plan.text)
+        self.assertEqual(plan_merge(bundle, None, "The stranger", "Mara", store=store).kept["id"], self.mara["id"],
+                         "the command names it the same way")
+        apply_merge(plan, progress=lambda _: None)
+        merged, registry, _ = _completed_directory(self.paths[1])
+        mara = next(row for row in merged["cast"]["characters"] if row["id"] == self.mara["id"])
+        self.assertEqual((mara["name"], mara["voice_id"], mara["aliases"]), ("Mara", self.mara["voice_id"], ["The stranger"]))
+        self.assertNotIn(stranger["id"], {row["id"] for row in merged["cast"]["characters"]})
+        spoken = {segment["voice_id"] for segment in merged["segments"] if segment["kind"] != "narration"}
+        self.assertEqual(spoken, {self.mara["voice_id"]})
+        voice = next(row for row in merged["cast"]["voices"] if row["id"] == self.mara["voice_id"])
+        self.assertEqual(voice["series_origin"]["kind"], "series_casting_reuse")
+        validate_registry(registry)
+        with self.assertRaisesRegex(ValueError, "merge them in an earlier book that has both"):
+            plan_merge(load_bundle(self.paths[1]), None, "The keeper", "Mara", store=store)
+
     def test_the_entry_with_an_accepted_voice_survives_by_default_and_the_person_may_choose(self):
         self.publish()
         bundle = load_bundle(self.paths[0])

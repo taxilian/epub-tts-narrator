@@ -18,9 +18,9 @@ import json
 from pathlib import Path
 import sys
 
-from ..character_merge import (character_lines, character_roles, combined_names, first_line, kept_records_for,
-                               merge_document, name_key, receipt, remap_decisions, resolve_character,
-                               segment_speakers)
+from ..character_merge import (carried_voice, character_lines, character_roles, combined_names, first_line,
+                               kept_records_for, merge_document, name_key, receipt, remap_decisions,
+                               resolve_character, segment_speakers)
 from ..pipeline import fingerprint
 
 
@@ -201,6 +201,51 @@ def _book_change(path, original, candidate, absorbed_id, *, took_in):
                       warnings=warnings, moved_lines=moved, joined_lines=joined, took_in=took_in)
 
 
+def earlier_characters(registry, document):
+    """``[(character, book title)]``: characters only earlier books of the series have, nearest book first.
+
+    A later book's entry may be one of them under another name (book 1's "First Voice" is
+    book 2's "Hissing Shadow"), so a merge may name one; it is then taken into this book.
+    """
+    here = {row["id"] for row in document["cast"]["characters"]}
+    found, seen = [], set()
+    for book in reversed(registry["books"][:-1]):
+        title = book["book"].get("title") or book["source_fingerprint"][:12]
+        for row in book["cast"]["characters"]:
+            if row["id"] not in here and row["id"] not in seen:
+                seen.add(row["id"])
+                found.append((row, title))
+    return found
+
+
+def _earlier_records(registry, character_id):
+    """The nearest earlier book's records of ``character_id``, as a book without it takes them in."""
+    for book in reversed(registry["books"][:-1]):
+        character = next((row for row in book["cast"]["characters"] if row["id"] == character_id), None)
+        if character is not None:
+            voice = next(row for row in book["cast"]["voices"] if row["id"] == character["voice_id"])
+            carried = {key: deepcopy(value) for key, value in character.items()
+                       if key not in {"evidence", "series_identity"}}
+            carried["evidence"] = []
+            return {"character": carried, "voice": carried_voice(voice, series_id=registry["series_id"],
+                                                                 source_fingerprint=book["source_fingerprint"])}
+    raise ValueError(f"{character_id} is in no earlier book of this series")
+
+
+def _resolve(document, registry, text):
+    """The character a person means: this book's, else one only an earlier book has."""
+    try:
+        return resolve_character(document, text)
+    except ValueError as error:
+        earlier = earlier_characters(registry, document)
+        if not earlier:
+            raise
+        try:
+            return resolve_character({"cast": {"characters": [row for row, _ in earlier]}}, text)
+        except ValueError:
+            raise error from None
+
+
 def plan_merge(bundle, config, first, second, *, keep=None, name=None, store=None):
     """Work out the whole merge without writing anything; ``describe(plan)`` shows it."""
     from ..analysis_directory import _completed_directory
@@ -210,14 +255,18 @@ def plan_merge(bundle, config, first, second, *, keep=None, name=None, store=Non
     hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest() for path in paths}
     loaded = {path: _completed_directory(path) for path in paths}
     document, registry = loaded[directory][0], loaded[directory][1]
-    one, other = resolve_character(document, first), resolve_character(document, second)
+    one, other = _resolve(document, registry, first), _resolve(document, registry, second)
+    here = {row["id"] for row in document["cast"]["characters"]}
+    absent = [row for row in (one, other) if row["id"] not in here]
+    if len(absent) == 2:
+        raise ValueError(f"Neither {one['name']} nor {other['name']} is in this book; merge them in an earlier book")
     if one["id"] == other["id"]:
         raise ValueError(f"{first!r} and {second!r} are the same cast entry ({one['name']})")
     if store is None and config is not None:
         from .book_context import voice_store
         store = voice_store(bundle, config)
     states = {row["id"]: _voice_state(store, row["voice_id"]) for row in (one, other)}
-    lines = {row["id"]: character_lines(document, row["id"]) for row in (one, other)}
+    lines = {row["id"]: character_lines(document, row["id"]) if row["id"] in here else 0 for row in (one, other)}
     # A character an earlier book already has keeps its identity: a new entry merges into it, never the reverse.
     origins = {}
     for book in registry["books"][:-1]:
@@ -227,7 +276,7 @@ def plan_merge(bundle, config, first, second, *, keep=None, name=None, store=Non
     fixed = ""
     chosen = None
     if keep is not None:
-        chosen = resolve_character(document, keep)
+        chosen = _resolve(document, registry, keep)
         if chosen["id"] not in {one["id"], other["id"]}:
             raise ValueError(f"--keep must name one of the two characters being merged, not {chosen['name']!r}")
     if len(inherited) == 1:
@@ -251,11 +300,16 @@ def plan_merge(bundle, config, first, second, *, keep=None, name=None, store=Non
             reason = (("both have accepted voices; " if owned else "")
                       + ("it has more lines" if lines[one["id"]] > lines[other["id"]] else "it was named first"))
     absorbed = other if kept is one else one
+    if absent and absent[0]["id"] != kept["id"]:
+        raise ValueError(f"{absent[0]['name']} is not in this book and {kept['name']} comes from an earlier book too; "
+                         "merge them in an earlier book that has both")
+    # A character only an earlier book has is taken into this book with its voice.
+    taken = _earlier_records(registry, kept["id"]) if absent else None
     name = kept["name"] if name is None else name.strip()
     if name_key(name) not in {name_key(item) for item in combined_names(kept, absorbed)}:
         raise ValueError(f"The merged name must be one of: " + ", ".join(combined_names(kept, absorbed)))
-    merged = merge_document(document, receipt(kept["id"], absorbed["id"], name))
-    books = [_book_change(directory, document, merged, absorbed["id"], took_in=False)]
+    merged = merge_document(document, receipt(kept["id"], absorbed["id"], name, kept_records=taken))
+    books = [_book_change(directory, document, merged, absorbed["id"], took_in=taken is not None)]
     for path in paths:
         if path == directory:
             continue
@@ -279,7 +333,8 @@ def plan_merge(bundle, config, first, second, *, keep=None, name=None, store=Non
                      reason=reason, kept_lines=lines[kept["id"]], absorbed_lines=lines[absorbed["id"]],
                      kept_voice=_describe_state(states[kept["id"]]),
                      absorbed_voice=_describe_state(states[absorbed["id"]]), books=books, earlier=earlier, fixed=fixed,
-                     kept_first=first_line(document, kept["id"]), absorbed_first=first_line(document, absorbed["id"]),
+                     kept_first="" if taken else first_line(document, kept["id"]),
+                     absorbed_first=first_line(document, absorbed["id"]),
                      origins={row["id"]: origins[row["id"]] for row in (kept, absorbed) if row["id"] in origins})
 
 
@@ -300,8 +355,9 @@ def describe(plan):
     for title, entry, voice, count, first in (("Keep:  ", kept, plan.kept_voice, plan.kept_lines, plan.kept_first),
                                               ("Absorb:", absorbed, plan.absorbed_voice, plan.absorbed_lines,
                                                plan.absorbed_first)):
-        lines.append(f"  {title} {entry['name']}  ({entry['id']}, voice {entry['voice_id']}) — {voice}; "
-                     f"{count} line(s)")
+        amount = (f"from {plan.origins[entry['id']]}, not in this book yet"
+                  if entry is kept and selected.took_in else f"{count} line(s)")
+        lines.append(f"  {title} {entry['name']}  ({entry['id']}, voice {entry['voice_id']}) — {voice}; {amount}")
         # Two entries often share a name: what each is and says tells them apart.
         description = " ".join(entry["description"].split())
         if description:

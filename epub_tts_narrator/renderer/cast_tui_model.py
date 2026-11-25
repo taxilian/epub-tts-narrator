@@ -677,13 +677,32 @@ class CastController:
             if description:
                 text += " · " + (description if len(description) <= 60 else description[:59].rstrip() + "…")
             options.append((other["voice_id"], f"{text}  ({other['voice_id']})"))
+        # Characters only earlier books have: this entry may be one of them under another name.
+        for character, title in self._earlier_characters():
+            description = " ".join(character.get("description", "").split())
+            text = f"{character['name']} — from {title}, not in this book"
+            if description:
+                text += " · " + (description if len(description) <= 60 else description[:59].rstrip() + "…")
+            options.append((character["id"], f"{text}  ({character['voice_id']})"))
         return options
 
+    def _earlier_characters(self):
+        from pathlib import Path
+        from ..analysis_directory import _completed_directory
+        from .character_merge_command import earlier_characters
+        if not self.session.bundle.get("directory"):
+            return []  # a cast not loaded from a saved book has no earlier books
+        document, registry, _ = _completed_directory(Path(self.session.bundle["directory"]))
+        return earlier_characters(registry, document)
+
     def merge_plan(self, row, other, keep=None):
-        """The planned merge of two rows' characters (``keep``: a row, else the default survivor)."""
+        """The planned merge of two rows' characters (``keep``: a row, else the default survivor).
+
+        ``other`` may instead be the ID of a character only an earlier book has (``merge_options``).
+        """
         from .character_merge_command import plan_merge
         return plan_merge(self.session.bundle, self.session.config, self.character(row)["id"],
-                          self.character(other)["id"], keep=None if keep is None else self.character(keep)["id"],
+                          other if isinstance(other, str) else self.character(other)["id"], keep=None if keep is None else self.character(keep)["id"],
                           store=self.session.store)
 
     def merge(self, plan):
