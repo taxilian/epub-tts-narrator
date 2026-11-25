@@ -374,6 +374,21 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.assertIn("Enter selects a voice only", output)
         self.assertEqual(output.count("Most likely speakers"), 2)
 
+    def test_b_goes_back_to_the_previous_passage_and_replaces_its_answer(self):
+        from test_speaker_tui import unsettled_lines
+        with patch("epub_tts_narrator.speaker_decisions.rank_speakers",
+                   return_value=[{"role_id": "mara", "reason": ""}, {"role_id": "lena", "reason": ""}]):
+            # Passage 1: the wrong name; passage 2: B; passage 1 again: Lena; passage 2: Mara.
+            result, output = self.decide(unsettled_lines(2), "1\nb\n2\n1\n")
+        self.assertEqual({row["id"]: row["role_id"] for row in result["segments"] if row["id"].startswith("line")},
+                         {"line0": "lena", "line1": "mara"})
+        self.assertEqual([row["segment_id"] for row in result["provenance"]["speaker_decisions"]["decisions"]],
+                         ["line0", "line1"])
+        self.assertIn("B. Back to passage 1 (now: Mara) — change that answer", output)
+        self.assertIn("Back to passage 1/2; its answer is cleared.", output)
+        self.assertNotIn("B. Back to passage", output.split("Passage 1/2", 1)[1].split("Passage 2/2", 1)[0])
+        self.assertIn("review-ui 'books/A Book', then e on the passage", output)
+
     def test_no_likely_options_requires_other_and_never_accepts_blank(self):
         with patch("epub_tts_narrator.speaker_decisions.rank_speakers", return_value=[]):
             result, output = self.decide(missing(), "\n1\no\n2\n")

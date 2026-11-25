@@ -5,8 +5,10 @@ Opened by ``speaker_decisions.prompt_speaker_decisions`` inside the run shell
 around the passage scrolls on the left, every voice in its own colour (the
 colours ``review-ui`` uses), and the passage itself highlighted in the middle;
 the menu on the right lists the likely speakers with their reasons, then
-every voice, then the other choices. It dismisses with the answer
-``prompt_speaker_decisions`` expects; nothing here changes the book.
+every voice, then the other choices, including Back (``B``) to the previous
+passage when the view has one, to change an answer given by mistake. It
+dismisses with the answer ``prompt_speaker_decisions`` expects; nothing here
+changes the book.
 """
 
 from __future__ import annotations
@@ -160,6 +162,7 @@ class SpeakerScreen(Dialog):
     SpeakerScreen #speaker-menu { height: 1fr; }
     SpeakerScreen #speaker-error { color: $error; height: auto; }
     SpeakerScreen #speaker-help { color: $text-muted; height: auto; }
+    SpeakerScreen #speaker-later { color: $text-muted; height: auto; }
     """
     BINDINGS = [
         Binding("escape", "leave", "Save and stop", priority=True),
@@ -169,6 +172,7 @@ class SpeakerScreen(Dialog):
         Binding("c", "center", "Back to the passage", show=False),
         Binding("t", "together", "Together"), Binding("n", "new", "New character"),
         Binding("s", "skip", "Skip"), Binding("q", "stop", "Save and stop"), Binding("u", "unresolved", "Unresolved"),
+        Binding("b", "previous", "Previous passage"),
         *[Binding(str(number), f"suggestion({number})", show=False) for number in range(1, 10)],
     ]
 
@@ -194,10 +198,15 @@ class SpeakerScreen(Dialog):
                     yield Static(Text(view.get("error") or ""), id="speaker-error")
             keys = {"together": "T together", "new": "N new character", "skip": "S skip",
                     "stop": "Q or Escape save and stop", "unresolved": "U unresolved"}
+            previous = view.get("previous")
             yield Static(Text(" · ".join(["↑↓ choose", "Enter assigns", "1–9 a likely speaker", "/ filter",
                                           *(keys[action] for action in self.actions),
+                                          *([f"B back to passage {previous['number']}"] if previous else []),
                                           *(["Escape goes back"] if self.back else []),
                                           "PgUp/PgDn scroll", "C back to the passage"])), id="speaker-help")
+            if view.get("later"):
+                yield Static(Text("Chose a speaker by mistake? B goes back while choosing; after this run: "
+                                  + view["later"] + "."), id="speaker-later")
 
     def _options(self, text):
         """Menu entries: likely speakers (numbered), every voice, then the other choices."""
@@ -230,6 +239,12 @@ class SpeakerScreen(Dialog):
             options.append(Option(Text("Other choices", style="bold"), disabled=True))
             for key in self.actions:
                 options.append(Option(Text(ACTIONS[key]), id=f"action:{key}"))
+            previous = self.view.get("previous")
+            if previous:
+                label = Text(f"Back to passage {previous['number']} — change its answer ({previous['answer']})")
+                if previous.get("text"):
+                    label.append("\n   " + previous["text"], style="dim")
+                options.append(Option(label, id="action:previous"))
         return options
 
     def _voice_label(self, role_id, label):
@@ -290,7 +305,9 @@ class SpeakerScreen(Dialog):
     def check_action(self, action, parameters):
         # Letters and digits are shortcuts only while the menu, not the filter box, has focus.
         if isinstance(self.focused, Input) and action in {"together", "new", "skip", "stop", "suggestion", "filter",
-                                                           "center", "unresolved"}:
+                                                           "center", "unresolved", "previous"}:
+            return False
+        if action == "previous" and not self.view.get("previous"):
             return False
         if action in ACTIONS and action not in self.actions:
             return False
@@ -331,6 +348,11 @@ class SpeakerScreen(Dialog):
 
     def action_unresolved(self):
         self.dismiss({"action": "unresolved"})
+
+    def action_previous(self):
+        """Back to the previous passage: its answer is cleared and it is asked again."""
+        if self.view.get("previous"):
+            self.dismiss({"action": "back"})
 
     def action_leave(self):
         """Escape: out of the filter box first, else back (inside a review) or save and stop."""
