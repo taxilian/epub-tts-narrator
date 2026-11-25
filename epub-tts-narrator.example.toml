@@ -76,6 +76,11 @@ attribution_review_chunk_chars = 60000
 # Shared concurrency ceiling for attribution, identity, and passage-review requests.
 # Identity reviewers run at most three concurrently; analysis phases do not overlap.
 attribution_workers = 1
+# After a new book is analyzed and saved, check it at once the way rerunning analyze
+# would: wrongly divided speech, cast entries that are one person, names, genders,
+# groups, every paragraph's speakers and every line's direction. Each check is shown
+# as "Check N of M". Turn off for a quicker first pass; a rerun still checks.
+check_new_book = true
 # Optional cache location. It must be inside each analysis output directory.
 # The default is <output>/.analysis-cache.
 # cache_dir = "runs/my-book/.analysis-cache"

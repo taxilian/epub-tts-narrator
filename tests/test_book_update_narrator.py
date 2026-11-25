@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from epub_tts_narrator.cli import main
-from shared_fixtures import make_serial_epub
+from shared_fixtures import make_serial_epub, skip_rerun_reviews
 from test_narrator_read import NarratorClient
 
 
@@ -25,6 +25,7 @@ class SourceEvidenceNarratorClient(NarratorClient):
 
 class NarratorSourceEditTests(unittest.TestCase):
     def setUp(self):
+        skip_rerun_reviews(self)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)

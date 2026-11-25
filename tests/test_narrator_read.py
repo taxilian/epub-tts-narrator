@@ -17,7 +17,7 @@ from epub_tts_narrator.narrator_ledger import apply_delta, new_ledger, undo_merg
 from epub_tts_narrator.narrator_read import narrated_analyze
 from epub_tts_narrator.provider import OpenAICompatibleClient, ProviderError
 from epub_tts_narrator.quote_spans import find_tag, quote_spans
-from shared_fixtures import make_serial_epub
+from shared_fixtures import make_serial_epub, skip_rerun_reviews
 from test_provider import FakeResponse, delta, delta_end, sse
 
 
@@ -1422,6 +1422,7 @@ class NarratorProviderUsageTests(unittest.TestCase):
 
 class NarratorCliTests(unittest.TestCase):
     def setUp(self):
+        skip_rerun_reviews(self)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
@@ -1464,6 +1465,35 @@ class NarratorCliTests(unittest.TestCase):
         modes = {call.get("mode") for client in self.clients for call in client.calls}
         self.assertTrue(modes <= {"narrator_prep", "narrator_markup", "narrator_verify", "narrator_verify_tiebreak", "narrator_voices",
                                   "narrator_merge_check", "narrator_series_check", "audition_script"}, modes)
+
+    def test_a_new_book_is_checked_at_once_the_way_a_rerun_would_check_it(self):
+        epub = make_serial_epub(self.root / "book.epub", "Fixture", "fixture-book", [
+            ("One", ['"You never listen," Jon said.', '"I heard you," Mara said.'])])
+        output = self.root / "book"
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=self.client), \
+                patch("epub_tts_narrator.attribution_recheck.recheck_attributions", return_value=False) as speakers, \
+                patch("epub_tts_narrator.direction_review.review_book_directions", return_value=False) as directions:
+            status, stdout, stderr = self.run_cli("analyze", epub, "-o", output)
+        self.assertEqual(status, 0, stderr)
+        output_text = stdout + stderr
+        self.assertIn("The analysis is saved. Checking it now", output_text)
+        self.assertIn("Check 1 of 8: paragraphs whose speech and narration are divided wrongly", output_text)
+        self.assertIn("Check 8 of 8: every line's direction", output_text)
+        self.assertIn("Checks finished (8 of 8).", output_text)
+        self.assertNotIn("Check the whole book again", output_text, "a new book is not asked about a recheck")
+        self.assertEqual((speakers.call_count, directions.call_count), (1, 1))
+
+    def test_check_new_book_false_saves_the_first_pass_without_its_checks(self):
+        with (self.root / "epub-tts-narrator.toml").open("a", encoding="utf-8") as handle:
+            handle.write("check_new_book = false\n")
+        epub = make_serial_epub(self.root / "book.epub", "Fixture", "fixture-book", [
+            ("One", ['"You never listen," Jon said.', '"I heard you," Mara said.'])])
+        with patch("epub_tts_narrator.cli.OpenAICompatibleClient", side_effect=self.client), \
+                patch("epub_tts_narrator.attribution_recheck.recheck_attributions", return_value=False) as speakers:
+            status, stdout, stderr = self.run_cli("analyze", epub, "-o", self.root / "book")
+        self.assertEqual(status, 0, stderr)
+        self.assertNotIn("Check 1 of", stdout + stderr)
+        self.assertEqual(speakers.call_count, 0)
 
     def test_a_narrator_read_book_updates_its_new_chapters_with_the_narrator_read(self):
         with (self.root / "epub-tts-narrator.toml").open("a", encoding="utf-8") as handle:

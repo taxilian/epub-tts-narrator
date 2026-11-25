@@ -21,6 +21,7 @@ from epub_tts_narrator.provider import ProviderError
 from test_contracts import valid_document
 from test_identity_pipeline import JuryClient
 from test_pipeline import FakeClient
+from shared_fixtures import skip_rerun_reviews
 
 
 def source_fixture(number=1):
@@ -118,6 +119,7 @@ class TimeoutClient(JuryClient):
 
 class TimeoutResumeTests(unittest.TestCase):
     def setUp(self):
+        skip_rerun_reviews(self)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)

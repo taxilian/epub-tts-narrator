@@ -39,7 +39,7 @@ class ConfigTests(unittest.TestCase):
                          "attribution_review_notes": "",
                          "cast_reconciliation_rounds": 1,
                          "cast_reconciliation_notes": [],
-                         "attribution_workers": 1, "cast_review_notes": "", "series_registry": None},
+                         "attribution_workers": 1, "cast_review_notes": "", "series_registry": None, "check_new_book": True},
             "extraction": {"include_auxiliary": False},
             "performance_policy": DEFAULT_POLICY,
             "jev": JEV_DEFAULTS,
@@ -83,6 +83,7 @@ identity_consensus = false
 attribution_review = true
 attribution_review_chunk_chars = 1024
 attribution_review_notes = "Check the continuing speaker at b9."
+check_new_book = false
 [extraction]
 include_auxiliary = true
 [performance_policy]
@@ -106,6 +107,7 @@ headings_and_nonstory_text = "The narrator reads headings."
             "attribution_review": True, "attribution_review_chunk_chars": 1024,
             "attribution_review_notes": "Check the continuing speaker at b9.",
             "whole_book_discovery": False, "attribution_workers": 1, "cast_review_notes": "", "series_registry": None,
+            "check_new_book": False,
         })
         self.assertTrue(configuration["extraction"]["include_auxiliary"])
         self.assertEqual(configuration["performance_policy"]["thoughts"], "The named thinker speaks interior thoughts.")

@@ -44,6 +44,8 @@ class StreamConsole:
         self._pending = ""
         self._overall = 0.0
         self._stage = ""
+        # (number, count, name) while the saved book's checks run (``set_check``), else None.
+        self._check = None
 
     def set_progress(self, fraction, stage):
         if not self.enabled:
@@ -57,6 +59,25 @@ class StreamConsole:
             self._stage = str(stage)
             if self._active:
                 self._draw_locked(monotonic())
+
+    def set_check(self, number, count, name):
+        """Show the saved book's checks as the step: "step 3/9 Checking the book 22% · each character's gender"."""
+        if not self.enabled:
+            return
+        with self._lock:
+            self._check = (number, count, name)
+            self._stage = name
+            self._after_check_locked()
+
+    def end_checks(self):
+        if not self.enabled:
+            return
+        with self._lock:
+            self._check = None
+
+    def _after_check_locked(self):
+        if self._active:
+            self._draw_locked(monotonic())
 
     def close(self):
         if not self.enabled:
@@ -164,6 +185,9 @@ class StreamConsole:
             sleep(1.0)
 
     def _step_status(self):
+        if self._check is not None:
+            number, count, name = self._check
+            return number, count, "Checking the book", (number - 1) / count
         start = 0.0
         for index, (end, name) in enumerate(self._STEPS, 1):
             if self._overall <= end or end == self._STEPS[-1][0]:
@@ -257,6 +281,9 @@ class BusStreamConsole(StreamConsole):
 
     def _message_locked(self, message):
         self.bus.log(message)
+
+    def _after_check_locked(self):
+        self._draw_locked(monotonic())
 
     def set_progress(self, fraction, stage):
         super().set_progress(fraction, stage)

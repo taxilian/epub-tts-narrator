@@ -73,6 +73,18 @@ class StreamConsoleTests(unittest.TestCase):
         self.assertNotIn("Casting 20%", text[-600:])
         console.observe({"request_id": "req-1", "phase": "failed"})
 
+    def test_the_saved_book_s_checks_show_which_check_of_how_many(self):
+        output = TTY()
+        console = StreamConsole(output, width=240, draw_interval=0)
+        console.observe({"request_id": "req-1", "phase": "started"})
+        console.set_progress(1.0, "Validation")
+        console.set_check(3, 8, "each character's gender")
+        self.assertIn("step 3/8 Checking the book 25% · each character's gender", output.getvalue()[-600:])
+        console.end_checks()
+        console.set_progress(1.0, "Validation")
+        self.assertIn("step 4/4", output.getvalue()[-600:])
+        console.observe({"request_id": "req-1", "phase": "failed"})
+
     def test_ordinary_log_writes_scroll_before_redrawn_status(self):
         output = TTY()
         console = StreamConsole(output, width=200, draw_interval=0)

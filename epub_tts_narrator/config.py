@@ -72,6 +72,8 @@ DEFAULTS = {
         "cast_reconciliation_rounds": 1,
         "cast_reconciliation_notes": [],
         "series_registry": None,
+        # After a new book is saved, run the checks a rerun of analyze makes (speakers, splits, cast, directions).
+        "check_new_book": True,
     },
     "extraction": {"include_auxiliary": False},
     "performance_policy": dict(DEFAULT_POLICY),
@@ -140,7 +142,7 @@ def _validate(section: str, key: str, value: Any) -> None:
         if key in {"cast_review_notes", "attribution_review_notes"}:
             if not isinstance(value, str):
                 raise ValueError(f"Configuration analysis.{key} must be a string.")
-        elif key in {"whole_book_discovery", "identity_consensus", "attribution_review"}:
+        elif key in {"whole_book_discovery", "identity_consensus", "attribution_review", "check_new_book"}:
             if type(value) is not bool:
                 raise ValueError(f"Configuration analysis.{key} must be a boolean.")
         elif key == "attribution_workers":

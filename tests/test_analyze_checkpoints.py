@@ -332,6 +332,7 @@ class AnalyzeCheckpointEdgeCaseTests(unittest.TestCase):
     """CLI-level refusal and isolation edges around checkpointed resume."""
 
     def setUp(self):
+        skip_rerun_reviews(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()

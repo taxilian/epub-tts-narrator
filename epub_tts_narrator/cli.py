@@ -419,8 +419,12 @@ def main(argv=None, *, in_shell=False):
             return 2
         return status
 
-    def resume_book(directory, config):
-        """Reuse the saved cast; repair narration boundaries and remaining speakers."""
+    def resume_book(directory, config, *, after_fresh=False):
+        """Reuse the saved cast; check the book, repair narration boundaries and remaining speakers.
+
+        ``after_fresh``: the book was analyzed and saved by this command a moment ago, so its checks
+        run once without asking, as they would on the first rerun.
+        """
         nonlocal model_cache, title_only_resume
         from .analysis_directory import _completed_directory
         from .analysis_revision import related_directories, revise_directories
@@ -429,7 +433,7 @@ def main(argv=None, *, in_shell=False):
         from .speaker_completion import automatic_completion_targets, complete_speakers, unassigned_segments
 
         original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
-        if args.input.is_dir():
+        if args.input.is_dir() or after_fresh:
             try:
                 original = _completed_directory(directory)[0]
             except ValueError as error:
@@ -457,7 +461,7 @@ def main(argv=None, *, in_shell=False):
         if args.continue_from is not None:
             if not ancestors or args.continue_from.resolve() != ancestors[0]:
                 raise ValueError("--continue-from differs from this book's saved continuation parent; resume with the recorded parent or omit the option")
-        if not args.input.is_dir():
+        if not args.input.is_dir() and not after_fresh:
             from .book_update import (accepted_epub_digests, epub_digest, latest_epub_sha256,
                                       merged_source, update_book)
             from .chapter_title_update import source_for_title_refresh
@@ -507,9 +511,31 @@ def main(argv=None, *, in_shell=False):
                           "analysis and its recorded EPUB location are unchanged.")
 
         if not args.edits:
+            # Each check is announced in the log and the status lines ("Check 3 of 10: ...").
+            planned = ["splits", "cast", "names", *(["character-splits"] if args.instructions else []), "genders",
+                       *(["narrators"] if args.instructions or original["provenance"].get("narrator_review") else []),
+                       "groups", "joint-lines", "attribution", "directions"]
+            labels = {"splits": "paragraphs whose speech and narration are divided wrongly",
+                      "cast": "cast entries that are one person",
+                      "names": "characters listed by a description whose name the book gives",
+                      "character-splits": "entries your notes say hold two characters' lines",
+                      "genders": "each character's gender", "narrators": "who narrates each section",
+                      "groups": "characters that may be groups",
+                      "joint-lines": "lines several characters say together",
+                      "attribution": "every paragraph's speakers and speech splits",
+                      "directions": "every line's direction"}
+
+            def check(step):
+                number = planned.index(step) + 1
+                stream_console.set_check(number, len(planned), labels[step])
+                progress(f"Check {number} of {len(planned)}: {labels[step]}")
+            if after_fresh:
+                progress(f"The analysis is saved. Checking it now, the way rerunning analyze would: {len(planned)} "
+                         "checks. A later rerun checks only what changes.")
             # A saved split made before quotation marks were read the current way
             # (mixed curly and straight marks, a paragraph opening inside speech)
             # is read again; the model-free tag repair goes first.
+            check("splits")
             from .book_update import misread_splits, reread_misread_splits
             repaired, misread = misread_splits(directory)
             if misread and reread_misread_splits(directory, config, client_factory=provider_client,
@@ -525,10 +551,11 @@ def main(argv=None, *, in_shell=False):
             if recheck is not None:
                 print(f"Resuming the recheck of the whole book started earlier (run {recheck.run_id}); finished: "
                       + (", ".join(recheck.done) or "nothing yet") + ".")
-            elif getattr(args, "recheck", False) or (sys.stdin.isatty() and sys.stdout.isatty() and rechecks.ask(original)):
+            elif getattr(args, "recheck", False) or (not after_fresh and sys.stdin.isatty() and sys.stdout.isatty()
+                                                      and rechecks.ask(original)):
                 recheck = rechecks.start(directory, config["analysis"])
                 print(f"Rechecking the whole book with fresh answers (run {recheck.run_id}).")
-            elif not rechecks.describe_due(original):
+            elif not after_fresh and not rechecks.describe_due(original):
                 print("Everything was already checked and has not changed; rerun with --recheck to check it all again.")
 
             def fresh(step):
@@ -538,6 +565,7 @@ def main(argv=None, *, in_shell=False):
                 if recheck is not None:
                     recheck.finished(step)
             # Cast entries that are one person are merged (asked first when a voice would change).
+            check("cast")
             from .cast_review import review_cast
             changed = review_cast(directory, config, args.config, provider_client, progress,
                                   instructions=args.instructions, recheck_cache=fresh("cast"))
@@ -546,6 +574,7 @@ def main(argv=None, *, in_shell=False):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # An entry listed under a description is called by the personal name the book gives it.
+            check("names")
             from .name_review import review_names
             changed = review_names(directory, config, provider_client, progress, recheck_cache=fresh("names"))
             done("names")
@@ -553,12 +582,15 @@ def main(argv=None, *, in_shell=False):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # An entry your instructions say holds two characters' lines is split (asked first).
+            if "character-splits" in planned:
+                check("character-splits")
             from .character_split import review_splits
             if review_splits(directory, config, provider_client, progress, instructions=args.instructions,
                              reconsider_choices=args.reconsider_choices):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A voice description whose gender the book (or a person's notes) contradicts is fixed.
+            check("genders")
             from .gender_review import review_genders
             changed = review_genders(directory, config, args.config, provider_client, progress,
                                      recheck_cache=fresh("genders"))
@@ -567,11 +599,14 @@ def main(argv=None, *, in_shell=False):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Narration is read by the character whose point of view it follows, when notes ask for it.
+            if "narrators" in planned:
+                check("narrators")
             from .narrator_review import review_narrators
             if review_narrators(directory, config, provider_client, progress, instructions=args.instructions):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Groups the tags show (a chorus, a crowd) are proposed; a person casts them (cast C).
+            check("groups")
             from .group_proposals import review_groups
             if review_groups(directory, progress):
                 original = _completed_directory(directory)[0]
@@ -585,6 +620,7 @@ def main(argv=None, *, in_shell=False):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A line several of the scene's characters say together ("the voices all shouted") is given to all of them.
+            check("joint-lines")
             from .joint_lines import review_joint_lines
             changed = review_joint_lines(directory, config, provider_client, progress,
                                          reconsider_choices=args.reconsider_choices,
@@ -594,6 +630,7 @@ def main(argv=None, *, in_shell=False):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every paragraph's speakers and split are checked once, and again after it changes.
+            check("attribution")
             from .attribution_recheck import recheck_attributions
             changed = recheck_attributions(directory, config, provider_client, progress, notes=args.instructions,
                                            reconsider_choices=args.reconsider_choices,
@@ -603,6 +640,7 @@ def main(argv=None, *, in_shell=False):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Directions made with older rules are directed again; typed ones stay.
+            check("directions")
             from .direction_refresh_command import refresh_outdated_directions
             if refresh_outdated_directions(directory, config, provider_client, progress):
                 original = _completed_directory(directory)[0]
@@ -615,6 +653,11 @@ def main(argv=None, *, in_shell=False):
             if changed:
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            stream_console.end_checks()
+            progress(f"Checks finished ({len(planned)} of {len(planned)}).")
+            if after_fresh:
+                # This command completed the speakers and asked its questions a moment ago.
+                return _speaker_completion_status(original)
         revised = apply_edits(original, read_json(args.edits)) if args.edits else original
         if (revised["source"] != original["source"] or revised["cast"] != original["cast"]
                 or revised["provenance"].get("series") != original["provenance"].get("series")):
@@ -964,13 +1007,11 @@ def main(argv=None, *, in_shell=False):
                 print(f"Wrote analysis, chapter scripts, cast, and series continuity to {args.output}")
                 print(f"{len(document['segments'])} segments, {len(document['cast']['characters'])} characters; "
                       f"{state['review_count']} advisory notes. Bundle created.")
-                if args.instructions:
-                    from .analysis_directory import _completed_directory
-                    from .narrator_review import review_narrators
-                    if review_narrators(args.output, config, provider_client, progress,
-                                        instructions=args.instructions):
-                        document = _completed_directory(args.output)[0]
-                return with_name_tags(args.output, config, _speaker_completion_status(document))
+                if args.edits or not config["analysis"]["check_new_book"]:
+                    # (Edits are applied already; the saved-book checks would apply them again.)
+                    return with_name_tags(args.output, config, _speaker_completion_status(document))
+                # The checks a rerun makes run now, once, so one analyze is enough to trust.
+                return with_name_tags(args.output, config, resume_book(args.output, config, after_fresh=True))
             write_json(args.output, document, overwrite=args.force)
             if registry is not None:
                 save_registry(series_path, registry, document)

@@ -31,6 +31,7 @@ from test_renderer_voice_design_integration import (
 )
 from test_series import fixture, propose
 from audition_fixtures import prepare_bundle
+from shared_fixtures import skip_rerun_reviews
 
 
 class BookFixture(unittest.TestCase):
@@ -171,6 +172,10 @@ class BookVoiceWorkflowTests(BookFixture):
 
 
 class SharedGlobalConfigurationWorkflowTests(BookFixture):
+    def setUp(self):
+        super().setUp()
+        skip_rerun_reviews(self)
+
     @staticmethod
     def run_cli(function, *args):
         stdout, stderr = io.StringIO(), io.StringIO()

@@ -15,7 +15,7 @@ from epub_tts_narrator.contracts import readiness, validate_document
 from epub_tts_narrator.pipeline import fingerprint
 from epub_tts_narrator.speaker_completion import complete_speakers, unassigned_segments
 from epub_tts_narrator.speaker_decisions import _mint_series_ids, prompt_speaker_decisions
-from shared_fixtures import Terminal
+from shared_fixtures import Terminal, skip_rerun_reviews
 from test_contracts import valid_document
 
 
@@ -35,6 +35,9 @@ def add_lena(document):
 
 
 class SpeakerDecisionTests(unittest.TestCase):
+    def setUp(self):
+        skip_rerun_reviews(self)
+
     def decide(self, document, answers):
         output = StringIO()
         result = prompt_speaker_decisions(document, book_path=Path("books/A Book"),
@@ -559,7 +562,8 @@ class SpeakerDecisionTests(unittest.TestCase):
         self.addCleanup(workspace.cleanup)
         self.enterContext(contextlib.chdir(workspace.name))
         config = {"provider": {"model": "test"}, "extraction": {"include_auxiliary": False},
-                  "analysis": {"series_registry": None, "cache_dir": None, "chunk_chars": 1000,
+                  # Publication is a stub here, so there is no saved book to check afterwards.
+                  "analysis": {"series_registry": None, "cache_dir": None, "chunk_chars": 1000, "check_new_book": False,
                                "repair_attempts": 0, "max_request_chars": 200000, "whole_book_discovery": True,
                                "attribution_workers": 5, "identity_consensus": True, "attribution_review": True,
                                "attribution_review_chunk_chars": 1000, "attribution_review_notes": None,
@@ -677,7 +681,8 @@ class SpeakerDecisionTests(unittest.TestCase):
         document = missing((1, 2))
         events, prepared_roles, published = [], [], []
         config = {"provider": {"model": "test"}, "extraction": {"include_auxiliary": False},
-                  "analysis": {"series_registry": None, "cache_dir": None, "chunk_chars": 1000,
+                  # Publication is a stub here, so there is no saved book to check afterwards.
+                  "analysis": {"series_registry": None, "cache_dir": None, "chunk_chars": 1000, "check_new_book": False,
                                "repair_attempts": 0, "max_request_chars": 200000, "whole_book_discovery": True,
                                "attribution_workers": 5, "identity_consensus": True, "attribution_review": True,
                                "attribution_review_chunk_chars": 1000, "attribution_review_notes": None,

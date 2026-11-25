@@ -12,6 +12,7 @@ from unittest.mock import patch
 from epub_tts_narrator.cli import main
 from epub_tts_narrator.contracts import validate_document
 from epub_tts_narrator.front_matter import drop_front_matter, is_front_matter_text
+from shared_fixtures import skip_rerun_reviews
 
 
 STORY = ("The road climbed gently toward the lighthouse while Mara listened to gulls above the water "
@@ -171,6 +172,9 @@ class FrontMatterClient:
 
 
 class NarratorFrontMatterCliTests(unittest.TestCase):
+    def setUp(self):
+        skip_rerun_reviews(self)
+
     def test_narrator_publication_omits_matching_rows_in_any_chapter(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
