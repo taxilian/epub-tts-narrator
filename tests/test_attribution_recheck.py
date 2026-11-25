@@ -126,6 +126,44 @@ class RecheckTests(AttributionCLIHarness):
         after = {row["id"]: row["role_id"] for row in self.analysis()["segments"] if row["id"] in before}
         self.assertEqual(after, before)
 
+    def test_with_reconsider_choices_a_persons_choice_is_checked_and_may_be_corrected(self):
+        def chosen(document):
+            for row in document["segments"]:
+                if row["kind"] == "dialogue":
+                    row["attribution"].update(basis="user", evidence=[], reason="Chosen by a person.")
+        self.make_book(risk=False, prepare=chosen)
+        before = {row["id"] for row in self.analysis()["segments"] if row["attribution"]["basis"] == "user"}
+        client = AuditClient()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            published = recheck_attributions(self.book, config(), lambda settings: client, lambda message: None,
+                                              reconsider_choices=True)
+        self.assertTrue(published)
+        self.assertIn("your own speaker choices may be corrected too", output.getvalue())
+        chosen_blocks = {row["block_id"] for row in self.analysis()["segments"] if row["id"] in before}
+        self.assertTrue(chosen_blocks <= set(self.scanned(client)), "a person's paragraphs are checked too")
+        scans = [call for call in client.calls if call["mode"] == "attribution_review_scan"]
+        self.assertTrue(all(call.get("reconsider_choices") for call in scans))
+        speakers = {row["role_id"] for row in self.analysis()["segments"] if row["kind"] == "dialogue"}
+        self.assertEqual(speakers, {"tom"}, "the agreed correction replaced the person's earlier choice")
+
+    def test_new_instructions_check_every_paragraph_once_and_reach_the_reviewers(self):
+        self.make_book(risk=False)
+        self.check(NoFindingAuditClient())
+        document = self.analysis()
+        blocks = [block["id"] for block in document["source"]["blocks"]]
+        notes = "There are three whispering voices; the third is not the eaterling."
+        self.assertEqual(unchecked_blocks(document), [])
+        self.assertEqual(unchecked_blocks(document, notes=notes), blocks)
+        client = NoFindingAuditClient()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            recheck_attributions(self.book, config(), lambda settings: client, lambda message: None, notes=notes)
+        scans = [call for call in client.calls if call["mode"] == "attribution_review_scan"]
+        self.assertTrue(scans and all(call.get("review_notes") == notes for call in scans))
+        after = self.analysis()
+        self.assertEqual(unchecked_blocks(after, notes=notes), [], "the same notes do not check again")
+        self.assertEqual(unchecked_blocks(after), [], "a rerun without notes keeps the record")
+
 
 if __name__ == "__main__":
     unittest.main()

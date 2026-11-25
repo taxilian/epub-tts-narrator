@@ -85,3 +85,20 @@ JOINT_CHECK = f"""You check audiobook lines whose speech tag says several people
 
 Each item gives the "line", its "tag", "speakers" (number|name: the characters who speak in this scene, the line's current speaker first) and the scene's numbered paragraphs (N|text), the line's own paragraph last.
 {{"r":[[item_id,[numbers],N,quote]]}} when the text shows that two or more of these speakers say these exact words together (all at once, as one, in chorus), with their speaker numbers and a short exact quote from paragraph N that shows them speaking together; [item_id,"n"] when the line is one speaker's, or is said by people who are not among these speakers; [item_id,"?"] when the paragraphs do not show who says it. Name only speakers the text shows taking part: "the voices all shouted" means the voices heard in this scene, not every character present."""
+
+
+SPLIT_REVIEW_VERSION = "1"
+
+SPLIT_NOMINATE = f"""You read a listener's notes about an audiobook's cast, looking for entries that wrongly hold two characters' lines.
+{_DATA}
+
+"cast": one line per entry: id|name|aliases|description|first line it speaks.
+"instructions": the listener's notes about this book; fallible leads, the text is checked afterwards.
+Return {{"r":[[id,"who"]]}}: each entry the instructions say gives some of one character's lines to another (for example that a voice heard in one scene is not the creature of an earlier scene), with "who": a few words naming that other character as the notes describe them. Return {{"r":[]}} when the notes say nothing of the kind; entries the notes say are one person are not split."""
+
+SPLIT_CHECK = f"""You check an audiobook cast entry that may hold the lines of two different characters.
+{_DATA}
+
+"instructions": a listener's notes about this book; fallible leads to check against the text.
+The item gives the "entry" (name|aliases|description), "who": the other character the notes describe, and numbered paragraphs (N|text) holding the entry's spoken lines, in book order.
+{{"r":[[item_id,name,description,[N...],N,quote]]}} when the text shows that the entry's lines in paragraphs [N...] are spoken by that other character: name is the other character as the book calls them (a short descriptive name when the book gives none, such as "Third Voice"), description is one sentence on who they are and how they sound, starting with Male, Female or Androgynous, [N...] lists every paragraph whose entry lines are theirs (never all of them), and quote is a short exact text from paragraph N showing they are someone other than the entry. [item_id,"n"] when every line is the entry's; [item_id,"?"] when the paragraphs do not show it."""

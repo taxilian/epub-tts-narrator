@@ -13,7 +13,8 @@ import json
 from pathlib import Path
 from threading import Event, Lock
 
-from .attribution_review_prompts import LENSES, REVIEW_VERSION, SCAN, SCAN_WITH_NOTES, VOTE, VOTE_WITH_NOTES
+from .attribution_review_prompts import (LENSES, RECONSIDER_CHOICES, REVIEW_VERSION, SCAN, SCAN_WITH_NOTES, VOTE,
+                                          VOTE_WITH_NOTES)
 from .contracts import has_assigned_speakers, readiness, validate_document
 from .inline_performance import project_segments
 from .performance import BRACKET_DIRECTION, apply_bracket_delivery
@@ -183,7 +184,8 @@ def _has_notes(review_notes):
 
 def _scan_prompt(payload):
     """Notes-bearing scans use the operator-notes prompt; others keep SCAN bytes."""
-    return SCAN_WITH_NOTES if _has_notes(payload.get("review_notes")) else SCAN
+    prompt = SCAN_WITH_NOTES if _has_notes(payload.get("review_notes")) else SCAN
+    return prompt + RECONSIDER_CHOICES if payload.get("reconsider_choices") else prompt
 
 
 def _scan_split_marker(requests, payload):
@@ -298,7 +300,7 @@ def _visible(batch):
     return visible
 
 
-def _accept_scan(response, document, batch, originals):
+def _accept_scan(response, document, batch, originals, reconsider_choices=False):
     _object(response, ("corrections",), "Attribution scan")
     if not isinstance(response["corrections"], list):
         raise ValueError("corrections must be an array")
@@ -327,7 +329,7 @@ def _accept_scan(response, document, batch, originals):
             _evidence(delivery["evidence"], visible, label=piece_path + ".delivery.evidence")
         proposed = align_units(document["source"], document["cast"], [units[block_id]],
                                {"units": [{"unit_id": units[block_id]["unit_id"], "segments": correction["segments"]}]})
-        if any(item["attribution"]["basis"] == "user" for item in originals[block_id]):
+        if not reconsider_choices and any(item["attribution"]["basis"] == "user" for item in originals[block_id]):
             raise ValueError("Do not replace blocks containing explicit user corrections")
         if _assignment_signature(proposed) == _assignment_signature(originals[block_id]):
             raise ValueError("A correction must change an attribution, not merely segmentation or prose")
@@ -379,7 +381,8 @@ def _bounded_map(tasks, worker, workers):
 
 
 def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000,
-                      review_notes="", target_block_ids=None, progress=lambda message: None):
+                      review_notes="", target_block_ids=None, progress=lambda message: None,
+                      reconsider_choices=False):
     """Return an independent, validated document; never mutate input or cast.
 
     Scan batches run in one bounded pool, followed by a separate bounded jury
@@ -396,6 +399,9 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
     Nonblank review_notes are operator guidance: scanner and jurors receive them
     with nearby context assignments under the notes prompts, and they may decide
     choices the source leaves open among existing roles (never override it).
+    ``reconsider_choices`` lets a block holding a person's speaker choice be
+    corrected like any other (scanner and jurors are told, ``RECONSIDER_CHOICES``);
+    otherwise such a block is never replaced.
     """
     if type(workers) is not int or not 1 <= workers <= 5:
         raise ValueError("workers must be an integer from 1 to 5")
@@ -453,6 +459,8 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
                    "review_version": REVIEW_VERSION, "source_fingerprint": source_hash,
                    "input_script_fingerprint": script_hash, "cast_fingerprint": cast_hash,
                    "batch_index": index}
+        if reconsider_choices:
+            payload["reconsider_choices"] = True
         if notes:
             # Operator notes may decide speakers the source leaves open; scanner
             # and every juror see the same notes and neighboring assignments.
@@ -477,7 +485,7 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
             replayed_hint = split
             if not split:
                 try:
-                    found = requests.run(_scan_prompt(payload), payload, lambda response: _accept_scan(response, original, batch, originals),
+                    found = requests.run(_scan_prompt(payload), payload, lambda response: _accept_scan(response, original, batch, originals, reconsider_choices),
                                          cancelled=cancelled)
                 except ProviderError as error:
                     if (not can_split or error.status_code is not None or error.code is not None
@@ -543,7 +551,9 @@ def audit_attribution(document, requests, *, workers=5, review_chunk_chars=60000
                                    request_fingerprint=payload_hash, proposed_segments_fingerprint=fingerprint(proposal["proposed_segments"])))
             return result
         try:
-            votes = requests.run(VOTE_WITH_NOTES if notes else VOTE, payload, accept, cancelled=cancelled)
+            prompt = VOTE_WITH_NOTES if notes else VOTE
+            votes = requests.run(prompt + RECONSIDER_CHOICES if reconsider_choices else prompt, payload, accept,
+                                 cancelled=cancelled)
         except ValueError as exc:
             votes = [{"block_id": row["block_id"], "reviewer_id": reviewer, "lens": lens,
                       "verdict": "error", "reason": str(exc), "evidence": [],

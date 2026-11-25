@@ -209,10 +209,11 @@ def _decide(view):
     return answer if answer in {"j", "k", "l"} else "l"
 
 
-def review_joint_lines(directory, config, client_factory, progress, *, interactive=None):
+def review_joint_lines(directory, config, client_factory, progress, *, interactive=None, reconsider_choices=False):
     """``analyze BOOK``: give lines the scene's characters say together to all of them; True when saved.
 
-    A line a person assigned is only changed when that person says so here.
+    A line a person assigned is only changed when that person says so here, or
+    with ``reconsider_choices`` (``--reconsider-choices``), like any other line.
     """
     from .analysis_directory import _completed_directory
     from .analysis_progress import analysis_cache_directory
@@ -245,7 +246,7 @@ def review_joint_lines(directory, config, client_factory, progress, *, interacti
     rows = {row["id"]: row for row, _, _, _ in found}
     chosen = set()
     for segment_id in [segment_id for segment_id in confirmed
-                       if rows[segment_id]["attribution"].get("basis") == "user"]:
+                       if rows[segment_id]["attribution"].get("basis") == "user" and not reconsider_choices]:
         # A person chose this line's speaker: only that person changes it.
         speakers = confirmed[segment_id][0]
         if not (interactive or active_screen_host() is not None):

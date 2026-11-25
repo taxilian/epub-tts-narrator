@@ -238,6 +238,10 @@ def parser():
                           "entries are one person or different people, or, only when you ask for it, that each "
                           "section's narration is read in the voice of the character whose point of view it "
                           "follows (those notes are saved with the book)")
+    run.add_argument("--reconsider-choices", action="store_true",
+                     help="Rerunning a book: show the reviews which speakers you chose yourself, and let them correct "
+                          "one the text (or your --instructions) shows is wrong; without it your choices are never "
+                          "changed")
     passage_review = input_command("review-attribution", "Review an existing script with source evidence and three-way consensus")
     output_options(passage_review)
     verification = commands.add_parser(
@@ -514,6 +518,12 @@ def main(argv=None, *, in_shell=False):
                            instructions=args.instructions):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # An entry your instructions say holds two characters' lines is split (asked first).
+            from .character_split import review_splits
+            if review_splits(directory, config, provider_client, progress, instructions=args.instructions,
+                             reconsider_choices=args.reconsider_choices):
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A voice description whose gender the book (or a person's notes) contradicts is fixed.
             from .gender_review import review_genders
             if review_genders(directory, config, args.config, provider_client, progress):
@@ -536,12 +546,14 @@ def main(argv=None, *, in_shell=False):
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A line several of the scene's characters say together ("the voices all shouted") is given to all of them.
             from .joint_lines import review_joint_lines
-            if review_joint_lines(directory, config, provider_client, progress):
+            if review_joint_lines(directory, config, provider_client, progress,
+                                  reconsider_choices=args.reconsider_choices):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every paragraph's speakers and split are checked once, and again after it changes.
             from .attribution_recheck import recheck_attributions
-            if recheck_attributions(directory, config, provider_client, progress):
+            if recheck_attributions(directory, config, provider_client, progress, notes=args.instructions,
+                                    reconsider_choices=args.reconsider_choices):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Directions made with older rules are directed again; typed ones stay.

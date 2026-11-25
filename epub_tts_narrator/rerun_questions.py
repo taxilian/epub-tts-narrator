@@ -132,3 +132,25 @@ def joint_view(document, row, speakers, quote):
             "speakers": together, "why": f"The book: “{quote}”.",
             "afterwards": "Saying it together renders the line in every one of these voices at once; only this "
                           "line changes. Keeping it is remembered and not asked again."}
+
+
+def split_view(document, character_id, split, target, created, moved, held):
+    """The character split's question: which of an entry's lines go to which other character."""
+    characters = {row["id"]: row for row in document["cast"]["characters"]}
+    source = characters[character_id]
+    texts = {row["id"]: row["text"] for row in document["segments"]}
+    lines = [" ".join(texts[segment_id].split())[:120] for segment_id in moved[:12]]
+    if len(moved) > 12:
+        lines.append(f"…and {len(moved) - 12} more")
+    goes = f"a new character, {target['name']}" if created else target["name"]
+    notes = []
+    if created:
+        notes.append(f"{target['name']}: {split['description']} A new voice is cast for it (cast BOOK).")
+    if held:
+        notes.append(f"{_lines(len(held))} you chose for {source['name']} {'stays' if len(held) == 1 else 'stay'} "
+                     "(add --reconsider-choices to move them too).")
+    notes.append(f"{source['name']} keeps its other lines and its voice. Keeping them together is remembered.")
+    return {"title": f"Are some of {source['name']}'s lines someone else's?",
+            "summary": f"{_capital(_lines(len(moved)))} of {source['name']} would go to {goes}.",
+            "why": f"The book: “{split['evidence']['quote']}”.", "from": source["name"], "to": target["name"],
+            "lines": lines, "notes": notes}

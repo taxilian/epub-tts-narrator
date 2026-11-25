@@ -152,3 +152,16 @@ roles that the source leaves open is supported when it follows a rule in
 review_notes consistently with the source and context_assignments: approve it.
 Reject a choice that contradicts the source, that rule, or context_assignments.
 """) + OPERATOR_NOTES
+
+
+# Added only when a person asks for their own speaker choices to be reconsidered
+# (``analyze BOOK --reconsider-choices``); other requests keep their bytes.
+RECONSIDER_CHOICES = """
+reconsider_choices is true in this request: original_segments with basis
+"user" are a person's earlier speaker choices, and the person asks for them to
+be checked like any other line. Such a choice is a strong lead, not a fixed
+fact: keep it unless the visible source, or review_notes about what the source
+leaves open, clearly show a different speaker, and then correct it with the
+same evidence any correction needs. This replaces any rule above that explicit
+user corrections are never changed.
+"""

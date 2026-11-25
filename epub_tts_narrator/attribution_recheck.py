@@ -18,6 +18,13 @@ speaks, be checked again with it among the choices: its other lines may be
 its too. The record keeps the cast's character IDs for this.
 
 A paragraph with a person's speaker choice is never changed: it is sent only as context.
+With ``reconsider_choices`` (``analyze BOOK --reconsider-choices``) those
+paragraphs are checked too, the reviewers told which lines a person chose, and
+may be corrected like any other.
+
+A person's instructions (``analyze BOOK --instructions``) reach the scanner and
+jurors as review notes. Paragraphs checked under other notes (or none) are
+checked again once under new ones: the record keeps the notes' digest.
 """
 
 from __future__ import annotations
@@ -92,31 +99,48 @@ def near_new_characters(document):
     return found
 
 
-def unchecked_blocks(document):
-    """Source-ordered IDs of paragraphs to check: not checked at this version since they last changed, or
-    near a character added since the last check.
+def notes_digest(notes):
+    """The digest a check under ``notes`` is recorded with (None without notes)."""
+    notes = (notes or "").strip()
+    return hashlib.sha256(notes.encode("utf-8")).hexdigest() if notes else None
 
-    A paragraph with a person's speaker choice is never one: the audit may not
-    change it, so it is sent only as context around the others.
+
+def unchecked_blocks(document, *, notes=None, reconsider_choices=False):
+    """Source-ordered IDs of paragraphs to check: not checked at this version since they last changed, or
+    near a character added since the last check; every paragraph once under new ``notes``.
+
+    A paragraph with a person's speaker choice is one only with
+    ``reconsider_choices``; otherwise the audit may not change it, so it is
+    sent only as context around the others.
     """
-    checked = _record(document).get("blocks", {})
+    record = _record(document)
+    checked = record.get("blocks", {})
+    digest = notes_digest(notes)
+    if digest is not None and record.get("notes") != digest:
+        checked = {}
     near = near_new_characters(document)
-    chosen = {row["block_id"] for row in document["segments"] if row["attribution"]["basis"] == "user"}
+    chosen = set() if reconsider_choices else {
+        row["block_id"] for row in document["segments"] if row["attribution"]["basis"] == "user"}
     return [block_id for block_id, state in block_states(document).items()
             if block_id not in chosen and (checked.get(block_id) != state or block_id in near)]
 
 
-def record_checks(document, block_ids):
-    """Remember that ``block_ids`` were checked in the state ``document`` now has, with its current cast."""
-    blocks = dict(_record(document).get("blocks", {}))
+def record_checks(document, block_ids, *, notes=None):
+    """Remember that ``block_ids`` were checked in the state ``document`` now has, with its current cast
+    (and under ``notes``, whose digest is kept)."""
+    record = _record(document)
+    digest = notes_digest(notes)
+    blocks = {} if digest is not None and record.get("notes") != digest else dict(record.get("blocks", {}))
     states = block_states(document)
     blocks.update({block_id: states[block_id] for block_id in block_ids})
     document["provenance"]["attribution_checks"] = {
         "version": VERSION, "characters": sorted(row["id"] for row in document["cast"]["characters"]),
         "blocks": dict(sorted(blocks.items()))}
+    if digest is not None or record.get("notes"):
+        document["provenance"]["attribution_checks"]["notes"] = digest or record["notes"]
 
 
-def recheck_attributions(directory, config, client_factory, progress):
+def recheck_attributions(directory, config, client_factory, progress, *, notes=None, reconsider_choices=False):
     """``analyze BOOK``: check the speakers and splits of every paragraph not yet checked; True when it published."""
     from .attribution_manual_review import print_finding
     from .attribution_review import audit_attribution
@@ -124,7 +148,7 @@ def recheck_attributions(directory, config, client_factory, progress):
     directory = Path(directory).resolve()
     original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
     document, _, _ = _completed_directory(directory)
-    targets = unchecked_blocks(document)
+    targets = unchecked_blocks(document, notes=notes, reconsider_choices=reconsider_choices)
     total = len(document["source"]["blocks"])
     if not targets:
         print(f"Speakers and speech splits: all {total} paragraph(s) were already checked and have not "
@@ -140,10 +164,16 @@ def recheck_attributions(directory, config, client_factory, progress):
               + "; the paragraphs that mention them and those around their lines are checked again with them "
                 "among the choices.")
     print(f"Checking speakers and speech splits in {len(targets)}/{total} paragraph(s); only corrections three "
-          "reviewers agree on are applied, and your own speaker choices are kept.")
+          "reviewers agree on are applied, and "
+          + ("your own speaker choices may be corrected too (--reconsider-choices)." if reconsider_choices
+             else "your own speaker choices are kept.")
+          + (" Your instructions are given to the reviewers." if notes_digest(notes) else ""))
     with ExitStack() as stack:
         reserved = stack.enter_context(reserve_revision_scope([directory]))
-        run_id = hashlib.sha256(f"analyze-attribution:{VERSION}:{original_manifest_hash}".encode()).hexdigest()[:32]
+        identity = f"analyze-attribution:{VERSION}:{original_manifest_hash}"
+        if notes_digest(notes) or reconsider_choices:
+            identity += f":{notes_digest(notes)}:{reconsider_choices}"
+        run_id = hashlib.sha256(identity.encode()).hexdigest()[:32]
         cache = analysis_cache_directory(directory, settings["cache_dir"]) / "attribution-check" / run_id
         cache.mkdir(parents=True, exist_ok=True)
         print(f"Attribution check run: {run_id}", file=sys.stderr)
@@ -153,12 +183,13 @@ def recheck_attributions(directory, config, client_factory, progress):
         requests = CachedRequests(client, cache, repair_attempts=settings["repair_attempts"],
                                   max_request_chars=settings["max_request_chars"], progress=progress)
         audited = audit_attribution(document, requests, workers=min(5, settings["attribution_workers"]),
-                                    target_block_ids=targets, progress=print)
+                                    target_block_ids=targets, progress=print,
+                                    review_notes=(notes or "").strip(), reconsider_choices=reconsider_choices)
         found = findings(document, audited)
         for index, finding in enumerate(found, 1):
             print_finding(finding, index)
         # Every target was checked; a corrected paragraph is recorded in its corrected state.
-        record_checks(audited, targets)
+        record_checks(audited, targets, notes=notes)
         try:
             directories = related_directories([directory])
             hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()

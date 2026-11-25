@@ -10,6 +10,8 @@ the line prompt takes, so the answer goes through the review's own code:
   character whose voice exists: [F] fix / [L] leave.
 * ``NarratorScreen`` — the narrator check's sections and point-of-view
   readers: [A] apply / [L] leave.
+* ``SplitScreen`` — the character split's "are some of these lines someone
+  else's?": the lines that would move and where: [S] split / [K] keep / [L] later.
 * ``JointLineScreen`` — the joint-line check's "do they say this together?"
   for a line a person gave to one speaker: [J] together / [K] keep / [L] later.
 
@@ -224,3 +226,27 @@ class JointLineScreen(QuestionScreen):
         yield Static(together)
         yield Static(Text(view["why"]), classes="question-why")
         yield Static(Text(view["afterwards"]), classes="question-note")
+
+
+class SplitScreen(QuestionScreen):
+    """Some of one cast entry's lines belong to another character: split them off, keep them, or decide later."""
+
+    DEFAULT_CSS = QUESTION_CSS + """
+    SplitScreen .split-lines { border: round $primary-background; padding: 0 1; height: auto; }
+    """
+    CHOICES = (("s", "Split them", "primary"), ("k", "Keep them together", "default"),
+               ("l", "Decide later", "default"))
+    BINDINGS = [Binding("s", "choose('s')", "Split", priority=True),
+                Binding("k", "choose('k')", "Keep", priority=True),
+                Binding("l,escape", "later", "Decide later", priority=True)]
+
+    def body(self):
+        view = self.view
+        yield Static(Text(view["summary"], style="bold"))
+        yield Static(Text(view["why"]), classes="question-why")
+        lines = Text()
+        for line in view["lines"]:
+            lines.append(line + "\n", style="italic")
+        yield Static(lines, classes="split-lines")
+        for note in view["notes"]:
+            yield Static(Text(note), classes="question-note")

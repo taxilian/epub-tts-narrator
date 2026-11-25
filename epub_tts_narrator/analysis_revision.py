@@ -288,9 +288,10 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
                        reserved_update_locks=None):
     """Publish a revision, coordinating manual decisions with profile refreshes."""
     if scope not in {"attribution", "source-edit", "voice-profiles", "speaker-decisions", "character-merge",
-                     "narrators", "character-rename", "ensembles", "group-proposals"}:
+                     "narrators", "character-rename", "ensembles", "group-proposals", "character-split"}:
         raise ValueError("Revision scope must be attribution, source-edit, voice-profiles, speaker-decisions, "
-                         "character-merge, narrators, character-rename, ensembles, or group-proposals")
+                         "character-merge, narrators, character-rename, ensembles, group-proposals, or "
+                         "character-split")
     if speaker_decision_inputs is not None and scope != "speaker-decisions":
         raise ValueError("speaker_decision_inputs are accepted only for speaker-decisions revisions")
     if reserved_update_locks is not None and scope == "speaker-decisions":
@@ -428,6 +429,13 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                 validate_character_rename(document, candidate)
             elif candidate != document:
                 raise ValueError("A character rename may change only the books it names")
+        elif scope == "character-split":
+            if path in revisions:
+                from .character_split import validate_character_split
+                added_voices = validate_character_split(document, candidate)
+                _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes)
+            elif candidate != document:
+                raise ValueError("A character split may change only the selected book")
         elif scope == "narrators":
             if path in revisions:
                 from .narrator_review import validate_narrator_revision
@@ -511,7 +519,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             # A resolved parent attribution may have been copied into descendants
             # as a review issue. Refresh only such inherited review records.
             history = dict(registry, books=registry["books"][:-1])
-            if scope in {"attribution", "speaker-decisions", "character-merge", "narrators"}:
+            if scope in {"attribution", "speaker-decisions", "character-merge", "narrators", "character-split"}:
                 _refresh_import_reviews(document, history, document["provenance"]["series"])
             document["readiness"] = readiness(document)
             snapshot = _snapshot(document)
