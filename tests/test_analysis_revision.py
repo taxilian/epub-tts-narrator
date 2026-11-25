@@ -103,7 +103,7 @@ class AnalysisRevisionTests(unittest.TestCase):
         hashes = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
                   for path in self.paths}
         hashes[str(self.paths[0])] = "0" * 64
-        with self.assertRaisesRegex(ValueError, "changed while speaker"):
+        with self.assertRaisesRegex(ValueError, "changed after this change was prepared"):
             revise_directories({self.paths[0]: self.revision()}, expected_manifest_hashes=hashes)
 
     def test_placeholder_render_lock_directories_do_not_block_an_attribution_revision(self):
@@ -203,13 +203,43 @@ class AnalysisRevisionTests(unittest.TestCase):
         revised, _, _ = _completed_directory(self.paths[0])
         self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
 
+    def test_a_receipt_binds_only_the_books_it_names_and_later_books_are_taken_as_they_are(self):
+        # A change to the first book also re-links the later book; a receipt that names only the first
+        # book must not refuse because the later book has no entry (or saved meanwhile).
+        first = hashlib.sha256((self.paths[0] / "manifest.json").read_bytes()).hexdigest()
+        with self.assertRaisesRegex(ValueError, "The saved book changed after this change was prepared"):
+            revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                               expected_manifest_hashes={str(self.paths[0]): "0" * 64})
+        revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
+                           expected_manifest_hashes={str(self.paths[0]): first})
+        revised, _, _ = _completed_directory(self.paths[0])
+        self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
+        _completed_directory(self.paths[1])  # the later book is re-linked and still loads
+
+    def test_a_revision_waits_for_another_process_to_finish_saving_a_book_in_its_chain(self):
+        import threading
+        from epub_tts_narrator.renderer.run_locks import acquire_directory_lock
+        held = acquire_directory_lock(self.paths[1] / ".analysis-update.lock")
+        timer = threading.Timer(0.3, held.rmdir)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        messages = []
+        with (patch("epub_tts_narrator.analysis_revision.LOCK_WAIT_SECONDS", 10),
+              patch("epub_tts_narrator.analysis_revision.LOCK_POLL_SECONDS", 0.05)):
+            revise_directories({self.paths[0]: self.revision()}, progress=messages.append)
+        self.assertTrue(any("Waiting for another save" in message for message in messages))
+        revised, _, _ = _completed_directory(self.paths[0])
+        self.assertEqual(revised["segments"][0]["attribution"]["basis"], "explicit")
+
     def test_reserved_scope_holds_publication_ownership_for_the_whole_chain(self):
         from epub_tts_narrator.analysis_revision import reserve_revision_scope
         with reserve_revision_scope([self.paths[0]]) as reserved:
             self.assertEqual(sorted(reserved), sorted(self.paths))
             for path in self.paths:
                 self.assertTrue((path / ".analysis-update.lock").is_dir())
-            with self.assertRaisesRegex(ValueError, "already active"):
+            with (patch("epub_tts_narrator.analysis_revision.LOCK_WAIT_SECONDS", 0.2),
+                  patch("epub_tts_narrator.analysis_revision.LOCK_POLL_SECONDS", 0.1),
+                  self.assertRaisesRegex(ValueError, "already active")):
                 revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None)
             revise_directories({self.paths[0]: self.revision()}, progress=lambda _: None,
                                reserved_update_locks=reserved)

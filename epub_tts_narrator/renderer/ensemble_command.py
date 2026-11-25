@@ -51,6 +51,9 @@ def _load(bundle):
     from ..analysis_revision import _completed_directory
     path = Path(bundle["directory"]).resolve()
     document, _, _ = _completed_directory(path)
+    # Only this book's own state is bound: later books continuing it are only re-linked to its new
+    # history, worked out from their files under their locks, so their own saves (an analysis of
+    # book 4 running meanwhile) never make this book's change stale.
     receipt = {str(path): hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()}
     return path, document, receipt
 

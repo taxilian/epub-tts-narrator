@@ -198,7 +198,7 @@ class ChapterIgnoreTests(unittest.TestCase):
         self.assertFalse(app.save())
 
         self.assertIn("Save failed:", app.notice)
-        self.assertIn("changed while speaker decisions", app.notice)
+        self.assertIn("changed after this change was prepared", app.notice)
         self.assertIn("s2", app.pending)
         self.assertEqual(manifest_path.read_bytes(), changed_manifest)
 

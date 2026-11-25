@@ -341,6 +341,18 @@ class CharacterMergeTests(unittest.TestCase):
         self.assertEqual([(row["id"], row["name"]) for row in merged["cast"]["characters"]],
                          [(self.mara["id"], "Mara")])
 
+    def test_a_group_in_a_book_a_later_book_continues_gets_its_own_voices(self):
+        # Saving a group's voices rewrites the later book's history too; that once refused every such book.
+        from epub_tts_narrator.renderer.ensemble_command import apply as save_ensemble, plan_ensemble
+        self.publish()
+        plan = plan_ensemble(load_bundle(self.paths[0]), self.keeper["voice_id"], voices=4, mode="alternate")
+        save_ensemble(plan, progress=lambda _: None)
+        first, _, _ = _completed_directory(self.paths[0])
+        lead = next(voice for voice in first["cast"]["voices"] if voice["id"] == self.keeper["voice_id"])
+        self.assertEqual((lead["ensemble"]["mode"], len(lead["ensemble"]["members"])), ("alternate", 3))
+        self.assertEqual(sum(1 for voice in first["cast"]["voices"] if voice.get("member_of") == lead["id"]), 3)
+        _completed_directory(self.paths[1])  # the later book is re-linked and still loads
+
     def test_the_entry_with_an_accepted_voice_survives_by_default_and_the_person_may_choose(self):
         self.publish()
         bundle = load_bundle(self.paths[0])

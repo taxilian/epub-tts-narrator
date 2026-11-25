@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import time
 import uuid
 
 from .analysis_directory import _completed_directory, _continuation_entry, continuation_directories
@@ -25,6 +26,9 @@ def _read(path):
 
 
 _RENDER_LOCKS = (".audio-render.lock", ("render-work", ".render.lock"))
+# How long a revision waits for another process's save of a book in its chain (held for seconds).
+LOCK_WAIT_SECONDS = 60.0
+LOCK_POLL_SECONDS = 0.5
 
 
 def _render_active(path):
@@ -399,10 +403,14 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                 raise ValueError(f"Revision sidecars must already exist as regular files: {name}")
             names[path].append(name)
         original_hashes[path] = {name: _hash(path / name) for name in names[path]}
-        if expected_manifest_hashes is not None:
+        # A receipt binds the books it names; a book it leaves out (a later book that is only re-linked to
+        # the revised book's new history) is taken as it is now, under its lock.
+        if expected_manifest_hashes is not None and (str(path) in expected_manifest_hashes
+                                                     or path in expected_manifest_hashes):
             expected = expected_manifest_hashes.get(str(path), expected_manifest_hashes.get(path))
             if expected != original_hashes[path]["manifest.json"]:
-                raise ValueError(f"Analysis changed while speaker decisions were being reviewed: {path}")
+                raise ValueError(f"The saved book changed after this change was prepared; reopen it and try "
+                                 f"again: {path}")
         candidate = revisions.get(path, document)
         if scope == "attribution":
             if (candidate["source"] != document["source"] or candidate["cast"] != document["cast"]
@@ -500,12 +508,22 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             if path in reserved:
                 continue
             lock_path = path / ".analysis-update.lock"
-            try:
-                lock = acquire_directory_lock(lock_path)
-            except FileExistsError as exc:
-                raise ValueError(
-                    f"Analysis revision is already active, or the lock cannot be proven stale: {lock_path}. "
-                    f"A marked lock left by a crashed process is reclaimed automatically when you rerun.") from exc
+            waited = 0.0
+            while True:
+                try:
+                    lock = acquire_directory_lock(lock_path)
+                    break
+                except FileExistsError as exc:
+                    # Another process (an analysis of a later book saving a step) holds it for seconds.
+                    if waited >= LOCK_WAIT_SECONDS:
+                        raise ValueError(
+                            f"Analysis revision is already active, or the lock cannot be proven stale: {lock_path}. "
+                            f"A marked lock left by a crashed process is reclaimed automatically when you "
+                            f"rerun.") from exc
+                    if not waited:
+                        progress(f"Waiting for another save of {path.name} to finish")
+                    time.sleep(LOCK_POLL_SECONDS)
+                    waited += LOCK_POLL_SECONDS
             locks.append(lock)
         transaction = paths[0] / ".analysis-revisions" / uuid.uuid4().hex
         transaction.mkdir(parents=True)
