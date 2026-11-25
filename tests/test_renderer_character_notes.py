@@ -84,6 +84,14 @@ class InheritanceTests(unittest.TestCase):
         save_character_notes(second, self.configs[1], self.voice_id, None)  # inherit again
         self.assertEqual(character_notes(second, self.configs[1]), {self.voice_id: ZANDRAMAS})
 
+    def test_notes_about_a_character_only_an_earlier_book_has_are_kept_when_asked_for(self):
+        first, second = self.books
+        save_character_notes(first, self.configs[0], self.voice_id, ZANDRAMAS)
+        without = deepcopy(second)  # this book's cast lacks the earlier book's character
+        without["cast"]["voices"] = [voice for voice in without["cast"]["voices"] if voice["id"] != self.voice_id]
+        self.assertEqual(character_notes(without, self.configs[1]), {})
+        self.assertEqual(character_notes(without, self.configs[1], earlier_voices=True), {self.voice_id: ZANDRAMAS})
+
     def test_notes_added_in_a_later_book_make_its_inherited_accent_undecided_there_only(self):
         first, second = self.books
         accent_assignment.save_assignments(first, self.configs[0], {self.voice_id: "Persian accent"})

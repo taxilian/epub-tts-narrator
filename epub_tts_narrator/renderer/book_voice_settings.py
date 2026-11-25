@@ -77,8 +77,11 @@ def read_book_setting(setting, bundle, series_id):
     return dict(values)
 
 
-def nearest_book_settings(setting, bundle, config):
-    """Resolve saved values nearest book first; earlier books fill the rest."""
+def nearest_book_settings(setting, bundle, config, *, this_cast_only=True):
+    """Resolve saved values nearest book first; earlier books fill the rest.
+
+    ``this_cast_only=False`` also keeps earlier books' values for voices this book does not have.
+    """
     from .book_context import resolve_book_config
 
     config = resolve_book_config(bundle, config)
@@ -89,6 +92,8 @@ def nearest_book_settings(setting, bundle, config):
             continue
         for voice_id, value in read_book_setting(setting, _parent_context(directory), series_id).items():
             result.setdefault(voice_id, value)
+    if not this_cast_only:
+        return result
     allowed = {voice["id"] for voice in bundle["cast"]["voices"]}
     return {voice_id: value for voice_id, value in result.items() if voice_id in allowed}
 

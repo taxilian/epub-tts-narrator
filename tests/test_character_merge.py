@@ -311,6 +311,36 @@ class CharacterMergeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "merge them in an earlier book that has both"):
             plan_merge(load_bundle(self.paths[1]), None, "The keeper", "Mara", store=store)
 
+    def test_rerun_cast_review_compares_characters_only_an_earlier_book_has_with_a_persons_notes(self):
+        import contextlib
+        from unittest.mock import patch
+        from epub_tts_narrator import cast_review
+        from epub_tts_narrator.config import DEFAULTS
+        from test_cast_review import ReviewClient, Store
+        self.publish(later_characters=(("stranger", "The stranger", ()),),
+                     later=[[("A stranger spoke. ", None), ("“Hello,”", "stranger")],
+                            [("“Still here,”", "stranger")]])
+        client = ReviewClient(verdict="?")
+        notes = {self.mara["voice_id"]: {"names": ["The stranger"]}}
+        config = {"analysis": deepcopy(DEFAULTS["analysis"]),
+                  "provider": {"model": "test-model", "base_url": "https://example.invalid"}}
+        output = StringIO()
+        with (patch.object(cast_review, "_renderer_context",
+                           return_value={"notes": notes, "store": Store({self.mara["voice_id"]})}),
+              patch("sys.stdin", StringIO("m\n")), contextlib.redirect_stdout(output),
+              contextlib.redirect_stderr(StringIO())):
+            changed = cast_review.review_cast(self.paths[1], config, None, lambda settings: client,
+                                              lambda message: None, interactive=True)
+        nominate = next(call for call in client.calls if call["mode"] == "cast_review_nominate")
+        self.assertIn("Mara||", nominate["cast"])
+        self.assertIn("from an earlier book (The Lantern), not in this book's cast", nominate["cast"])
+        self.assertIn("The stranger", nominate["notes"])
+        self.assertTrue(changed, output.getvalue())
+        self.assertIn("your notes say Mara is also called The stranger", output.getvalue())
+        merged, _, _ = _completed_directory(self.paths[1])
+        self.assertEqual([(row["id"], row["name"]) for row in merged["cast"]["characters"]],
+                         [(self.mara["id"], "Mara")])
+
     def test_the_entry_with_an_accepted_voice_survives_by_default_and_the_person_may_choose(self):
         self.publish()
         bundle = load_bundle(self.paths[0])

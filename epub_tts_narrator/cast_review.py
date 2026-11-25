@@ -17,6 +17,12 @@ quote showing they are one person and every line being theirs, a resemblance
 (people, title, rank, occupation, description) is never evidence, and "p"
 (an entry that mixes several people) is reported, never merged.
 
+Characters only earlier books of the series have join the comparison
+(``with_earlier_characters``): a character may return under another name the
+analysis never matched (book 1's "First Voice" as book 2's "Hissing Shadow"),
+and a person's notes about them, kept in the earlier book, are sent too. A
+merge with one keeps the earlier book's character and takes it into this book.
+
 A pair the text shows is one person is merged at once through
 ``merge-characters``' plan and publication (``character_merge_command``:
 the earlier book's entry, else the one with a voice, else the one with more
@@ -77,6 +83,30 @@ def _describes_another(longer, shorter):
         return True
     following = re.match(r"\W*(\w+)", longer[match.end():])
     return bool(following and following.group(1)[:1].islower())
+
+
+def with_earlier_characters(document, registry):
+    """``document`` for comparing only (never saved): its cast plus the characters only earlier books have.
+
+    Each added entry's description says which book it is from and that this book's cast lacks it.
+    """
+    from .renderer.character_merge_command import earlier_characters
+    added = earlier_characters(registry, document)
+    if not added:
+        return document
+    voices = {}
+    for book in registry["books"][:-1]:
+        voices.update({voice["id"]: voice for voice in book["cast"]["voices"]})
+    have = {voice["id"] for voice in document["cast"]["voices"]}
+    characters, extra_voices = list(document["cast"]["characters"]), list(document["cast"]["voices"])
+    for row, title in added:
+        description = " ".join(row.get("description", "").split())
+        characters.append(dict(row, description=f"from an earlier book ({title}), not in this book's cast"
+                                                + (f": {description}" if description else "")))
+        if row["voice_id"] in voices and row["voice_id"] not in have:
+            have.add(row["voice_id"])
+            extra_voices.append(voices[row["voice_id"]])
+    return dict(document, cast=dict(document["cast"], characters=characters, voices=extra_voices))
 
 
 def overlap_pairs(document, earlier):
@@ -340,7 +370,8 @@ def _renderer_context(directory, config_path):
         from .renderer.config import load_config
         bundle = load_bundle(directory)
         config = resolve_book_config(bundle, load_config(config_path, require_verifier=False, require_engine=False))
-        return {"notes": character_notes(bundle, config), "store": voice_store(bundle, config)}
+        # Notes about earlier books' characters too: one may be in this book under another name.
+        return {"notes": character_notes(bundle, config, earlier_voices=True), "store": voice_store(bundle, config)}
     except (ValueError, OSError, ImportError) as error:
         print(f"Cast review: this book's voices could not be read ({type(error).__name__}); every merge it "
               "finds is asked about instead of made.")
@@ -355,7 +386,8 @@ def review_cast(directory, config, config_path, client_factory, progress, *, int
     from .renderer.character_merge_command import apply_merge, plan_merge
     directory = Path(directory).resolve()
     interactive = (sys.stdin.isatty() and sys.stdout.isatty()) if interactive is None else interactive
-    document, registry, _ = _completed_directory(directory)
+    saved, registry, _ = _completed_directory(directory)
+    document = with_earlier_characters(saved, registry)
     if len(document["cast"]["characters"]) < 2:
         return False
     if not config["provider"]["model"]:
@@ -367,7 +399,10 @@ def review_cast(directory, config, config_path, client_factory, progress, *, int
     settings = config["analysis"]
     cache = analysis_cache_directory(directory, settings["cache_dir"])
     client = client_factory(config["provider"])
-    print(f"Reviewing the cast ({len(document['cast']['characters'])} entries) for entries that are one person, "
+    added = len(document["cast"]["characters"]) - len(saved["cast"]["characters"])
+    print(f"Reviewing the cast ({len(saved['cast']['characters'])} entries"
+          + (f", and {added} character(s) only earlier books have" if added else "")
+          + ") for entries that are one person, "
           f"with {client.model} at {client.base_url}; cast lines and passages will be sent to this endpoint.",
           file=sys.stderr)
     requests = CachedRequests(client, cache, repair_attempts=settings["repair_attempts"],

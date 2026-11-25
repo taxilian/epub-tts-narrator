@@ -112,11 +112,32 @@ def _validate_digest(value):
         raise ValueError("An accent assignment notes record must be a SHA-256 hex digest or empty")
 
 
-def character_notes(bundle, config, *, include_cleared=False):
-    """Each voice's notes, nearest book first; ``{}`` (cleared here) is left out unless ``include_cleared``."""
+def character_notes(bundle, config, *, include_cleared=False, earlier_voices=False):
+    """Each voice's notes, nearest book first; ``{}`` (cleared here) is left out unless ``include_cleared``.
+
+    ``earlier_voices`` also keeps notes about characters only earlier books have.
+    """
     from .book_voice_settings import nearest_book_settings
-    values = nearest_book_settings(_setting(), bundle, config)
+    values = nearest_book_settings(_setting(), bundle, config, this_cast_only=not earlier_voices)
     return values if include_cleared else {voice_id: value for voice_id, value in values.items() if value}
+
+
+def series_character_notes(directory, config_path, *, warn=print):
+    """A person's notes about the characters of the saved book at ``directory`` and its earlier books, by voice ID.
+
+    For an analysis that should know them (``narrator_read`` shows them with each earlier
+    character). ``{}`` when the book's voice settings cannot be read, which ``warn`` reports.
+    """
+    try:
+        from .book_context import resolve_book_config
+        from .bundle import load_bundle
+        from .config import load_config
+        bundle = load_bundle(directory)
+        config = resolve_book_config(bundle, load_config(config_path, require_verifier=False, require_engine=False))
+        return character_notes(bundle, config, earlier_voices=True)
+    except (ValueError, OSError, ImportError) as error:
+        warn(f"Your character notes could not be read ({type(error).__name__}); the analysis goes on without them.")
+        return {}
 
 
 def own_character_notes(bundle, config):

@@ -178,25 +178,57 @@ def ledger_id(token):
     return None
 
 
-def new_ledger(prior_characters=()):
+MAX_KNOWN = 400
+
+
+def known_text(record):
+    """A person's notes about a character (``renderer/character_notes``) as one prompt phrase, or ""."""
+    if not isinstance(record, dict) or not record:
+        return ""
+    parts = []
+    if record.get("names"):
+        parts.append("also called " + ", ".join(record["names"]))
+    for key in ("gender", "origin"):
+        if record.get(key):
+            parts.append(f"{key} {record[key]}")
+    if record.get("notes"):
+        parts.append(record["notes"])
+    return _clean("; ".join(parts), MAX_KNOWN)
+
+
+def _sex_from(gender):
+    words = set(re.findall(r"[a-z]+", (gender or "").lower()))
+    female, male = bool(words & {"female", "woman", "f", "she"}), bool(words & {"male", "man", "m", "he"})
+    return "f" if female and not male else "m" if male and not female else "?"
+
+
+def new_ledger(prior_characters=(), notes=None):
     """Seed with prior-series characters (from series_context) as unseen entries.
 
     Every character ID is a plain number in one namespace (prior characters
     first), so a model that drops a prefix can never pick the wrong entry.
+    ``notes`` are a person's notes about characters, by voice ID: they are
+    shown with the character in every prompt (``known``), so a character
+    returning under another name can be recognized, but never become its
+    description.
     """
+    notes = notes or {}
     ledger = {"characters": [], "narration": {"mode": None, "narrator": None},
               "questions": [], "merges": [], "next": len(prior_characters) + 1, "dropped": {}}
     for index, prior in enumerate(prior_characters, 1):
+        record = notes.get(prior.get("voice_id")) or {}
         ledger["characters"].append({
             "id": str(index), "name": _clean(prior["name"], 80),
             "aliases": [_clean(alias, 80) for alias in prior.get("aliases", [])][:MAX_ALIASES],
-            "sex": "?", "note": _clean(prior.get("description", ""), MAX_NOTE),
+            "sex": _sex_from(record.get("gender")), "note": _clean(prior.get("description", ""), MAX_NOTE),
             # The earlier book's description, kept for the series check when the
             # prep read rewrites the note from this book's text.
             "prior_note": _clean(prior.get("description", ""), MAX_NOTE), "first": None,
             # A changed voice the character still had when the earlier book ended.
             "carried_voice": prior.get("current_voice_id"),
             "voice": [], "series": prior["id"], "series_evidence": [], "seen": False, "merged": [], "changes": []})
+        if known_text(record):
+            ledger["characters"][-1]["known"] = known_text(record)
     return ledger
 
 
@@ -213,6 +245,8 @@ def render(ledger, *, include_unseen=True, include_questions=True):
                    f"{item['number']}{'' if item['end'] is None else ' until it ends'}" for item in row.get("changes", [])]
         if changes:
             note = f"{note}; voice changes: {', '.join(changes)}"
+        if row.get("known"):
+            note = f"{note}; a listener's notes: {row['known']}"
         return "|".join([row["id"], row["name"], ";".join(row["aliases"]), row["sex"], note])
     seen = [line(row) for row in ledger["characters"] if row["series"] is None or row["seen"]]
     prior = [line(row) for row in ledger["characters"] if row["series"] is not None and not row["seen"]]

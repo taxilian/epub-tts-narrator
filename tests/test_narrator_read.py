@@ -330,6 +330,23 @@ class LedgerTests(unittest.TestCase):
         self.assertTrue(updated["characters"][0]["seen"])
         self.assertEqual(updated["characters"][0]["series_evidence"][0]["block_id"], "b000001")
 
+    def test_a_persons_notes_go_with_an_earlier_character_but_never_become_its_description(self):
+        from epub_tts_narrator.narrator_ledger import render
+        prior = [{"id": "series_char_x", "name": "First Voice", "aliases": [], "description": "hissing whisper",
+                  "voice_id": "series_voice_x"},
+                 {"id": "series_char_y", "name": "Jon", "aliases": [], "description": "smith", "voice_id": "v_y"}]
+        notes = {"series_voice_x": {"names": ["Hissing Shadow"], "gender": "female",
+                                    "notes": "Returns in book two | behind the doors"}}
+        ledger = new_ledger(prior, notes)
+        first, jon = ledger["characters"]
+        self.assertEqual((first["note"], first["sex"]), ("hissing whisper", "f"))
+        self.assertEqual(first["known"], "also called Hissing Shadow; gender female; Returns in book two / behind the doors")
+        self.assertNotIn("known", jon)
+        _, prior_text = render(ledger)
+        self.assertIn("1|First Voice||f|hissing whisper; a listener's notes: also called Hissing Shadow", prior_text)
+        self.assertIn("2|Jon||?|smith", prior_text)
+        self.assertEqual(new_ledger(prior), new_ledger(prior, {}), "no notes: the same ledger as before")
+
 
 class NarratedAnalyzeTests(unittest.TestCase):
     def setUp(self):

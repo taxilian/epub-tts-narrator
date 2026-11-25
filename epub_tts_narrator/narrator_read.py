@@ -605,7 +605,10 @@ def check_series(source, requests, meter, ledger, labels=None, spans=(), *, work
         items = []
         for index, row in enumerate(rows, 1):
             hits = evidence_blocks(row, mentions=mentions, lines=lines)
-            prior = "|".join([row["name"], ";".join(row["aliases"]), row.get("prior_note", row["note"])])
+            note = row.get("prior_note", row["note"])
+            if row.get("known"):
+                note = f"{note}; a listener's notes: {row['known']}"
+            prior = "|".join([row["name"], ";".join(row["aliases"]), note])
             items.append({"id": f"p{index}", "prior": prior, "text": _render_blocks(hits, numbers),
                           "_row": row["id"], "_numbers": {numbers[block["id"]]: block["id"] for block in hits}})
         return items
@@ -2118,13 +2121,15 @@ def build_segments(source, cast, spans, labels, extras, ledger, notes=(), stats=
 
 def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=None, workers=1,
                      repair_attempts=1, max_request_chars=200000, prep_window_chars=PREP_WINDOW_CHARS,
-                     markup_chars=MARKUP_CHARS, cast_notes="", attribution_notes="",
+                     markup_chars=MARKUP_CHARS, cast_notes="", attribution_notes="", character_notes=None,
                      progress=lambda message: None, meter_callback=lambda fraction, stage: None):
     """Run the experimental narrator read and return a validated analysis document.
 
     ``cast_notes`` and ``attribution_notes`` are optional operator notes (the
     configured review notes), sent as fallible "hints" to the ledger/identity
-    requests and to markup/verification respectively.
+    requests and to markup/verification respectively. ``character_notes`` are a
+    person's notes about earlier books' characters, by voice ID
+    (``renderer/character_notes.series_character_notes``), shown with each one.
     """
     from .contracts import readiness
     from .narration_boundaries import repair_narration_boundaries
@@ -2145,7 +2150,7 @@ def narrated_analyze(source, client, cache_dir, *, series_registry=None, policy=
     started_all = time.monotonic()
     try:
         prior = series_context(series_registry, source)["characters"] if series_registry is not None else []
-        ledger = new_ledger(prior)
+        ledger = new_ledger(prior, character_notes)
         spans = quote_spans(source)
 
         def stage(name, fraction, function):

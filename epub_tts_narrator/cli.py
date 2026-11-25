@@ -475,7 +475,8 @@ def main(argv=None, *, in_shell=False):
                     return _speaker_completion_status(original)
                 updated = update_book(
                     directory, title_source, config=config, input_path=args.input, strategy=args.strategy,
-                    client_factory=provider_client, announce_cache=announce_cache, progress=progress)
+                    client_factory=provider_client, announce_cache=announce_cache, progress=progress,
+                    config_path=resolve_config_path(args.config))
                 return _speaker_completion_status(updated if updated is not None else original)
             same_chapters = (fingerprint(source) == fingerprint(original["source"])
                              or fingerprint(merged_source(original["source"], source)) == fingerprint(original["source"]))
@@ -488,7 +489,7 @@ def main(argv=None, *, in_shell=False):
                 updated = update_book(
                     directory, source, config=config, input_path=args.input, strategy=args.strategy,
                     client_factory=provider_client, speaker_judge=_speaker_judge(config),
-                    announce_cache=announce_cache, progress=progress)
+                    announce_cache=announce_cache, progress=progress, config_path=resolve_config_path(args.config))
                 return _speaker_completion_status(updated if updated is not None else original)
             if args.input.suffix.lower() == ".epub":
                 accepted = accepted_epub_digests(original)
@@ -509,7 +510,8 @@ def main(argv=None, *, in_shell=False):
             if misread and reread_misread_splits(directory, config, client_factory=provider_client,
                                                  speaker_judge=_speaker_judge(config), announce_cache=announce_cache,
                                                  progress=progress, strategy=args.strategy,
-                                                 document=repaired, misread=misread):
+                                                 document=repaired, misread=misread,
+                                                 config_path=resolve_config_path(args.config)):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Cast entries that are one person are merged (asked first when a voice would change).
@@ -840,12 +842,19 @@ def main(argv=None, *, in_shell=False):
                     begin("analyzed")
                     if args.strategy == "narrator":
                         from .narrator_read import narrated_analyze, settings_notes
+                        known = {}
+                        if args.continue_from is not None:
+                            # A person's notes about the earlier books' characters go with them.
+                            from .renderer.character_notes import series_character_notes
+                            known = series_character_notes(args.continue_from.resolve(), resolve_config_path(args.config),
+                                                           warn=lambda message: print(message, file=sys.stderr))
                         document = narrated_analyze(
                             source, client, model_cache, series_registry=registry,
                             policy=config["performance_policy"], workers=settings["attribution_workers"],
                             repair_attempts=settings["repair_attempts"],
                             max_request_chars=settings["max_request_chars"], progress=progress,
-                            meter_callback=stream_console.set_progress, **settings_notes(settings))
+                            meter_callback=stream_console.set_progress, character_notes=known,
+                            **settings_notes(settings))
                     else:
                         document = analyze(source, client, model_cache, chunk_chars=settings["chunk_chars"],
                             repair_attempts=settings["repair_attempts"], max_request_chars=settings["max_request_chars"],

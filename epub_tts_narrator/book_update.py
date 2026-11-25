@@ -1067,7 +1067,7 @@ def saved_strategy(document):
 
 def update_book(directory, source, *, config, input_path=None, client_factory, speaker_judge=None,
                 announce_cache=lambda path: Path(path).resolve(), progress=print, log=print, strategy=None,
-                reread=None, base_document=None):
+                reread=None, base_document=None, config_path=None):
     """Analyze and publish the new and edited chapters of ``directory``'s book.
 
     ``strategy`` ("consensus" or "narrator") selects the analysis for the new
@@ -1184,11 +1184,13 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
                 analyzed = None
             elif strategy == "narrator":
                 from .narrator_read import narrated_analyze, settings_notes
+                from .renderer.character_notes import series_character_notes
                 analyzed = narrated_analyze(
                     delta, client, model_cache, series_registry=deepcopy(registry),
                     policy=config["performance_policy"], workers=settings["attribution_workers"],
                     repair_attempts=settings["repair_attempts"], max_request_chars=settings["max_request_chars"],
-                    progress=progress, **settings_notes(settings))
+                    progress=progress, character_notes=series_character_notes(directory, config_path, warn=log),
+                    **settings_notes(settings))
             else:
                 analyzed = analyze(
                     delta, client, model_cache, chunk_chars=settings["chunk_chars"],
@@ -1351,7 +1353,7 @@ def misread_splits(directory, *, chapter_ids=None):
 
 def reread_misread_splits(directory, config, *, client_factory, speaker_judge=None,
                           announce_cache=lambda path: Path(path).resolve(), progress=print,
-                          strategy=None, document=None, misread=None):
+                          strategy=None, document=None, misread=None, config_path=None):
     """Read again, with their neighbours, the paragraphs whose saved split contradicts their quotation marks.
 
     ``document`` and ``misread`` come from ``misread_splits`` (found here when
@@ -1367,5 +1369,5 @@ def reread_misread_splits(directory, config, *, client_factory, speaker_judge=No
     update_book(directory, document["source"], config=config, strategy=strategy,
                 client_factory=client_factory, speaker_judge=speaker_judge,
                 announce_cache=announce_cache, progress=progress, reread=misread,
-                base_document=document)
+                base_document=document, config_path=config_path)
     return len(misread)
