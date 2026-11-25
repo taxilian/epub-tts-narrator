@@ -242,6 +242,11 @@ def parser():
                      help="Rerunning a book: show the reviews which speakers you chose yourself, and let them correct "
                           "one the text (or your --instructions) shows is wrong; without it your choices are never "
                           "changed")
+    run.add_argument("--recheck", action="store_true",
+                     help="Rerunning a book: check the whole book again with fresh answers (cast, genders, groups, "
+                          "joint lines, every paragraph's speakers and every line's direction), not only what changed "
+                          "since it was checked; a terminal asks instead. An interrupted recheck resumes on the next "
+                          "rerun")
     passage_review = input_command("review-attribution", "Review an existing script with source evidence and three-way consensus")
     output_options(passage_review)
     verification = commands.add_parser(
@@ -514,10 +519,30 @@ def main(argv=None, *, in_shell=False):
                                                  config_path=resolve_config_path(args.config)):
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # A recheck asks every check again with fresh answers (--recheck, or yes when asked).
+            from . import recheck as rechecks
+            recheck = rechecks.pending(directory, config["analysis"])
+            if recheck is not None:
+                print(f"Resuming the recheck of the whole book started earlier (run {recheck.run_id}); finished: "
+                      + (", ".join(recheck.done) or "nothing yet") + ".")
+            elif getattr(args, "recheck", False) or (sys.stdin.isatty() and sys.stdout.isatty() and rechecks.ask(original)):
+                recheck = rechecks.start(directory, config["analysis"])
+                print(f"Rechecking the whole book with fresh answers (run {recheck.run_id}).")
+            elif not rechecks.describe_due(original):
+                print("Everything was already checked and has not changed; rerun with --recheck to check it all again.")
+
+            def fresh(step):
+                return recheck.cache(step) if recheck is not None else None
+
+            def done(step):
+                if recheck is not None:
+                    recheck.finished(step)
             # Cast entries that are one person are merged (asked first when a voice would change).
             from .cast_review import review_cast
-            if review_cast(directory, config, args.config, provider_client, progress,
-                           instructions=args.instructions):
+            changed = review_cast(directory, config, args.config, provider_client, progress,
+                                  instructions=args.instructions, recheck_cache=fresh("cast"))
+            done("cast")
+            if changed:
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # An entry your instructions say holds two characters' lines is split (asked first).
@@ -528,7 +553,10 @@ def main(argv=None, *, in_shell=False):
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A voice description whose gender the book (or a person's notes) contradicts is fixed.
             from .gender_review import review_genders
-            if review_genders(directory, config, args.config, provider_client, progress):
+            changed = review_genders(directory, config, args.config, provider_client, progress,
+                                     recheck_cache=fresh("genders"))
+            done("genders")
+            if changed:
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Narration is read by the character whose point of view it follows, when notes ask for it.
@@ -543,19 +571,28 @@ def main(argv=None, *, in_shell=False):
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A character the tags leave unclear (one "they said") is asked about; "y" proposes it as a group.
             from .group_check import review_group_tags
-            if review_group_tags(directory, config, provider_client, progress):
+            changed = review_group_tags(directory, config, provider_client, progress,
+                                        recheck_cache=fresh("group-tags"))
+            done("group-tags")
+            if changed:
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A line several of the scene's characters say together ("the voices all shouted") is given to all of them.
             from .joint_lines import review_joint_lines
-            if review_joint_lines(directory, config, provider_client, progress,
-                                  reconsider_choices=args.reconsider_choices):
+            changed = review_joint_lines(directory, config, provider_client, progress,
+                                         reconsider_choices=args.reconsider_choices,
+                                         recheck_cache=fresh("joint-lines"))
+            done("joint-lines")
+            if changed:
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every paragraph's speakers and split are checked once, and again after it changes.
             from .attribution_recheck import recheck_attributions
-            if recheck_attributions(directory, config, provider_client, progress, notes=args.instructions,
-                                    reconsider_choices=args.reconsider_choices):
+            changed = recheck_attributions(directory, config, provider_client, progress, notes=args.instructions,
+                                           reconsider_choices=args.reconsider_choices,
+                                           recheck_cache=fresh("attribution"))
+            done("attribution")
+            if changed:
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Directions made with older rules are directed again; typed ones stay.
@@ -565,7 +602,10 @@ def main(argv=None, *, in_shell=False):
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Every line's direction is reviewed in its scene; only wrong ones are replaced.
             from .direction_review import review_book_directions
-            if review_book_directions(directory, config, provider_client, progress):
+            changed = review_book_directions(directory, config, provider_client, progress,
+                                             recheck_cache=fresh("directions"))
+            done("directions")
+            if changed:
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
         revised = apply_edits(original, read_json(args.edits)) if args.edits else original

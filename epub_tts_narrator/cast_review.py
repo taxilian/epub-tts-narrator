@@ -378,8 +378,11 @@ def _renderer_context(directory, config_path):
         return None
 
 
-def review_cast(directory, config, config_path, client_factory, progress, *, interactive=None, instructions=None):
-    """``analyze BOOK``: find and merge cast entries that are one person; True when the book changed."""
+def review_cast(directory, config, config_path, client_factory, progress, *, interactive=None, instructions=None,
+                recheck_cache=None):
+    """``analyze BOOK``: find and merge cast entries that are one person; True when the book changed.
+
+    ``recheck_cache``: a recheck's own request cache (``recheck.Recheck.cache``), so every answer is fresh."""
     from .analysis_directory import _completed_directory
     from .analysis_progress import analysis_cache_directory
     from .pipeline import CachedRequests
@@ -397,7 +400,7 @@ def review_cast(directory, config, config_path, client_factory, progress, *, int
     notes = context["notes"] if context else {}
     earlier = {row["id"] for book in registry["books"][:-1] for row in book["cast"]["characters"]}
     settings = config["analysis"]
-    cache = analysis_cache_directory(directory, settings["cache_dir"])
+    cache = recheck_cache or analysis_cache_directory(directory, settings["cache_dir"])
     client = client_factory(config["provider"])
     added = len(document["cast"]["characters"]) - len(saved["cast"]["characters"])
     print(f"Reviewing the cast ({len(saved['cast']['characters'])} entries"

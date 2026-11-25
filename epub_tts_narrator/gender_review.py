@@ -122,7 +122,7 @@ def _decide(row, description, current, wanted, why):
     return answer if answer in {"f", "l"} else "l"
 
 
-def review_genders(directory, config, config_path, client_factory, progress, *, interactive=None):
+def review_genders(directory, config, config_path, client_factory, progress, *, interactive=None, recheck_cache=None):
     """``analyze BOOK``: fix voice descriptions whose gender the book (or a person's notes) contradicts."""
     from .analysis_directory import _completed_directory
     from .analysis_progress import analysis_cache_directory
@@ -148,7 +148,7 @@ def review_genders(directory, config, config_path, client_factory, progress, *, 
     client = client_factory(config["provider"])
     print(f"Checking the gender of {len(rows)} character(s) against the book with {client.model} at "
           f"{client.base_url}; passages naming them will be sent to this endpoint.", file=sys.stderr)
-    requests = CachedRequests(client, analysis_cache_directory(directory, settings["cache_dir"]),
+    requests = CachedRequests(client, recheck_cache or analysis_cache_directory(directory, settings["cache_dir"]),
                               repair_attempts=settings["repair_attempts"],
                               max_request_chars=settings["max_request_chars"], progress=progress)
     shown = check_genders(document, requests, rows, workers=min(5, settings["attribution_workers"]))

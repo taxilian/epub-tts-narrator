@@ -101,7 +101,7 @@ def check_groups(document, requests, candidates, *, workers=1):
     return {item["_row"]["id"]: answers[item["id"]] for item in items if answers.get(item["id"])}
 
 
-def review_group_tags(directory, config, client_factory, progress):
+def review_group_tags(directory, config, client_factory, progress, *, recheck_cache=None):
     """``analyze BOOK``: propose groups the model confirms from the book's text; True when saved."""
     from .analysis_directory import _completed_directory
     from .analysis_progress import analysis_cache_directory
@@ -123,7 +123,7 @@ def review_group_tags(directory, config, client_factory, progress):
     client = client_factory(config["provider"])
     print(f"Checking whether {len(candidates)} character(s) are groups with {client.model} at {client.base_url}; "
           "passages with their lines will be sent to this endpoint.", file=sys.stderr)
-    requests = CachedRequests(client, analysis_cache_directory(directory, settings["cache_dir"]),
+    requests = CachedRequests(client, recheck_cache or analysis_cache_directory(directory, settings["cache_dir"]),
                               repair_attempts=settings["repair_attempts"],
                               max_request_chars=settings["max_request_chars"], progress=progress)
     confirmed = check_groups(document, requests, candidates, workers=min(5, settings["attribution_workers"]))

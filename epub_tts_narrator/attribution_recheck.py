@@ -105,16 +105,17 @@ def notes_digest(notes):
     return hashlib.sha256(notes.encode("utf-8")).hexdigest() if notes else None
 
 
-def unchecked_blocks(document, *, notes=None, reconsider_choices=False):
+def unchecked_blocks(document, *, notes=None, reconsider_choices=False, everything=False):
     """Source-ordered IDs of paragraphs to check: not checked at this version since they last changed, or
     near a character added since the last check; every paragraph once under new ``notes``.
 
     A paragraph with a person's speaker choice is one only with
     ``reconsider_choices``; otherwise the audit may not change it, so it is
-    sent only as context around the others.
+    sent only as context around the others. ``everything`` (a recheck) takes
+    every paragraph, however recently it was checked.
     """
     record = _record(document)
-    checked = record.get("blocks", {})
+    checked = {} if everything else record.get("blocks", {})
     digest = notes_digest(notes)
     if digest is not None and record.get("notes") != digest:
         checked = {}
@@ -140,7 +141,8 @@ def record_checks(document, block_ids, *, notes=None):
         document["provenance"]["attribution_checks"]["notes"] = digest or record["notes"]
 
 
-def recheck_attributions(directory, config, client_factory, progress, *, notes=None, reconsider_choices=False):
+def recheck_attributions(directory, config, client_factory, progress, *, notes=None, reconsider_choices=False,
+                         recheck_cache=None):
     """``analyze BOOK``: check the speakers and splits of every paragraph not yet checked; True when it published."""
     from .attribution_manual_review import print_finding
     from .attribution_review import audit_attribution
@@ -148,7 +150,8 @@ def recheck_attributions(directory, config, client_factory, progress, *, notes=N
     directory = Path(directory).resolve()
     original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
     document, _, _ = _completed_directory(directory)
-    targets = unchecked_blocks(document, notes=notes, reconsider_choices=reconsider_choices)
+    targets = unchecked_blocks(document, notes=notes, reconsider_choices=reconsider_choices,
+                               everything=recheck_cache is not None)
     total = len(document["source"]["blocks"])
     if not targets:
         print(f"Speakers and speech splits: all {total} paragraph(s) were already checked and have not "
@@ -174,7 +177,9 @@ def recheck_attributions(directory, config, client_factory, progress, *, notes=N
         if notes_digest(notes) or reconsider_choices:
             identity += f":{notes_digest(notes)}:{reconsider_choices}"
         run_id = hashlib.sha256(identity.encode()).hexdigest()[:32]
-        cache = analysis_cache_directory(directory, settings["cache_dir"]) / "attribution-check" / run_id
+        # A recheck asks afresh in its own cache, whose answers an interrupted recheck replays.
+        cache = (recheck_cache / "attribution-check" if recheck_cache is not None
+                 else analysis_cache_directory(directory, settings["cache_dir"]) / "attribution-check" / run_id)
         cache.mkdir(parents=True, exist_ok=True)
         print(f"Attribution check run: {run_id}", file=sys.stderr)
         client = client_factory(config["provider"])

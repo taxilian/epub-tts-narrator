@@ -167,3 +167,104 @@ class RecheckTests(AttributionCLIHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WholeBookRecheckTests(AttributionCLIHarness):
+    """``analyze BOOK --recheck`` (or yes when asked): every check again with fresh answers, resumable."""
+
+    STEPS = {"cast": "epub_tts_narrator.cast_review.review_cast",
+             "genders": "epub_tts_narrator.gender_review.review_genders",
+             "group-tags": "epub_tts_narrator.group_check.review_group_tags",
+             "joint-lines": "epub_tts_narrator.joint_lines.review_joint_lines",
+             "attribution": "epub_tts_narrator.attribution_recheck.recheck_attributions",
+             "directions": "epub_tts_narrator.direction_review.review_book_directions"}
+
+    def rerun(self, *arguments, fail=None):
+        from unittest.mock import Mock
+        from epub_tts_narrator.cli import main
+        settings = deepcopy(DEFAULTS)
+        settings["provider"].update(model="test-model", api_key="test-key")
+        mocks = {step: Mock(return_value=False) for step in self.STEPS}
+        if fail:
+            mocks[fail].side_effect = RuntimeError("interrupted fixture")
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("epub_tts_narrator.cli.load_config", return_value=settings))
+            for step, target in self.STEPS.items():
+                stack.enter_context(patch(target, mocks[step]))
+            for target in ("epub_tts_narrator.group_proposals.review_groups",
+                           "epub_tts_narrator.character_split.review_splits",
+                           "epub_tts_narrator.narrator_review.review_narrators",
+                           "epub_tts_narrator.direction_refresh_command.refresh_outdated_directions"):
+                stack.enter_context(patch(target, return_value=False))
+            output = io.StringIO()
+            stack.enter_context(contextlib.redirect_stdout(output))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            try:
+                main(["analyze", str(self.book), *arguments])
+            except RuntimeError:
+                pass
+        caches = {step: mock.call_args.kwargs.get("recheck_cache") if mock.called else "not run"
+                  for step, mock in mocks.items()}
+        return caches, output.getvalue()
+
+    def test_recheck_gives_every_step_a_fresh_cache_and_resumes_after_an_interruption(self):
+        from epub_tts_narrator import recheck
+        self.make_book(risk=False)
+        caches, _ = self.rerun("--recheck", fail="genders")
+        self.assertIsNotNone(caches["cast"])
+        self.assertIsNotNone(caches["genders"])
+        self.assertEqual(caches["attribution"], "not run")
+        pending = recheck.pending(self.book, DEFAULTS["analysis"])
+        self.assertEqual(pending.done, ["cast"], "the finished step is remembered, the interrupted one is not")
+        run_cache = caches["cast"]
+
+        caches, output = self.rerun()
+        self.assertIn("Resuming the recheck of the whole book", output)
+        self.assertIsNone(caches["cast"], "a finished step is not asked again")
+        self.assertEqual(caches["genders"], run_cache, "the interrupted step replays its answers so far")
+        self.assertTrue(all(caches[step] == run_cache for step in ("group-tags", "joint-lines", "attribution",
+                                                                   "directions")))
+        self.assertIsNone(recheck.pending(self.book, DEFAULTS["analysis"]), "a finished recheck is removed")
+
+        caches, output = self.rerun()
+        self.assertTrue(all(value is None for value in caches.values()), "an ordinary rerun again")
+
+    def test_a_new_recheck_never_replays_an_earlier_one(self):
+        self.make_book(risk=False)
+        first, _ = self.rerun("--recheck")
+        second, _ = self.rerun("--recheck")
+        self.assertNotEqual(first["attribution"], second["attribution"])
+
+    def test_a_terminal_is_asked_and_told_when_nothing_is_due(self):
+        from epub_tts_narrator import recheck
+        self.make_book(risk=False)
+        document = json.loads((self.book / "analysis.json").read_text(encoding="utf-8"))
+        record_checks(document, [block["id"] for block in document["source"]["blocks"]])
+        from epub_tts_narrator.direction_review import record_reviews, unreviewed_blocks
+        record_reviews(document, unreviewed_blocks(document))
+        said = []
+        self.assertTrue(recheck.ask(document, input_fn=lambda prompt: said.append(prompt) or "y", output=said.append))
+        self.assertIn("Everything in this book was already checked", said[0])
+        self.assertIn("Check the whole book again with fresh answers", said[1])
+        self.assertFalse(recheck.ask(document, input_fn=lambda prompt: "", output=lambda text: None))
+        self.assertEqual(unchecked_blocks(document), [])
+        self.assertEqual(len(unchecked_blocks(document, everything=True)), len(document["source"]["blocks"]))
+
+    def test_a_recheck_checks_every_paragraph_again_with_fresh_requests(self):
+        import tempfile
+        from pathlib import Path
+        self.make_book(risk=False)
+        quiet = contextlib.ExitStack()
+        with quiet:
+            quiet.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            quiet.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            recheck_attributions(self.book, config(), lambda settings: NoFindingAuditClient(), lambda message: None)
+            again = NoFindingAuditClient()
+            fresh = Path(tempfile.mkdtemp())
+            self.addCleanup(__import__("shutil").rmtree, fresh, True)
+            recheck_attributions(self.book, config(), lambda settings: again, lambda message: None,
+                                 recheck_cache=fresh)
+        blocks = [block["id"] for block in json.loads((self.book / "analysis.json").read_text())["source"]["blocks"]]
+        scanned = [unit["block_id"] for call in again.calls if call["mode"] == "attribution_review_scan"
+                   for unit in call["target_units"]]
+        self.assertEqual(sorted(scanned), sorted(blocks))

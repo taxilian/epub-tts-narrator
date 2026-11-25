@@ -209,7 +209,8 @@ def _decide(view):
     return answer if answer in {"j", "k", "l"} else "l"
 
 
-def review_joint_lines(directory, config, client_factory, progress, *, interactive=None, reconsider_choices=False):
+def review_joint_lines(directory, config, client_factory, progress, *, interactive=None, reconsider_choices=False,
+                       recheck_cache=None):
     """``analyze BOOK``: give lines the scene's characters say together to all of them; True when saved.
 
     A line a person assigned is only changed when that person says so here, or
@@ -236,7 +237,7 @@ def review_joint_lines(directory, config, client_factory, progress, *, interacti
     client = client_factory(config["provider"])
     print(f"Checking who says {len(found)} line(s) together with {client.model} at {client.base_url}; "
           "the scenes around them will be sent to this endpoint.", file=sys.stderr)
-    requests = CachedRequests(client, analysis_cache_directory(directory, settings["cache_dir"]),
+    requests = CachedRequests(client, recheck_cache or analysis_cache_directory(directory, settings["cache_dir"]),
                               repair_attempts=settings["repair_attempts"],
                               max_request_chars=settings["max_request_chars"], progress=progress)
     confirmed = check_lines(document, requests, found, workers=min(5, settings["attribution_workers"]))

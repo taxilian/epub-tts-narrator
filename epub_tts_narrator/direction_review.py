@@ -45,11 +45,12 @@ def block_states(document):
     return {block["id"]: _state(block, rows.get(block["id"], [])) for block in document["source"]["blocks"]}
 
 
-def unreviewed_blocks(document):
-    """Paragraphs with a spoken line not reviewed at this version since they last changed."""
+def unreviewed_blocks(document, *, everything=False):
+    """Paragraphs with a spoken line not reviewed at this version since they last changed (all of them: a recheck)."""
     from .direction_refresh import SPOKEN_KINDS
     record = document["provenance"].get("direction_checks")
-    checked = record.get("blocks", {}) if isinstance(record, dict) and record.get("version") == VERSION else {}
+    checked = (record.get("blocks", {}) if isinstance(record, dict) and record.get("version") == VERSION
+               and not everything else {})
     spoken = {segment["block_id"] for segment in document["segments"] if segment["kind"] in SPOKEN_KINDS}
     return [block_id for block_id, state in block_states(document).items()
             if block_id in spoken and checked.get(block_id) != state]
@@ -140,7 +141,7 @@ def review_directions(document, requests, block_ids, *, workers=1, progress=lamb
     return revised, changed
 
 
-def review_book_directions(directory, config, client_factory, progress):
+def review_book_directions(directory, config, client_factory, progress, *, recheck_cache=None):
     """``analyze BOOK``: review the directions of every paragraph not reviewed since it changed; True when published."""
     from .analysis_directory import _completed_directory
     from .analysis_progress import analysis_cache_directory
@@ -149,7 +150,7 @@ def review_book_directions(directory, config, client_factory, progress):
     directory = Path(directory).resolve()
     original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
     document, _, _ = _completed_directory(directory)
-    targets = unreviewed_blocks(document)
+    targets = unreviewed_blocks(document, everything=recheck_cache is not None)
     if not targets:
         print("Line directions: every spoken line was already reviewed and has not changed since.")
         return False
@@ -157,14 +158,15 @@ def review_book_directions(directory, config, client_factory, progress):
     if not config["provider"]["model"]:
         raise ValueError("Rerunning analyze reviews line directions; set provider.model in epub-tts-narrator.toml, "
                          "or select a TOML file with --config")
-    print(f"Reviewing line directions in {len(targets)} paragraph(s) not reviewed since they last changed; only "
-          "wrong directions are replaced, and directions you typed are kept.")
+    print(f"Reviewing line directions in {len(targets)} paragraph(s) "
+          + ("(a recheck of the whole book)" if recheck_cache is not None else "not reviewed since they last changed")
+          + "; only wrong directions are replaced, and directions you typed are kept.")
     with ExitStack() as stack:
         reserved = stack.enter_context(reserve_revision_scope([directory]))
         client = client_factory(config["provider"])
         print(f"Reviewing directions with {client.model} at {client.base_url}; book passages will be sent to this "
               "endpoint.", file=sys.stderr)
-        requests = CachedRequests(client, analysis_cache_directory(directory, settings["cache_dir"]),
+        requests = CachedRequests(client, recheck_cache or analysis_cache_directory(directory, settings["cache_dir"]),
                                   repair_attempts=settings["repair_attempts"],
                                   max_request_chars=settings["max_request_chars"], progress=progress)
         revised, changed = review_directions(document, requests, targets,
