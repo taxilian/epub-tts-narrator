@@ -320,6 +320,28 @@ class InlinePerformanceTests(unittest.TestCase):
                        if control["kind"] == "delivery" and control["tag"] == "style")
         self.assertEqual(applied["scope_accuracy"], "approximate_reset")
 
+    def test_a_whisper_split_around_a_drawn_out_repair_leaves_nothing_on_the_quote_marks(self):
+        # “You’rrrre herrrrre,” he moaned in a sinister whisper: the whole line whispered, a groan at its end,
+        # and the stretched spelling repaired with "drawn out". The repair's style span splits the whisper,
+        # leaving whisper pieces on the opening quote and on ",”", which are not spoken.
+        source = "“You’rrrre herrrrre,”"
+        spoken = "“You’re here,”"
+        row = {"id": "b1:0:21", "block_id": "b1", "start": 0, "end": len(source), "text": source,
+               "kind": "dialogue", "speech_normalization": {"version": 1, "edits": [
+                   {"start": 1, "end": 19, "original": source[1:19], "replacement": "You’re here",
+                    "direction": "drawn out", "reason": "The source supports it."}]},
+               "spoken_text": spoken, "performance_controls": {
+                   "version": 1, "text_sha256": text_sha256(spoken), "controls": [
+                       {"kind": "delivery", "tag": "whisper", "direction": "", "start": 0, "end": 14,
+                        "text": spoken},
+                       {"kind": "vocalization", "sound": "groan", "offset": 12}]}}
+        record = row_performance(row, None)
+        prepared, engine_text, _ = prepare_synthesis(spoken, "sinister whisper", performance=record)
+        self.assertEqual(prepared, "You’re here,")
+        self.assertIn("[whisper; drawn out] You’re here", engine_text)
+        self.assertIn("[groans]", engine_text)
+        self.assertNotIn("<whisper><", engine_text, "no whisper left on the opening quote alone")
+
     def test_empty_or_absent_inline_records_keep_legacy_plans_control_free(self):
         empty = self.bundle_for(inline_document("empty"), "empty-book")
         plain = self.bundle_for(inline_document("plain"), "plain-book")

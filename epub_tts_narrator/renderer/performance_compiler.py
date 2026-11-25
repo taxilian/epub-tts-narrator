@@ -98,6 +98,10 @@ def trim_performance(text, record):
             item["offset"] = bisect_left(indices, item["offset"])
         else:
             a, b = bisect_left(indices, item["start"]), bisect_left(indices, item["end"])
+            if a == b and item["kind"] == "delivery":
+                # A delivery piece over only removed marks (a whisper split around a style span leaves one on
+                # the opening quote) has nothing to apply to; the spoken words keep their own pieces.
+                continue
             if a == b:
                 raise ValueError("Performance control applies only to nonspoken edge formatting")
             if item["kind"] == "pronunciation" and b - a != item["end"] - item["start"]:
