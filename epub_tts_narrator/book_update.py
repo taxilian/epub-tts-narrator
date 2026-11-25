@@ -1362,7 +1362,7 @@ def reread_misread_splits(directory, config, *, client_factory, speaker_judge=No
         document, misread = misread_splits(directory)
     if not misread:
         return 0
-    print(f"{len(misread)} paragraph(s) are split differently from their quotation marks (speech "
+    print(f"{len(misread)} paragraph(s) are split differently from their quotation marks or italics (speech "
           "read by the narrator, or narration read in a character's voice); reading them again.")
     update_book(directory, document["source"], config=config, strategy=strategy,
                 client_factory=client_factory, speaker_judge=speaker_judge,

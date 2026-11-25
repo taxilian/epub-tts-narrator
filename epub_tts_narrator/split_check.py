@@ -11,7 +11,10 @@ misread, and the book update reads it again with its neighbours
 (``book_update.update_book(reread=...)``).
 
 Only paragraphs that contain quotation marks in the book's dialogue style are
-compared; unquoted speech is the model's call. Paragraphs with a person's
+compared that way. Unquoted speech the book sets in italics is compared with
+its italics (``italic_speech.italic_misreads``): a line that includes the
+roman tag between its italic runs, or italic words the narrator reads beside
+their speech tag. Other unquoted speech is the model's call. Paragraphs with a person's
 speaker choice, a quoted thought or letter, or a restored source span are
 left alone, and so are paragraphs with a direction a person typed. A paragraph read again at this ``VERSION`` is recorded in
 ``provenance.split_rereads`` with its text hash and is not flagged again
@@ -25,7 +28,7 @@ import hashlib
 from .direction_policy import typed
 from .quote_spans import dialogue_style, quote_spans, spans_by_block
 
-VERSION = 1
+VERSION = 2  # 2: italic speech is compared too
 
 
 def text_hash(text):
@@ -50,7 +53,14 @@ def misread_blocks(document):
     done = (document["provenance"].get("split_rereads") or {})
     done = done.get("blocks", {}) if done.get("version") == VERSION else {}
     quoted = spans_by_block(quote_spans(source, dialogue_style(source)))
-    result = {}
+    from .italic_speech import italic_misreads
+
+    def chosen(saved):
+        return any(row["attribution"]["basis"] == "user" or typed(row) or "source_restoration" in row
+                   for row in saved)
+    texts = {block["id"]: block["text"] for block in source["blocks"]}
+    result = {block_id: reason for block_id, reason in italic_misreads(document, skip=chosen).items()
+              if done.get(block_id) != text_hash(texts[block_id])}
     for block in source["blocks"]:
         spans = quoted.get(block["id"])
         saved = rows.get(block["id"], [])

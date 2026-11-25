@@ -32,6 +32,7 @@ from .direction_policy import VERSION as DIRECTION_POLICY
 from .narrator_prompts import (HINTS, MARKUP, MERGE_CHECK, PREP, SERIES_CHECK, VERIFY, VERIFY_TIEBREAK, VOICE,
                                VERSION as PROMPT_VERSION)
 from .performance_plan import DELIVERY_TAGS, VOCAL_SOUNDS
+from .italic_speech import split_span
 from .provider import OutputTruncatedError
 from .quote_spans import _NOT_NAMES, quote_spans, spans_by_block
 from .speech_cues import REASON as CUE_REASON, SCOPED_TONES, line_cues, speakers, tone_direction
@@ -796,8 +797,11 @@ def _markup_validator(ledger, index, targets, blocks_by_number, block_spans):
                     raise ValueError
                 parsed = _parse_who(who, ledger, index)
                 kind = row[4] if len(row) > 4 and _is(row[4], {"t", "l"}) else None
-                extras.append({"block_id": block["id"], "start": start, "end": end,
-                               "who": parsed, "kind": kind, "delivery": ""})
+                # Speech the book sets in italics is cut at the roman tag between its runs
+                # ("*Awaken,* the words said. *For you are the hope…*"): the narrator reads the tag.
+                for low, high in split_span(block, start, end):
+                    extras.append({"block_id": block["id"], "start": low, "end": high,
+                                   "who": parsed, "kind": kind, "delivery": ""})
             except (ValueError, TypeError, KeyError, IndexError):
                 dropped += 1
         notes, dropped_notes = line_notes
