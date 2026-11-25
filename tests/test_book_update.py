@@ -551,6 +551,37 @@ class BookUpdateTests(unittest.TestCase):
         self.assertFalse(issue["resolved"])
         self.assertEqual(document["provenance"]["book_updates"][-1]["context_reviews"], [neighbour])
 
+    def test_a_person_s_choice_for_an_unassigned_line_in_an_unchanged_chapter_is_published(self):
+        # The update asks for every unassigned line in the book, also in chapters it does not change.
+        from epub_tts_narrator.analysis_revision import revise_directories
+        from epub_tts_narrator.speaker_decisions import prompt_speaker_decisions
+        self.seed()
+        saved = read_json(self.book / "analysis.json")
+        hello = next(row for row in saved["segments"] if row["kind"] == "dialogue" and "Hello" in row["text"])
+        role, voice = hello["role_id"], hello["voice_id"]
+        unassigned = deepcopy(saved)
+        row = next(row for row in unassigned["segments"] if row["id"] == hello["id"])
+        row.update(role_id=None, voice_id=None, attribution={
+            "basis": "unresolved", "reason": "The read could not settle the speaker.", "evidence": [],
+            "candidates": [role], "review_required": True})
+        revise_directories({self.book: unassigned}, directories=[self.book], scope="attribution",
+                           progress=lambda message: None)
+
+        def choose(view):
+            return {"action": "assign", "roles": [role]}
+
+        def decide(document, **kwargs):
+            return prompt_speaker_decisions(document, **{**kwargs, "chooser": choose})
+
+        changed_two = ("Two", ["Mara said, “The lamp is lit.”", "Night fell."])
+        with patch("epub_tts_narrator.speaker_decisions.prompt_speaker_decisions", side_effect=decide):
+            status, stdout, stderr = self.analyze(self.epub("serial-v2", [CHAPTER_ONE, changed_two], "download-2"))
+
+        self.assertEqual(status, 0, stderr + stdout)
+        document = read_json(self.book / "analysis.json")
+        row = next(row for row in document["segments"] if row["id"] == hello["id"])
+        self.assertEqual((row["role_id"], row["voice_id"], row["attribution"]["basis"]), (role, voice, "user"))
+
     def test_removed_paragraph_needs_no_model_and_moves_pronunciation_evidence(self):
         from epub_tts_narrator import pronunciations
         from epub_tts_narrator.pipeline import write_json

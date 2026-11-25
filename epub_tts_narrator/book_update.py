@@ -880,6 +880,30 @@ def _script_rows(directory, manifest):
     return rows
 
 
+_SPEAKER_FIELDS = ("role_id", "voice_id", "simultaneous_speakers", "attribution")
+
+
+def _same_rows(before, after):
+    """Whether an unchanged chapter's script rows came through the update unchanged.
+
+    The one change allowed is a person's speaker choice for a line the saved
+    book left unassigned: the update asks for every unassigned line in the
+    book, not only the new ones (``prompt_speaker_decisions``).
+    """
+    from .speaker_completion import has_assigned_speakers
+    if after is None or len(before) != len(after):
+        return False
+    for old, new in zip(before, after):
+        if old == new:
+            continue
+        if (has_assigned_speakers(old) or new.get("attribution", {}).get("basis") != "user"
+                or not has_assigned_speakers(new)
+                or {key: value for key, value in old.items() if key not in _SPEAKER_FIELDS}
+                != {key: value for key, value in new.items() if key not in _SPEAKER_FIELDS}):
+            return False
+    return True
+
+
 def publish_update(directory, document, *, expected_manifest_sha256, progress=print):
     """Install a book update atomically, with backups and a journal.
 
@@ -937,7 +961,8 @@ def publish_update(directory, document, *, expected_manifest_sha256, progress=pr
         edited = {chapter["id"] for chapter in [*latest.get("edited_chapters", []), *latest.get("reread_chapters", []),
                                                 *latest.get("split_chapters", [])]}
         before_rows, after_rows = _script_rows(directory, manifest), _script_rows(after, new_manifest)
-        if any(after_rows.get(chapter) != rows for chapter, rows in before_rows.items() if chapter not in edited):
+        if any(not _same_rows(rows, after_rows.get(chapter)) for chapter, rows in before_rows.items()
+               if chapter not in edited):
             raise ValueError("An update must keep every unchanged chapter's script rows unchanged")
         replaced = [name for name in ["analysis.json", "series-cast.json", *bundle_names, *sidecars]
                     if name != "manifest.json" and (directory / name).exists()
