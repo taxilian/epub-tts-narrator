@@ -34,10 +34,9 @@ def repair_traits(request):
         return ""
     from .performance_compiler import performance_kwargs
 
-    chunk = request["chunk"]
-    performer = request.get("performer")
-    voice_id = performer["voice_id"] if performer else chunk["segment"]["voice_id"]
-    return performance_kwargs(chunk, voice_id).get("traits", "")
+    from .speech_identity import speech_voice_id
+
+    return performance_kwargs(request["chunk"], speech_voice_id(request)).get("traits", "")
 
 
 def _word_tokens(text):

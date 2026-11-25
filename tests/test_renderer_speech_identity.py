@@ -234,6 +234,22 @@ class SpeechIdentityTests(unittest.TestCase):
         for actual in ("Hello.", "<whisper>Hello.</whisper>"):
             self.assertEqual(key, self.key(request, voice, engine_metadata={"synthesis_text": actual}))
 
+    def test_a_group_line_spoken_by_one_pool_voice_keeps_that_voice_s_accent(self):
+        # A collective voice taking turns: each line is one pool voice's, with its own accent cue. The request names
+        # no performer (one voice speaks), so the take's recorded input is checked against that pool voice.
+        pool = reference("group-pool-2")
+        request = speech_request(pool)
+        chunk = request["chunk"]
+        chunk["segment"].update(voice_id="group", delivery={"direction": "slow", "evidence": []})
+        chunk["ensemble"] = {"version": 1, "voice_id": "group", "mode": "alternate", "recipe": None,
+                             "performers": [{"role_id": "role-one", "voice_id": "group-pool-2"}]}
+        chunk["speech_traits"] = {"group-pool-2": "Scandinavian accent"}
+        key = self.key(request, pool)
+        self.assertEqual(key, self.key(request, pool, engine_metadata={
+            "synthesis_text": "[Scandinavian accent][slow] Hello."}))
+        with self.assertRaises(ValueError):
+            self.key(request, pool, engine_metadata={"synthesis_text": "[slow] Hello."})
+
     def test_saved_take_with_different_actual_delivery_cannot_be_relabelled(self):
         voice = reference()
         request = speech_request(voice)

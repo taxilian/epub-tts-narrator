@@ -208,6 +208,24 @@ def _voice(asset, voices_by_asset):
     return deepcopy(dict(voice))
 
 
+def speech_voice_id(request):
+    """The voice speaking a single-speech request: its simultaneous lane's performer, else the chunk's one speaker.
+
+    A collective voice's line spoken by one of its pool voices (``ensemble``, one performer) carries no
+    ``performer``; that pool voice, not the group's own, is who speaks it, with its own accent cue.
+    """
+    performer = request.get("performer")
+    if isinstance(performer, Mapping):
+        return performer.get("voice_id")
+    chunk = request.get("chunk", {})
+    if isinstance(chunk, Mapping) and "ensemble" in chunk:
+        from .bundle import chunk_speakers
+        speakers = chunk_speakers(chunk)
+        if len(speakers) == 1:
+            return speakers[0]["voice_id"]
+    return chunk.get("segment", {}).get("voice_id")
+
+
 def _direction(chunk, voice_id):
     segment = chunk.get("segment")
     if not isinstance(segment, Mapping):
@@ -611,9 +629,7 @@ def _generation_identity(request, voices_by_asset=None, *, engine_metadata=None)
     if request["kind"] == "speech":
         voice = _voice(request.get("voice_asset_hash"), voices_by_asset)
         text = _text(trim_speech_text(_text(chunk.get("spoken_text"), "text")), "text")
-        performer = request.get("performer")
-        voice_id = (performer.get("voice_id") if isinstance(performer, Mapping)
-                    else chunk.get("segment", {}).get("voice_id"))
+        voice_id = speech_voice_id(request)
         direction = _direction(chunk, voice_id)
         expressive = performance_kwargs(chunk, voice_id)
         if known:

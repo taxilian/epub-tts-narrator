@@ -10,6 +10,7 @@ from .common import digest
 from .delivery_recovery import _speech_request
 from .direction_repair_prompts import PROPOSE, REVIEW
 from .engines import _directed_text
+from .speech_identity import speech_voice_id
 from .speech_text import trim_speech_text
 from .speech_traits import performance_direction
 
@@ -54,8 +55,7 @@ def make_payload(request, failures):
             or len({row["attempt"] for row in failures}) != len(failures)):
         raise ValueError("Direction repair needs distinct failed takes")
     chunk = speech["chunk"]
-    performer = speech.get("performer")
-    voice_id = performer["voice_id"] if performer else chunk["segment"]["voice_id"]
+    voice_id = speech_voice_id(speech)
     payload = {"mode": "direction_repair", "request_sha256": digest(speech),
                "requested_text": chunk["spoken_text"], "source": deepcopy(chunk["segment"]),
                "original_direction": effective_delivery(chunk["segment"]),
@@ -100,8 +100,7 @@ def repaired_direction(request, replacement):
     if speech is None or not _plain(replacement, 160):
         raise ValueError("Invalid synthesis-only direction")
     chunk = speech["chunk"]
-    performer = speech.get("performer")
-    voice_id = performer["voice_id"] if performer else chunk["segment"]["voice_id"]
+    voice_id = speech_voice_id(speech)
     return performance_direction(chunk, voice_id, scene_direction=replacement)
 
 
