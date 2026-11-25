@@ -400,6 +400,48 @@ class ControlledClipRepairTests(unittest.TestCase):
         self.assertEqual(project_plan_performance(request, plan), [None, None])
         self.assertIsNone(controlled_repair_guidance(request), 'its repair request keeps the plain payload')
 
+    def test_a_mid_line_change_opens_with_the_accent_and_earlier_takes_render_again(self):
+        # "[cue][kind] Don't reproach yourself. [dry, faintly teasing] Or did Lars mention that?": the span's tag
+        # takes over from the opening ones, so it carries the accent cue too. A take recorded before, with the
+        # span's tag alone, is not the current input: the line renders again instead of failing.
+        from epub_tts_narrator.renderer import engines
+        text = 'Forgive me, Lady. Or did Lars mention that?'
+        self.engine.heard_override = lambda heard, direction, number: heard
+        self.chunk = speech_request(self.voice, text)['chunk']
+        voice_id = self.chunk['segment']['voice_id']
+        self.chunk.update(chunk_id='mid-line-change', expressive_direction='kind',
+                          expressive_traits={voice_id: 'light Irish accent'},
+                          expressive_performance={'version': 1, 'text_sha256': text_sha256(text), 'controls': [
+                              {'kind': 'delivery', 'tag': 'style', 'direction': 'dry, faintly teasing',
+                               'start': 18, 'end': len(text), 'text': text[18:]}]})
+        calls = []
+
+        def synthesize(spoken, voice, path, *, seed, direction='', performance=None, traits=''):
+            prepared, compiled, metadata = prepare_synthesis(spoken, direction, performance=performance, traits=traits)
+            calls.append(compiled)
+            from test_renderer_workflow import write_tone
+            write_tone(path, frequency=220 + len(calls) * 31)
+            self.registry[hashlib.sha256(pcm(path)).hexdigest()] = prepared
+            return {**metadata, 'synthesis_text': compiled}
+
+        self.engine.synthesize = synthesize
+        original = engines.compile_performance
+
+        def earlier_form(*args, **kwargs):
+            result = original(*args, **kwargs)
+            return dict(result, text=result['text'].replace('[light Irish accent][dry, faintly teasing]',
+                                                            '[dry, faintly teasing]'))
+
+        with patch.object(engines, 'compile_performance', earlier_form):
+            _, first = self.render_chunk()
+        self.assertTrue(first['report']['passed'])
+        self.assertIn('Lady. [dry, faintly teasing] Or did', calls[-1])
+        _, again = self.render_chunk()
+        self.assertTrue(again['report']['passed'])
+        self.assertEqual(len(calls), 2, 'the line rendered again in the current form')
+        self.assertIn('Lady. [light Irish accent][dry, faintly teasing] Or did', calls[-1])
+        self.assertTrue(calls[-1].startswith('[light Irish accent][kind] Forgive me'))
+
     def test_controlled_repair_respects_shared_generation_cap(self):
         self.set_controlled_polgara()
         self.config['verification']['max_resolution_attempts'] = 3

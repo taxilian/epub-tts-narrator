@@ -212,7 +212,9 @@ The plain backend explicitly reports every unsupported requested control.
                     item["scope_accuracy"] = "suppressed"
                     result["warnings"].append("redundant_style_direction_suppressed")
                 else:
-                    starts.setdefault(a, []).append((0, f"[{control['direction']}] "))
+                    # A new direction tag takes over from the line's opening ones (the reset
+                    # below repeats them), so a mid-line change opens with the accent cue too.
+                    starts.setdefault(a, []).append((0, f"{direction_tags(traits)}[{control['direction']}] "))
                     if b in style_starts:
                         # The next style takes over here; a reset in between is noise.
                         item["scope_accuracy"] = "until_next_style"
