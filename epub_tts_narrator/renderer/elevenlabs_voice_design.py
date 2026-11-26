@@ -99,6 +99,16 @@ def _audio(preview):
     return buffer.getvalue(), len(data) // 2
 
 
+def _same_script(requested, returned):
+    """The returned script is the requested one, apart from spacing.
+
+    ElevenLabs echoes the script back trimmed, so a script with leading,
+    trailing or repeated spaces comes back re-spaced. Any other change means
+    the previews may speak different words, so they are refused.
+    """
+    return isinstance(returned, str) and requested.split() == returned.split()
+
+
 class ElevenLabsVoiceDesigner:
     capabilities = {"voice_design": True}
 
@@ -177,8 +187,8 @@ class ElevenLabsVoiceDesigner:
             "model_id": self.model, "seed": seed % (2 ** 31),
             "auto_generate_text": False, "stream_previews": False, "should_enhance": False,
             "guidance_scale": self.guidance_scale, "loudness": self.loudness})
-        if result.get("text") != text:
-            raise ElevenLabsVoiceError("ElevenLabs changed the requested preview script; no voice was saved")
+        if not _same_script(text, result.get("text")):
+            raise ElevenLabsVoiceError("ElevenLabs changed the words of the requested preview script; no voice was saved")
         previews = result.get("previews")
         if not isinstance(previews, list) or not 1 <= len(previews) <= 10:
             raise ElevenLabsVoiceError("ElevenLabs returned no usable voice previews")

@@ -111,6 +111,22 @@ class ElevenLabsDesignTests(unittest.TestCase):
         with self.assertRaisesRegex(ElevenLabsVoiceError, "preview cache"):
             self.create(output=self.root / "attempt-002-raw.wav")
 
+    def test_script_returned_with_only_its_spacing_changed_is_accepted(self):
+        spaced = " " + TEXT.replace(". I paused", ".  I paused") + "\n"
+        with patch.object(self.designer, "_post", return_value=response()) as post:
+            result = self.create(text=spaced)
+        self.assertEqual(post.call_args.args[0]["text"], spaced)
+        self.assertEqual(result["reference_text"], spaced)
+        self.assertTrue(self.output.exists())
+        for changed in (TEXT.replace("quiet", "silent"), TEXT.replace("hallway.", "hallway"),
+                        TEXT.replace("I paused", "Ipaused")):
+            other = self.root / changed[-12:].replace(" ", "-")
+            reworded = response(); reworded["text"] = changed
+            with self.subTest(changed=changed), patch.object(self.designer, "_post", return_value=reworded), \
+                 self.assertRaisesRegex(ElevenLabsVoiceError, "changed the words"):
+                self.create(output=other / "raw.wav", text=spaced)
+            self.assertFalse((other / "raw.wav").exists())
+
     def test_validation_happens_before_network_and_existing_files_never_overwrite(self):
         with patch.object(self.designer, "_post", side_effect=AssertionError("No network")):
             for text in ("short", "x" * 1001, TEXT + " [laughs]", TEXT + "<|tag|>"):

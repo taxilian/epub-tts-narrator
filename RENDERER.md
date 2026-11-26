@@ -1223,6 +1223,8 @@ fresh design. Corrupt request records stop recovery with an inspection path.
 The description sent to ElevenLabs must contain 20–1000 characters; the
 sample script must contain 100–1000 characters. Unsupported lengths produce
 an actionable error without truncating or rewriting your script.
+ElevenLabs returns the script it spoke; previews are kept only when it has the
+same words as yours (spacing may differ, since ElevenLabs trims it).
 `eleven_multilingual_ttv_v2` is also supported;
 `guidance_scale` accepts 0–100 and `loudness` accepts -1–1.
 
