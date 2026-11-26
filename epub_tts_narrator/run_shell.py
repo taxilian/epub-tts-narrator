@@ -748,7 +748,7 @@ class RunApp(VimKeysMixin, CapturePrintMixin, App):
             # A summary row is not one chapter: say what the group holds, never a member's failure.
             numbers = chapter["completed"]
             lines = [f"{len(numbers)} completed chapter{'s' if len(numbers) != 1 else ''} of "
-                     f"{chapter['book']}: {_number_span(numbers)}."]
+                     f"{chapter['book']}: {_members_text(chapter)}."]
             if chapter["completed_reused"]:
                 lines.append(f"{chapter['completed_reused']} restored from an earlier run, not re-rendered.")
             lines += ["", "Close this detail, then press E or Enter on the summary to expand completed chapters."]
@@ -1626,7 +1626,7 @@ def _chapter_cells(chapter):
     numbers = chapter.get("completed")
     if numbers is not None:
         state = Text(f"{len(numbers)} completed chapters", style="green")
-        return (str(chapter["book"] or ""), _number_span(numbers, compact=True), "", state, "",
+        return (str(chapter["book"] or ""), _members_text(chapter, compact=True), "", state, "",
                 Text(str(chapter["rejected"]), style="yellow") if chapter["rejected"] else "",
                 "", "", Text("Enter expands", style="dim"))
     snapshot, blocks, done = chapter["snapshot"], chapter["blocks"], chapter["done"]
@@ -1642,7 +1642,9 @@ def _chapter_cells(chapter):
         now = chapter["text"] or ""
     state = Text(_state_label(chapter, short=True), style=CHAPTER_STYLES.get(chapter["state"], ""))
     rejected = chapter["rejected"]
-    return (str(chapter["book"] or ""), "" if chapter["chapter"] is None else str(chapter["chapter"]),
+    # The spoken opening leads its book without a number: its own (after the ending's) is no place in the book.
+    shown = "" if chapter["chapter"] is None or chapter.get("first") else str(chapter["chapter"])
+    return (str(chapter["book"] or ""), shown,
             chapter["title"][:48], state, progress,
             Text(str(rejected), style="yellow") if rejected else "",
             format_seconds(snapshot.get("elapsed", 0)) if snapshot else "",
@@ -1663,6 +1665,14 @@ def _collapsed_cursor_target(previous, chapters):
         return None
     return next((key for key, chapter in chapters if chapter["book"] == book
                  and (chapter["chapter"] == number or number in chapter.get("completed", ()))), None)
+
+
+def _members_text(chapter, *, compact=False):
+    """A completed summary's members: the spoken opening by its title (it has no place number), the rest by number."""
+    numbered = chapter.get("completed_numbered", chapter["completed"])
+    titled = chapter.get("completed_titled", [])
+    parts = ([] if compact else titled) + ([_number_span(numbered, compact=compact)] if numbered else [])
+    return ", ".join(parts) or ", ".join(titled)
 
 
 def _number_span(numbers, *, compact=False):

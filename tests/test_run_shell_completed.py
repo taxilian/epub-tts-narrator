@@ -44,6 +44,24 @@ class CompletedCollapseModelTests(unittest.TestCase):
     def keys(self):
         return [key for key, _ in self.model.visible_chapters()]
 
+    def test_the_spoken_opening_is_listed_first_without_its_number(self):
+        from epub_tts_narrator.run_shell import _chapter_cells, _members_text
+        self.board.book_state("/q/alpha", "rendering")
+        # The render's plan order: the opening (numbered after the ending) first, the ending last.
+        self.board.chapter_plan("/q/alpha", [
+            {"number": 5, "title": "Opening Credits", "blocks": 1, "saved": False, "first": True},
+            *({"number": n, "title": f"C{n}", "blocks": 2, "saved": False} for n in (1, 2, 3)),
+            {"number": 4, "title": "End Credits", "blocks": 1, "saved": False}])
+        self.assertEqual(self.keys(), [f"alpha\x1f{n}" for n in (5, 1, 2, 3, 4)])
+        rows = dict(self.model.visible_chapters())
+        self.assertEqual(_chapter_cells(rows["alpha\x1f5"])[1:3], ("", "Opening Credits"))
+        self.assertEqual(_chapter_cells(rows["alpha\x1f4"])[1], "4")
+        self.assertEqual(self.model.chapter_name("alpha", 5), "Opening Credits")
+        done(self.board, "alpha", 5, 1, 2)
+        [(key, summary)] = [item for item in self.model.visible_chapters() if item[1].get("completed")]
+        self.assertEqual(_members_text(summary), "Opening Credits, 1-2")
+        self.assertEqual(_chapter_cells(summary)[1], "1-2")
+
     def test_zero_or_one_done_chapter_stays_an_individual_row(self):
         planned(self.board)
         done(self.board, "alpha", 1)

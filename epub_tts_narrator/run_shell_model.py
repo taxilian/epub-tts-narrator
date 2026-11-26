@@ -410,8 +410,8 @@ class RunModel:
                 continue
             plan[number] = {"number": number, "title": str(item.get("title") or ""), "blocks": blocks,
                             "state": "saved" if item.get("saved") else "queued", "done": 0, "reused": False,
-                            "error": None, "error_type": None}
-        self.chapter_plans[book] = dict(sorted(plan.items()))
+                            "error": None, "error_type": None, "first": item.get("first") is True}
+        self.chapter_plans[book] = _in_play_order(plan)
         self._hidden[book] = hidden
         if outline:
             self._outlines.add(book)
@@ -429,8 +429,8 @@ class RunModel:
             return None
         if number not in plan and create:
             plan[number] = {"number": number, "title": "", "blocks": None, "state": "queued", "done": 0,
-                            "reused": False, "error": None, "error_type": None}
-            self.chapter_plans[book] = dict(sorted(plan.items()))
+                            "reused": False, "error": None, "error_type": None, "first": False}
+            self.chapter_plans[book] = _in_play_order(plan)
         return plan.get(number)
 
     def _stop_chapters(self, book=None):
@@ -613,7 +613,11 @@ class RunModel:
     def chapter_name(self, book, number):
         """How a notice names a chapter: its number, the same one every view shows, and its title when known."""
         with self._lock:
-            title = ((self.chapter_plans.get(book) or {}).get(number) or {}).get("title") or ""
+            entry = (self.chapter_plans.get(book) or {}).get(number) or {}
+        title = entry.get("title") or ""
+        if entry.get("first") and title:
+            # The spoken opening plays first; its number (after the ending's) is no place in the book.
+            return title
         name = f"chapter {number}" if number is not None else "this chapter"
         return f"{name} ({title})" if title and title.casefold() != name.casefold() else name
 
@@ -859,7 +863,7 @@ class RunModel:
                     "done": snapshot["done"] if snapshot else entry["done"],
                     "rejected": rejected.get((book, number), 0), "error": entry["error"],
                     "error_type": entry["error_type"], "snapshot": snapshot, "text": row["text"] if row else "",
-                    "row_key": key}))
+                    "row_key": key, "first": entry.get("first", False)}))
             for key, row in sorted((item for item in unplanned if item[1]["scope"].get("book") == book),
                                    key=lambda item: item[1]["scope"].get("chapter") or 0):
                 snapshot = row["snapshot"]
@@ -1278,6 +1282,12 @@ class RunModel:
         return lines
 
 
+def _in_play_order(plan):
+    """A book's chapters by number, except one the render marks ``first`` (the spoken opening, numbered after
+    the ending although it plays first), which leads."""
+    return dict(sorted(plan.items(), key=lambda pair: (not pair[1].get("first"), pair[0])))
+
+
 def _completed_summary(run):
     """One summary row for all finished chapters of a book, with member numbers.
 
@@ -1294,7 +1304,10 @@ def _completed_summary(run):
         "book": book, "chapter": None, "title": "", "state": "done", "reused": bool(reused),
         "blocks": None, "done": 0, "rejected": sum(chapter["rejected"] for chapter in members),
         "error": None, "error_type": None, "snapshot": None, "text": "", "row_key": None,
-        "completed": numbers, "completed_reused": reused}
+        "completed": numbers, "completed_reused": reused,
+        # How the row names its members: the spoken opening by its title, the rest by number.
+        "completed_numbered": [chapter["chapter"] for chapter in members if not chapter.get("first")],
+        "completed_titled": [chapter["title"] for chapter in members if chapter.get("first")]}
 
 
 def _chapter_share(entry):

@@ -3399,9 +3399,11 @@ def _render(bundle, config, engine, verifier, *, notify, chapters_only, voice_st
     # those with a checkpoint from an earlier run (checked when reached).
     from .progress import report_chapter_plan, report_chapter_state
     book_key = Path(bundle["directory"]).name
+    from .spoken_ending import is_opening
     report_chapter_plan(notify, book_key, lambda: [
         {"number": chapter["number"], "title": chapter["title"], "blocks": len(chapter["chunks"]),
-         "saved": _checkpoint_path(work, chapter).is_file()} for chapter in plan["chapters"]])
+         "saved": _checkpoint_path(work, chapter).is_file(), "first": is_opening(chapter)}
+        for chapter in plan["chapters"]])
     # Display counts cover chapters with speech work only: a zero-chunk chapter
     # renders nothing and stays hidden from plain output, like the M4B it never
     # joins. Source numbers are untouched; the ordinal is the visible position.
