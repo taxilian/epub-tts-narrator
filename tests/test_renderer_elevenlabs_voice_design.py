@@ -4,8 +4,10 @@ import base64
 from copy import deepcopy
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -198,6 +200,113 @@ class ElevenLabsDesignTests(unittest.TestCase):
         report = json.loads((self.root / "takes" / "attempt-001.json").read_text())["report"]
         self.assertFalse(report["retryable"])
         self.assertFalse((self.root / "takes" / "accepted.json").exists())
+
+
+class ElevenLabsClipVoiceTests(unittest.TestCase):
+    """Extra reference clips: the chosen preview saved as a temporary voice, used, then deleted."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.creation = self.root / "creation-a"
+        self.designer = ElevenLabsVoiceDesigner(KEY)
+        self.sent = []
+        self.permission = 404
+
+    def fake_send(self, method, url, payload=None, *, action, audio=False):
+        self.sent.append((method, url, deepcopy(payload)))
+        if method == "DELETE" and url.endswith("/audiobook-permission-check"):
+            raise ElevenLabsVoiceError(f"HTTP {self.permission}: missing the permission voices_write"
+                                       if self.permission == 401 else "HTTP 404: voice_not_found",
+                                       status=self.permission)
+        if method == "POST" and url.endswith("/v1/text-to-voice"):
+            return {"voice_id": "hostedVoice1", "name": payload["voice_name"]}
+        if method == "POST" and "/v1/text-to-speech/" in url:
+            self.assertTrue(audio)
+            return bytes([3, 0]) * 4800
+        if method == "DELETE":
+            return {}
+        raise AssertionError((method, url))
+
+    def speak(self, text, index, seed=11):
+        with patch.object(self.designer, "_send", self.fake_send):
+            return self.designer.speak_clip(PROMPT, text, self.creation / f"clip-{index}-take.wav", seed=seed,
+                                            first={"generated_voice_id": "preview_0"})
+
+    def test_clips_share_one_temporary_voice_that_is_deleted_once(self):
+        first = self.speak("Second clip words.", 2)
+        self.speak("Third clip words.", 3, seed=2 ** 32 - 1)
+        creates = [call for call in self.sent if call[1].endswith("/v1/text-to-voice")]
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(creates[0][2]["generated_voice_id"], "preview_0")
+        self.assertEqual(creates[0][2]["voice_description"], PROMPT)
+        speech = [call for call in self.sent if "/text-to-speech/" in call[1]]
+        self.assertEqual([call[1] for call in speech],
+                         ["https://api.elevenlabs.io/v1/text-to-speech/hostedVoice1?output_format=pcm_24000"] * 2)
+        self.assertEqual([(call[2]["text"], call[2]["model_id"], call[2]["seed"]) for call in speech],
+                         [("Second clip words.", "eleven_v3", 11), ("Third clip words.", "eleven_v3", 2 ** 32 - 1)])
+        self.assertEqual((first["description_applied"], first["reference_text"], first["generated_voice_id"]),
+                         (True, "Second clip words.", "preview_0"))
+        with wave.open(str(self.creation / "clip-2-take.wav"), "rb") as audio:
+            self.assertEqual((audio.getframerate(), audio.getnchannels(), audio.getnframes()), (24000, 1, 4800))
+        with patch.object(self.designer, "_send", self.fake_send):
+            self.assertEqual(self.designer.release_clip_voice(self.creation), "hostedVoice1")
+            self.assertIsNone(self.designer.release_clip_voice(self.creation))
+        deletes = [call[1] for call in self.sent if call[0] == "DELETE" and "permission-check" not in call[1]]
+        self.assertEqual(deletes, ["https://api.elevenlabs.io/v1/voices/hostedVoice1"])
+        for file in self.creation.glob("*.json"):
+            self.assertNotIn(KEY, file.read_text())
+        with self.assertRaisesRegex(ElevenLabsVoiceError, "already deleted"):
+            self.speak("Fourth clip words.", 4)
+
+    def test_a_key_without_voice_permissions_is_refused_before_any_voice_is_saved(self):
+        self.permission = 401
+        with self.assertRaisesRegex(ElevenLabsVoiceError, "voices_read and voices_write") as raised:
+            self.speak("Second clip words.", 2)
+        self.assertNotIn(KEY, str(raised.exception))
+        self.assertEqual([call[0] for call in self.sent], ["DELETE"])
+        self.assertFalse(list(self.creation.glob("elevenlabs-voice*.json")))
+
+    def test_a_save_whose_answer_was_lost_is_found_by_its_name_on_the_rerun(self):
+        lost = ElevenLabsVoiceError("timed out", retryable=True)
+        with patch.object(self.designer, "_send", side_effect=[{}, lost]), self.assertRaises(ElevenLabsVoiceError):
+            self.designer.speak_clip(PROMPT, "Second clip words.", self.creation / "take.wav", seed=1,
+                                     first={"generated_voice_id": "preview_0"})
+        self.assertTrue((self.creation / "elevenlabs-voice-pending.json").exists())
+        name = ElevenLabsVoiceDesigner._voice_name(self.creation)
+        answers = [ElevenLabsVoiceError("HTTP 400: Voice has already been created", status=400),
+                   {"voices": [{"voice_id": "foundVoice", "name": name}, {"voice_id": "other", "name": name + "x"}]},
+                   bytes([3, 0]) * 4800]
+        with patch.object(self.designer, "_send", side_effect=answers):
+            self.designer.speak_clip(PROMPT, "Second clip words.", self.creation / "take.wav", seed=1,
+                                     first={"generated_voice_id": "preview_0"})
+        state = json.loads((self.creation / "elevenlabs-voice.json").read_text())
+        self.assertEqual(state["voice_id"], "foundVoice")
+        self.assertFalse((self.creation / "elevenlabs-voice-pending.json").exists())
+
+    def test_a_crashed_creations_temporary_voice_is_deleted_by_a_later_creation(self):
+        self.speak("Second clip words.", 2)
+        state = self.creation / "elevenlabs-voice.json"
+        os.utime(state, (time.time() - 7200, time.time() - 7200))
+        self.creation = self.root / "creation-b"
+        self.sent.clear()
+        self.speak("Another voice's clip.", 2)
+        self.assertIn(("DELETE", "https://api.elevenlabs.io/v1/voices/hostedVoice1", None), self.sent)
+        self.assertTrue((self.root / "creation-a" / "elevenlabs-voice-cleanup.json").exists())
+
+    def test_a_recent_unfinished_creation_keeps_its_voice(self):
+        self.speak("Second clip words.", 2)
+        self.creation = self.root / "creation-b"
+        self.sent.clear()
+        self.speak("Another voice's clip.", 2)
+        self.assertNotIn(("DELETE", "https://api.elevenlabs.io/v1/voices/hostedVoice1", None), self.sent)
+
+    def test_scripts_with_control_tags_are_refused_before_any_request(self):
+        for text in ("He laughs [laughing] at it.", "Say <break time='1s'/> now.", ""):
+            with self.subTest(text=text), self.assertRaises(ElevenLabsVoiceError):
+                self.speak(text, 2)
+        self.assertEqual(self.sent, [])
 
 
 if __name__ == "__main__":

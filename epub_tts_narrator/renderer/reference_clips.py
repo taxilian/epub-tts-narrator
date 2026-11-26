@@ -19,9 +19,11 @@ long recording mostly measures the recognizer: invented closing words, other
 spellings of names). Its report records ``basis: joined_verified_clips`` and
 each clip's audio checksum and take request.
 
-Only the Gemini designer keeps one voice across several scripts (one hosted
-voice per creation request); other designers would design a new voice for each
-clip, so their voices keep one clip. A character without enough clean book
+The Gemini and ElevenLabs designers keep one voice across several scripts:
+Gemini one hosted voice per creation request, ElevenLabs the chosen preview
+saved as a temporary voice that speaks the other clips and is deleted once
+they are made (``release_clip_voice``). The local designer would design a new
+voice for each clip, so its voices keep one clip. A character without enough clean book
 speech and no prepared invented scripts keeps fewer clips. An extra clip that fails verification is left out,
 and a joined recording that fails an acoustic gate leaves the first clip alone
 as the reference. Once the hosted voice is deleted (an interrupted creation),
@@ -49,9 +51,12 @@ class FreshVoiceRequired(RenderBlocked):
     """The hosted voice that spoke the first clips is gone; another clip cannot match them."""
 
 
+SEVERAL_CLIP_DESIGNERS = {"gemini_voice_design", "elevenlabs_voice_design"}
+
+
 def keeps_one_voice(designer_identity):
     """Whether this designer keeps one voice across several scripts in one creation."""
-    return isinstance(designer_identity, dict) and designer_identity.get("engine") == "gemini_voice_design"
+    return isinstance(designer_identity, dict) and designer_identity.get("engine") in SEVERAL_CLIP_DESIGNERS
 
 
 def plan_scripts(config, designer_identity, bundle, voice_id, canonical_id, first_source):
@@ -84,14 +89,16 @@ def plan_scripts(config, designer_identity, bundle, voice_id, canonical_id, firs
 
 def _hosted_voice_removed(directory):
     return any((Path(directory) / name).exists() or (Path(directory) / name).is_symlink()
-               for name in ("gemini-voice-cleanup.json", "gemini-voice-cleanup-request.json"))
+               for name in ("gemini-voice-cleanup.json", "gemini-voice-cleanup-request.json",
+                            "elevenlabs-voice-cleanup.json"))
 
 
-def _generator(designer, prompt, text, directory, label):
+def _generator(designer, prompt, text, directory, label, first=None):
     """Speak ``text`` in the creation folder (where the hosted voice lives), then hand the take over.
 
-    The Gemini designer keys its hosted voice by the folder a take is written
-    to, so every clip is first written beside the first clip's takes.
+    The hosted voice is keyed by the folder a take is written to, so every clip
+    is first written beside the first clip's takes. A designer with
+    ``speak_clip`` (ElevenLabs) is told which first clip it continues.
     """
     from .voice_bindings import design_voice
 
@@ -99,10 +106,27 @@ def _generator(designer, prompt, text, directory, label):
         staged = Path(directory) / descriptive_audio_filename("reference-clip-take", label, f"seed-{seed}",
                                                               suffix=".wav")
         staged.unlink(missing_ok=True)  # This creation's own leftover from an interrupted attempt.
-        metadata = design_voice(designer, prompt, text, staged, seed=seed)
+        speak = getattr(designer, "speak_clip", None)
+        if callable(speak):
+            metadata = speak(prompt, text, staged, seed=seed, first=first)
+        else:
+            metadata = design_voice(designer, prompt, text, staged, seed=seed)
         os.replace(staged, path)
         return metadata
     return generate
+
+
+def _release(release, directory, notify):
+    """Delete a designer's temporary clip voice; a failure is reported, never fatal."""
+    if not callable(release):
+        return
+    try:
+        released = release(directory)
+    except Exception as exc:
+        notify(f"  Warning: the temporary voice used for reference clips was not deleted: {exc}")
+        return
+    if released:
+        notify("  Deleted the temporary voice used for reference clips; the recording stays local.")
 
 
 def join_wavs(paths, output, *, pause_seconds=PAUSE_SECONDS):
@@ -144,24 +168,52 @@ def add_clips(first_wav, first_accepted, scripts, *, designer, prompt, directory
               "text": first_accepted["report"].get("reference_text", request["text"]),
               "source": request.get("sample_source")}]
     removed = _hosted_voice_removed(directory)
-    for index, script in enumerate(scripts, 2):
-        clip_directory = directory / f"clip-{index}"
-        if removed and not (clip_directory / "accepted.json").is_file():
-            raise FreshVoiceRequired("The temporary Gemini voice that spoke this voice's first reference clip "
-                                     "was removed before its other clips were made")
-        clip_request = dict(request, clip=index, text=script["text"], sample_source=script["source"])
-        notify(f"  Reference clip {index} of {len(scripts) + 1} for {request['voice_id']}")
+    missing = [index for index in range(2, len(scripts) + 2)
+               if not (directory / f"clip-{index}" / "accepted.json").is_file()]
+    speaks_clips = callable(getattr(designer, "speak_clip", None))
+    check = getattr(designer, "check_clip_voice", None)
+    if missing and not removed and callable(check):
         try:
-            wav, accepted = verified_take(
-                script["text"], _generator(designer, prompt, script["text"], directory, f"{label}-clip-{index}"),
-                clip_directory, clip_request, verifier, config, notify=notify, purpose="reference")
-        except SpeechVerificationFailed:
-            notify(f"  Reference clip {index} failed verification; the voice is saved without it.")
-            continue
-        if accepted.get("engine_metadata", {}).get("description_applied") is not True:
-            raise RenderBlocked("Saved reference clip has no evidence that the voice description was applied")
-        clips.append({"index": index, "wav": Path(wav), "accepted": accepted,
-                      "text": accepted["report"].get("reference_text", script["text"]), "source": script["source"]})
+            check()
+        except RenderBlocked:
+            raise
+        except Exception as exc:
+            notify(f"  Only one reference clip for {request['voice_id']}: {exc}")
+            scripts = []
+    release = getattr(designer, "release_clip_voice", None)
+    try:
+        for index, script in enumerate(scripts, 2):
+            clip_directory = directory / f"clip-{index}"
+            if removed and not (clip_directory / "accepted.json").is_file():
+                raise FreshVoiceRequired("The temporary hosted voice that spoke this voice's first reference clip "
+                                         "was removed before its other clips were made")
+            clip_request = dict(request, clip=index, text=script["text"], sample_source=script["source"])
+            notify(f"  Reference clip {index} of {len(scripts) + 1} for {request['voice_id']}")
+            try:
+                wav, accepted = verified_take(
+                    script["text"], _generator(designer, prompt, script["text"], directory,
+                                               f"{label}-clip-{index}", first_accepted.get("engine_metadata")),
+                    clip_directory, clip_request, verifier, config, notify=notify, purpose="reference")
+            except SpeechVerificationFailed:
+                notify(f"  Reference clip {index} failed verification; the voice is saved without it.")
+                continue
+            except RenderBlocked as exc:
+                # A provider refusal (permissions, quota) would refuse every further clip
+                # too; the first clip stays a complete voice.
+                if isinstance(exc, FreshVoiceRequired) or not speaks_clips:
+                    raise
+                notify(f"  Reference clip {index} could not be made, so the voice keeps the clips "
+                       f"it has: {exc}")
+                break
+            if accepted.get("engine_metadata", {}).get("description_applied") is not True:
+                raise RenderBlocked("Saved reference clip has no evidence that the voice description was applied")
+            clips.append({"index": index, "wav": Path(wav), "accepted": accepted,
+                          "text": accepted["report"].get("reference_text", script["text"]), "source": script["source"]})
+    except Exception:
+        _release(release, directory, notify)
+        raise
+    # Not on an interruption: rerunning reuses the temporary voice for the missing clips.
+    _release(release, directory, notify)
     if len(clips) == 1:
         return first_wav, first_accepted, []
     joined_directory = directory / "joined"

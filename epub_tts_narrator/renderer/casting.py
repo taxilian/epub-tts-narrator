@@ -1551,7 +1551,7 @@ class CastingSession:
                         directory=directory, request=request, verifier=verifier, config=self.config,
                         label=profile.get("name") or voice_id, notify=self.notify)
                 except reference_clips.FreshVoiceRequired:
-                    self.notify("This voice's temporary Gemini voice was removed before all of its reference "
+                    self.notify("This voice's temporary hosted voice was removed before all of its reference "
                                 "clips were made; creating a fresh voice.")
                     return self._generate_locked(voice_id, fresh=True)
             reference_text = accepted["report"].get("reference_text", text)

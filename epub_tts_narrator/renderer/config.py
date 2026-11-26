@@ -671,9 +671,9 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
 
 
 def designer_records_several_clips(config):
-    """Whether new voices can record several clips: only Gemini keeps one voice across scripts."""
+    """Whether new voices can record several clips: Gemini and ElevenLabs keep one voice across scripts."""
     try:
-        return resolve_voice_design(config)["type"] == "gemini"
+        return resolve_voice_design(config)["type"] in {"gemini", "elevenlabs"}
     except ValueError:
         return False
 

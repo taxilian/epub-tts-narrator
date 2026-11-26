@@ -12,7 +12,7 @@ from epub_tts_narrator.renderer.common import file_hash
 from epub_tts_narrator.renderer.config import DEFAULTS
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.voices import VoiceStore
-from epub_tts_narrator.renderer.workflow import SpeechVerificationFailed
+from epub_tts_narrator.renderer.workflow import RenderBlocked, SpeechVerificationFailed
 from shared_fixtures import pcm_hash
 from test_renderer_automatic_gemini_cleanup import FixtureGemini
 from test_renderer_samples import bundle as sample_bundle, row
@@ -69,12 +69,14 @@ class PlanTests(unittest.TestCase):
                                                 "casting": {"reference_clips": 1}}), 0)
         self.assertEqual(extra_reference_clips({}), 0)
         self.assertEqual(extra_reference_clips({"voice_design": {"type": "elevenlabs"},
-                                                "elevenlabs": {"api_key": "fixture-key"}}), 0)
+                                                "elevenlabs": {"api_key": "fixture-key"}}), 2)
+        self.assertEqual(extra_reference_clips({"voice_design": {"type": "engine"},
+                                                "gemini": {"api_key": "fixture-key"}}), 0)
 
     def test_no_extra_scripts_for_one_clip_another_designer_or_too_little_speech(self):
         data = speech_bundle()
         cases = (({"casting": {"reference_clips": 1}}, GEMINI, data),
-                 ({"casting": {"reference_clips": 3}}, {"engine": "elevenlabs_voice_design"}, data),
+                 ({"casting": {"reference_clips": 3}}, {"engine": "qwen3_mlx_voice_design"}, data),
                  ({"casting": {"reference_clips": 3}}, GEMINI, speech_bundle(lines=1)),
                  ({"casting": {"reference_clips": 3}}, GEMINI, {"manifest": {}}))
         for config, designer, bundle in cases:
@@ -162,10 +164,89 @@ class AddClipsTests(unittest.TestCase):
         self.assertEqual((wav, accepted, clips), (self.first, self.first_accepted, []))
 
     def test_missing_clips_after_the_hosted_voice_was_removed_need_a_fresh_voice(self):
-        (self.directory / "gemini-voice-cleanup.json").write_text("{}")
-        with self.assertRaises(reference_clips.FreshVoiceRequired):
+        for name in ("gemini-voice-cleanup.json", "elevenlabs-voice-cleanup.json"):
+            with self.subTest(name=name):
+                (self.directory / name).write_text("{}")
+                with self.assertRaises(reference_clips.FreshVoiceRequired):
+                    self.add()
+                self.assertEqual(self.calls, [])
+                (self.directory / name).unlink()
+
+
+class ClipVoiceDesignerTests(AddClipsTests):
+    """A designer that saves its first clip's voice to speak the others (ElevenLabs)."""
+
+    class Designer:
+        def __init__(self, *, refuse=None, fail_speaking=None):
+            self.refuse, self.fail_speaking = refuse, fail_speaking
+            self.spoken, self.released, self.checked = [], [], 0
+
+        def check_clip_voice(self):
+            self.checked += 1
+            if self.refuse:
+                raise RuntimeError(self.refuse)
+
+        def speak_clip(self, prompt, text, path, *, seed, first):
+            if text == self.fail_speaking:
+                raise RenderBlocked("HTTP 401: missing the permission text_to_speech")
+            self.spoken.append((text, first.get("generated_voice_id")))
+            write_tone(path, 1, rate=44100)
+            return {"description_applied": True}
+
+        def release_clip_voice(self, directory):
+            self.released.append(Path(directory))
+            return "hosted-1"
+
+    def setUp(self):
+        super().setUp()
+        self.first_accepted["engine_metadata"]["generated_voice_id"] = "preview-0"
+        self.designer = self.Designer()
+        self.notes = []
+
+    def fake_take(self, text, generate, directory, request, verifier, config, *, notify, purpose):
+        if text in self.failing:
+            raise SpeechVerificationFailed("failed", request=request, report={})
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        wav = Path(directory) / "accepted-take.wav"
+        metadata = generate(wav, 7)
+        return wav, {"report": {"passed": True, "reference_text": text}, "request_hash": "h-" + text,
+                     "engine_metadata": metadata}
+
+    def add(self):
+        with patch.object(reference_clips, "verified_take", self.fake_take):
+            return reference_clips.add_clips(
+                self.first, self.first_accepted, self.scripts, designer=self.designer, prompt="p",
+                directory=self.directory, request=self.request, verifier=None,
+                config={"render": {"max_attempts": 4}}, label="Mara", notify=self.notes.append)
+
+    def test_every_clip_is_joined_from_verified_clips_without_transcribing_the_long_recording(self):
+        _wav, accepted, clips = self.add()
+        self.assertEqual([clip["index"] for clip in clips], [1, 2, 3])
+        # Each extra clip continues the first clip's preview, then the temporary voice is deleted once.
+        self.assertEqual(self.designer.spoken, [("second words", "preview-0"), ("third words", "preview-0")])
+        self.assertEqual(self.designer.released, [self.directory])
+        self.assertEqual(self.designer.checked, 1)
+
+    def test_a_key_that_cannot_delete_voices_keeps_one_clip_and_says_why(self):
+        self.designer = self.Designer(refuse="needs the voices_write permission")
+        wav, accepted, clips = self.add()
+        self.assertEqual((wav, accepted, clips), (self.first, self.first_accepted, []))
+        self.assertEqual(self.designer.spoken, [])
+        self.assertTrue(any("voices_write" in note for note in self.notes))
+
+    def test_a_provider_refusal_keeps_the_clips_made_so_far(self):
+        self.designer = self.Designer(fail_speaking="third words")
+        _wav, accepted, clips = self.add()
+        self.assertEqual([clip["index"] for clip in clips], [1, 2])
+        self.assertEqual(self.designer.released, [self.directory])
+        self.assertTrue(any("text_to_speech" in note for note in self.notes))
+
+    def test_an_interruption_keeps_the_temporary_voice_for_the_rerun(self):
+        def interrupted(*args, **kwargs):
+            raise KeyboardInterrupt
+        with patch.object(self.designer, "speak_clip", interrupted), self.assertRaises(KeyboardInterrupt):
             self.add()
-        self.assertEqual(self.calls, [])
+        self.assertEqual(self.designer.released, [])
 
 
 class RecheckTests(unittest.TestCase):

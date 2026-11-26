@@ -1124,7 +1124,7 @@ Requests without notes are byte-for-byte the same as before, so their cached ans
 
 ### Reference clips
 
-Drama 3 clones a voice more closely from more reference speech: its technical report measures speaker similarity 0.605 from one clip and 0.633 from three, and Fish recommends two or three clips of 15–20 seconds. With the Gemini designer, a new voice (from `cast`, `G`/`GG`/`G11`, bulk casting, or automatic creation during `render`) is therefore recorded as up to three clips of the same hosted voice:
+Drama 3 clones a voice more closely from more reference speech: its technical report measures speaker similarity 0.605 from one clip and 0.633 from three, and Fish recommends two or three clips of 15–20 seconds. With the Gemini or ElevenLabs designer, a new voice (from `cast`, `G`/`GG`/`G11`, bulk casting, or automatic creation during `render`) is therefore recorded as up to three clips of the same hosted voice:
 
 ```toml
 [casting]
@@ -1142,7 +1142,7 @@ Fewer clips are kept in these cases:
 - **A clip fails verification:** that clip is left out.
 - **The joined recording fails an audio check:** the voice keeps its first clip alone.
 
-Only Gemini keeps one voice across several scripts within one creation. ElevenLabs and local designers would design a different voice for each clip, so their voices keep one clip. A creation interrupted after its hosted voice was deleted cannot add matching clips, so the next run starts that voice again with a fresh hosted voice and records every clip from it. Derived voices (age or condition changes) are cloned from their main voice's saved reference, so they hear all of its clips.
+Gemini and ElevenLabs keep one voice across several scripts within one creation. Gemini creates a hosted voice for the creation. ElevenLabs uses its chosen preview as the first clip, then saves that preview as a temporary voice in your ElevenLabs account, speaks the other clips with it (`eleven_v3` for `eleven_ttv_v3`, `eleven_multilingual_v2` for `eleven_multilingual_ttv_v2`), and deletes it once the clips are made. This needs the API key's `voices_read` and `voices_write` permissions (plus Text to Speech and Voice Generation); a key without them keeps one clip and says why before anything is saved to the account. A crash can leave the temporary voice behind (named `Audiobook voice …`): the next ElevenLabs creation in the same book deletes leftovers more than an hour old. The local designer would design a different voice for each clip, so its voices keep one clip. A creation interrupted after its hosted voice was deleted cannot add matching clips, so the next run starts that voice again with a fresh hosted voice and records every clip from it. Derived voices (age or condition changes) are cloned from their main voice's saved reference, so they hear all of its clips.
 
 With `[voice_design] type = "engine"`, the character description conditions Drama 3's scene system prompt and the sample script supplies its single named line. Several sentences may occupy that line. No reference recording is required to create the initial voice; later synthesis clones the saved recording. State vocal presentation, age range, accent, pitch, and a few stable traits clearly. Keep the reference at an ordinary speaking pace with one clean, dry voice, and avoid conflicting performances in one description. Word verification cannot judge whether every vocal trait sounds right; use the audition menu for that.
 
@@ -1212,9 +1212,10 @@ can replace a selected recording.
 
 ElevenLabs receives the voice description and sample script to design preview
 audio. The preview passes the same transcription and audio verification as
-other designers, then is saved locally for Drama 3 to clone. This does not add
-a permanent voice to the ElevenLabs account or require ElevenLabs during book
-rendering. Shared roles and later books reuse the saved reference as usual.
+other designers, then is saved locally for Drama 3 to clone. No permanent voice
+is added to the ElevenLabs account: extra reference clips use a temporary voice
+that is deleted afterwards (see [Reference clips](#reference-clips)), and book
+rendering never calls ElevenLabs. Shared roles and later books reuse the saved reference as usual.
 Returned alternatives are cached for verification retries. If casting is
 interrupted while preparing a missing ElevenLabs voice, reopening casting
 resumes the newest unfinished request with matching text, prompt, book, and
