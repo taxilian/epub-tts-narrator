@@ -35,6 +35,11 @@ max_new_tokens = 2048
 # temperature = 0.95
 # top_p = 0.7
 
+# Narration's main tokens are drawn with an open rule that rarely stalls in
+# silence; it never regenerates existing takes (see RENDERER.md).
+# [narration_sampling]
+# open_main_token = true
+
 # Optional distributed speech generation. With no workers, use [engine] normally.
 # All configured workers receive the same saved voice recordings and transcripts.
 # Keep these worker tables commented until the corresponding servers are running.

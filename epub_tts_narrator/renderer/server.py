@@ -128,7 +128,7 @@ def _parse_request(data, content_type, references_cache=None):
     if not isinstance(body, dict):
         raise RequestError("Request body must be an object")
     allowed = {"text", "references", "history", "format", "normalize", "temperature", "top_p", "max_new_tokens",
-               "layout"}
+               "layout", "main_token"}
     unsupported = set(body) - allowed
     if unsupported:
         raise RequestError("Unsupported Fish request option(s): " + ", ".join(sorted(map(str, unsupported))))
@@ -360,7 +360,7 @@ class _RenderServer(ThreadingHTTPServer):
         has gone (a restarted controller, a timeout), the request's cancel
         signal frees its batch row instead of finishing audio nobody receives.
         """
-        from .request_sampling import request_cancellation, request_sampling
+        from .request_sampling import current_sampling, request_cancellation, request_sampling
         if request_id:
             self.activity(request_id, f"inference started (queued {time.monotonic() - queued_at:.2f}s)")
         options = {"layout": layout} if layout != "directing" else {}
@@ -371,7 +371,9 @@ class _RenderServer(ThreadingHTTPServer):
                                        name="serve-client-watch", daemon=True)
             watcher.start()
         try:
-            with request_sampling(sampling), request_cancellation(cancel):
+            outer = current_sampling() or {}
+            values = {**sampling, **({"main_token": outer["main_token"]} if "main_token" in outer else {})}
+            with request_sampling(values), request_cancellation(cancel):
                 return self.engine.synthesize_fish(text, voices, output, seed=seed, history=history, **options)
         finally:
             finished.set()
@@ -397,7 +399,14 @@ class _RenderServer(ThreadingHTTPServer):
             return
 
     def synthesize(self, text, voices, output, seed, sampling, *, history=(), layout="directing",
-                   request_id=None, queued_at=None, connection=None):
+                   request_id=None, queued_at=None, connection=None, main_token=None):
+        if main_token is not None:
+            # The engine reads the rule from request_sampling (main_token.requested);
+            # the inference thread runs in a copy of this context.
+            from .request_sampling import request_sampling
+            with request_sampling({"main_token": main_token}):
+                return self.synthesize(text, voices, output, seed, sampling, history=history, layout=layout,
+                                       request_id=request_id, queued_at=queued_at, connection=connection)
         if getattr(self.engine, "concurrent_requests", 1) > 1:
             return self._infer_concurrent(text, voices, list(history), output, seed, sampling,
                                           request_id, queued_at, layout, connection=connection)
@@ -534,6 +543,8 @@ class _Handler(BaseHTTPRequestHandler):
         model = "drama-3" if self.server.model_id == DEFAULT_DRAMA3_MODEL else self.server.model_id
         health = {"status": "ready", "model": model, "protocol": PROTOCOL, "reference_reuse": True,
                   "history_layouts": sorted(getattr(self.server.engine, "history_layouts", {"directing"})),
+                  # Main-token rules (main_token.py) a request may ask this worker to draw with.
+                  "main_token_rules": sorted(getattr(self.server.engine, "main_token_rules", ())),
                   "roles": ["tts"] + (["recognition"] if self.server.recognizers is not None else []),
                   # Requests this worker decodes at once (server.batch_rows on a
                   # batching engine); a controller's worker concurrency should match.
@@ -609,6 +620,9 @@ class _Handler(BaseHTTPRequestHandler):
             layout = body.get("layout", "directing")
             if layout not in getattr(self.server.engine, "history_layouts", {"directing"}):
                 raise RequestError(f"This server's engine does not build the {layout!r} history layout")
+            main_token = body.get("main_token")
+            if main_token is not None and main_token not in getattr(self.server.engine, "main_token_rules", ()):
+                raise RequestError(f"This server's engine does not draw the {main_token!r} main-token rule")
         except (RequestError, EngineError) as exc:
             self._json(400, {"error": {"message": str(exc)}})
             return
@@ -642,7 +656,7 @@ class _Handler(BaseHTTPRequestHandler):
                                                      f"{len(voices)} reference(s), {len(history)} history turn(s){suffix}")
                 generated = self.server.synthesize(body["text"], voices, output, seed, sampling, history=history,
                                                    layout=layout, request_id=self.request_id, queued_at=queued_at,
-                                                   connection=self.connection)
+                                                   connection=self.connection, main_token=main_token)
                 audio = inspect_wav(output)
                 if output.stat().st_size > MAX_AUDIO_BYTES:
                     raise EngineError("Generated WAV exceeds the 100 MiB response limit")
@@ -656,7 +670,9 @@ class _Handler(BaseHTTPRequestHandler):
                     # "silence": the take went silent before ending and was cut
                     # after its last speech; the client verifies it.
                     "finish_reason": generated.get("finish_reason", "eos"),
-                    "sampling": sampling, "seed": seed}, use_bin_type=True)
+                    "sampling": sampling, "seed": seed,
+                    # The main-token rule the engine drew with (None: the vendored draw).
+                    "main_token": generated.get("main_token")}, use_bin_type=True)
                 size = len(payload)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/msgpack")

@@ -135,6 +135,9 @@ DEFAULTS = {
     # Character speech (dialogue, thought, letter segments) may use its own
     # Drama 3 sampling; unset values use the [engine] ones (role_sampling.py).
     "dialogue_sampling": {"temperature": None, "top_p": None},
+    # Narration draws each main token with the open rule (main_token.py);
+    # recorded per take, never part of a request's identity.
+    "narration_sampling": {"open_main_token": True},
     "huggingface": {"api_key": ""},
     "render_pool": {
         "workers": [],
@@ -492,6 +495,8 @@ def load_config(path=None, *, require_verifier=True, require_engine=True):
     result["jev"] = validate_jev_settings(result["jev"])
     from .role_sampling import validate as validate_dialogue_sampling
     validate_dialogue_sampling(result["dialogue_sampling"], result["engine"]["type"])
+    if type(result["narration_sampling"]["open_main_token"]) is not bool:
+        raise ValueError("narration_sampling.open_main_token must be true or false")
     if (not isinstance(result["verification"]["phonetic_fallback"], str)
             or result["verification"]["phonetic_fallback"] not in {"analysis", "off"}):
         raise ValueError("verification.phonetic_fallback must be analysis or off")

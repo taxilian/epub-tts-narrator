@@ -279,6 +279,8 @@ class FishHTTPEngine(HistorySynthesis):
         self._history_checked = False
         # Layouts the worker's /health advertises; older servers build only Fish's.
         self._history_layouts = frozenset({"directing"})
+        # Main-token rules it advertises; older servers draw only the vendored way.
+        self._main_token_rules = frozenset()
 
     @property
     def history_layouts(self) -> frozenset[str]:
@@ -311,6 +313,10 @@ class FishHTTPEngine(HistorySynthesis):
         layouts = health.get("history_layouts")
         if isinstance(layouts, list) and all(isinstance(layout, str) for layout in layouts):
             self._history_layouts = frozenset({"directing"} | ({"streaming"} & set(layouts)))
+        from .main_token import RULE
+        rules = health.get("main_token_rules")
+        self._main_token_rules = (frozenset({RULE} & set(rules)) if isinstance(rules, list)
+                                  and all(isinstance(rule, str) for rule in rules) else frozenset())
         self._history_checked = True
 
     def recheck_continuity(self, timeout=PROBE_SECONDS) -> None:
@@ -482,6 +488,13 @@ class FishHTTPEngine(HistorySynthesis):
         if layout != "directing":
             # Only sent to workers whose /health advertises the layout.
             body["layout"] = layout
+        from .main_token import requested
+        main_token = requested()
+        if main_token not in getattr(self, "_main_token_rules", frozenset()):
+            # An older worker draws the vendored way; the take records no rule.
+            main_token = None
+        if main_token is not None:
+            body["main_token"] = main_token
         try:
             import msgpack
         except ImportError as exc:
@@ -548,6 +561,9 @@ class FishHTTPEngine(HistorySynthesis):
                 if result.get("sampling") != expected or result.get("seed") != seed:
                     raise FishHTTPError(f"Render worker {self.name} did not apply the controlling sampling "
                                         "settings and seed; update and restart audiobook-render serve", retryable=False)
+                if main_token is not None and result.get("main_token") != main_token:
+                    raise FishHTTPError(f"Render worker {self.name} did not draw with the requested "
+                                        f"{main_token!r} main-token rule", retryable=False)
                 os.link(staged, output)
                 self._mark_registered(seeded_ids, response.headers.get("X-Audiobook-Reference-Reuse") == "sha256-v1")
                 metadata.update(backend="fish_http", worker=self.name, model=self.model, seed=seed,
@@ -557,6 +573,8 @@ class FishHTTPEngine(HistorySynthesis):
                                 history_sha256=result.get("history_sha256"), finish_reason=finish_reason)
                 if layout != "directing":
                     metadata["history_layout"] = layout
+                if main_token is not None:
+                    metadata["main_token"] = main_token
                 return metadata, result["codes"], result["codebook_size"]
         except HTTPError as exc:
             try:

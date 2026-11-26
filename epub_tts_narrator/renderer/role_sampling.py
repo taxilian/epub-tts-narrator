@@ -7,6 +7,9 @@ may use its own ``temperature`` and ``top_p``. Only values that differ from the
 them, so its cache identity differs from the same request at engine sampling,
 and its synthesis runs inside ``request_sampling`` so every engine path (the
 local MLX loop, the batched decoder, ``serve`` workers) applies them.
+
+Every other request draws its main tokens with ``main_token.RULE`` (see
+``narration_rule``), carried the same way but never in its identity.
 """
 
 from __future__ import annotations
@@ -70,15 +73,34 @@ def with_overrides(engine_identity, overrides):
     return identity
 
 
+def narration_rule(chunk, config):
+    """The main-token rule a request using ``[engine]`` sampling is drawn with, or None.
+
+    Narration, headings and mixed paragraphs (every request that is not all
+    character speech) draw their main tokens with ``main_token.RULE`` unless
+    ``[narration_sampling] open_main_token = false``. The rule is provenance
+    only: it never enters a request's identity, so earlier takes stay valid.
+    """
+    if chunk is None or is_character_speech(chunk):
+        return None
+    if not (config.get("narration_sampling") or {}).get("open_main_token", True):
+        return None
+    from .main_token import RULE
+    return RULE
+
+
 @contextmanager
 def chunk_sampling(chunk, config):
-    """Generate this chunk's takes with its sampling (a no-op for narration)."""
-    overrides = chunk_overrides(chunk, config)
-    if not overrides:
+    """Generate this chunk's takes with its sampling and main-token rule."""
+    values = dict(chunk_overrides(chunk, config))
+    rule = narration_rule(chunk, config)
+    if rule is not None:
+        values["main_token"] = rule
+    if not values:
         yield
         return
     from .request_sampling import request_sampling
-    with request_sampling(overrides):
+    with request_sampling(values):
         yield
 
 

@@ -124,7 +124,9 @@ The probe script can also test separate main-token and codebook top-k caps
 through `drama3_sampling.py`. This is an experimental proxy, not part of the
 production engine. Removing the main-token cap fixed some bad takes but caused
 other failures in the controlled test; it is not a demonstrated silence cure
-for this MLX setup. Normal casting and cloning keep the configured sampling
+for this MLX setup. The narration main-token rule (`main_token.py`) is a
+different change: temperature 1.0, keeping the token that crosses top-p, and a
+0.001 probability floor; in its controlled test it ended every take. Normal casting and cloning keep the configured sampling
 settings and always require acoustic and transcript verification.
 
 Take identity includes runtime version/revision, actual checkpoint file hashes,

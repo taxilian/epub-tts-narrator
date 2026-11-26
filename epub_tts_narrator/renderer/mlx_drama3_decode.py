@@ -11,7 +11,8 @@ prefix. (The stop token's rank is no usable shortcut for finding silence:
 measured on this loop it overlaps too much between speech and silence.) ``generate_segment`` is ``Drama3.generate(single_chunk=True,
 attempts=1)`` on this loop. ``scripts/check_drama3_silence_stop.py --mlx``
 checks both against the vendored runtime; rerun it whenever the vendored
-snapshot changes. The vendored tree itself is never edited.
+snapshot changes. The vendored tree itself is never edited. ``main_token``
+replaces only the main-token draw (``main_token.py``, narration).
 """
 
 from __future__ import annotations
@@ -19,8 +20,13 @@ from __future__ import annotations
 import time
 
 
-def generate_frames_watched(model, prompt, *, max_new_tokens, temperature, top_k, top_p, watch=None):
-    """``generate_frames`` with an optional per-frame watch: (frames, finish reason)."""
+def generate_frames_watched(model, prompt, *, max_new_tokens, temperature, top_k, top_p, watch=None,
+                            main_token=None):
+    """``generate_frames`` with an optional per-frame watch: (frames, finish reason).
+
+    ``main_token=main_token.RULE`` draws each main token with that rule
+    (``main_token.decode_step``); None keeps the vendored step.
+    """
     import numpy as np
     import mlx.core as mx
     from drama3_mlx.generate import PREFILL_CHUNK_SIZE, run_backbone
@@ -31,6 +37,15 @@ def generate_frames_watched(model, prompt, *, max_new_tokens, temperature, top_k
         raise ValueError("watch must have an observe(codes) method")
     if top_k < 1:
         raise InvalidInputError(f"top_k must be at least 1; got {top_k}")
+    if main_token is None:
+        step_frame = model.tower.decode_step
+    else:
+        from . import main_token as rules
+        if main_token != rules.RULE:
+            raise ValueError(f"Unknown main-token rule: {main_token!r}")
+
+        def step_frame(*args, **kwargs):
+            return rules.decode_step(model.tower, *args, **kwargs)
     config, tower = model.config, model.tower
     prompt_rows = len(prompt)
     if max_new_tokens < 1 or prompt_rows + max_new_tokens > config.text["max_position_embeddings"]:
@@ -58,7 +73,7 @@ def generate_frames_watched(model, prompt, *, max_new_tokens, temperature, top_k
     produced, finish_reason = [], "length"
     for step in range(max_new_tokens):
         logits = model.backbone.lm_head(hidden)
-        frame = tower.decode_step(
+        frame = step_frame(
             logits, hidden, frame, history, tower_caches,
             temperature=temperature, top_k=top_k, top_p=top_p,
         )
@@ -84,7 +99,7 @@ def generate_frames_watched(model, prompt, *, max_new_tokens, temperature, top_k
 
 
 def generate_segment(model, text, *, references=(), previous_takes=(), temperature, top_k, top_p,
-                     max_new_tokens, seed, watch=None):
+                     max_new_tokens, seed, watch=None, main_token=None):
     """One ``Drama3.generate(text, single_chunk=True, attempts=1)`` take, or None without frames.
 
     Raises the vendored ``PromptTooLongError`` before sampling, as the vendored
@@ -103,7 +118,7 @@ def generate_segment(model, text, *, references=(), previous_takes=(), temperatu
     started = time.perf_counter()
     frames, finish_reason = generate_frames_watched(
         model.model, prompt, max_new_tokens=max_new_tokens,
-        temperature=temperature, top_k=top_k, top_p=top_p, watch=watch)
+        temperature=temperature, top_k=top_k, top_p=top_p, watch=watch, main_token=main_token)
     if not len(frames):
         return None
     codes = frames[:, 1:].T.copy()

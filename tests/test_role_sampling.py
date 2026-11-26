@@ -11,8 +11,10 @@ from epub_tts_narrator.renderer.common import digest, file_hash, read_json
 from epub_tts_narrator.renderer.config import DEFAULTS, load_config
 from epub_tts_narrator.renderer.quality import validate_policy
 from epub_tts_narrator.renderer.request_sampling import current_sampling
+from epub_tts_narrator.renderer.main_token import RULE
 from epub_tts_narrator.renderer.role_sampling import (
-    chunk_overrides, dialogue_overrides, effective, is_character_speech, with_overrides)
+    chunk_overrides, chunk_sampling, dialogue_overrides, effective, is_character_speech, narration_rule,
+    with_overrides)
 from epub_tts_narrator.renderer.workflow import (
     SpeechRetryBudget, _chapter_context, _paragraph_request, _render_chunk, _speech_request)
 from test_renderer_speech_identity import paragraph_request, reference, speech_request
@@ -105,6 +107,17 @@ class RequestIdentityTests(unittest.TestCase):
         self.assertEqual(_paragraph_request(paragraph, {"one": voice}, POOL, hot)["engine"]["sampling"]["temperature"],
                          0.95)
 
+    def test_the_open_main_token_rule_never_changes_a_request_or_chapter(self):
+        voice = reference("one")
+        off = config()
+        off["narration_sampling"]["open_main_token"] = False
+        narration = chunk("narration")
+        self.assertEqual(_speech_request(narration, voice, POOL, config()), _speech_request(narration, voice, POOL, off))
+        bundle = {"bundle_hash": "b", "manifest": {"source_fingerprint": "s"}, "chapters": [{}]}
+        chapter = {"id": "c1", "number": 1, "chunks": [narration]}
+        self.assertEqual(_chapter_context(bundle, chapter, config(), {"one": voice}, POOL, {"v": 1}),
+                         _chapter_context(bundle, chapter, off, {"one": voice}, POOL, {"v": 1}))
+
     def test_chapter_context_binds_the_setting_only_when_it_changes_audio(self):
         voice = reference("one")
         bundle = {"bundle_hash": "b", "manifest": {"source_fingerprint": "s"}, "chapters": [{}]}
@@ -114,6 +127,38 @@ class RequestIdentityTests(unittest.TestCase):
         hot = _chapter_context(bundle, chapter, config(temperature=0.95), {"one": voice}, POOL, {"v": 1})
         self.assertEqual(plain["engine_config_hash"], same["engine_config_hash"])
         self.assertNotEqual(plain["engine_config_hash"], hot["engine_config_hash"])
+
+
+class NarrationRuleTests(unittest.TestCase):
+    def test_every_request_at_engine_sampling_asks_for_the_open_draw(self):
+        for kind in ("narration", "heading", "other"):
+            self.assertEqual(narration_rule(chunk(kind), config()), RULE, kind)
+        for kind in ("dialogue", "thought", "letter"):
+            self.assertIsNone(narration_rule(chunk(kind), config()), kind)
+        one, two = reference("one"), reference("two")
+        paragraph = paragraph_request([("Hi.", one, ""), ("Bye.", two, "")])["chunk"]
+        self.assertIsNone(narration_rule(paragraph, config()))
+        paragraph["paragraph_turns"][1]["segment"]["kind"] = "narration"
+        self.assertEqual(narration_rule(paragraph, config()), RULE)
+        off = config()
+        off["narration_sampling"]["open_main_token"] = False
+        self.assertIsNone(narration_rule(chunk("narration"), off))
+
+    def test_chunk_sampling_carries_the_rule_beside_dialogue_values(self):
+        with chunk_sampling(chunk("narration"), config(temperature=0.95)):
+            self.assertEqual(current_sampling(), {"main_token": RULE})
+        with chunk_sampling(chunk("dialogue"), config(temperature=0.95)):
+            self.assertEqual(current_sampling(), {"temperature": 0.95})
+        with chunk_sampling(chunk("dialogue"), config()):
+            self.assertIsNone(current_sampling())
+
+    def test_the_setting_is_on_by_default_and_must_be_a_boolean(self):
+        loader = ConfigTests()
+        self.assertEqual(loader.load("")["narration_sampling"], {"open_main_token": True})
+        self.assertFalse(loader.load("[narration_sampling]\nopen_main_token = false\n")
+                         ["narration_sampling"]["open_main_token"])
+        with self.assertRaisesRegex(ValueError, "open_main_token must be true or false"):
+            loader.load('[narration_sampling]\nopen_main_token = "yes"\n')
 
 
 class EffectiveSamplingTests(unittest.TestCase):
@@ -173,13 +218,26 @@ class TakeTests(unittest.TestCase):
         narration = speech_request(self.voice, "The road was long.")["chunk"]
         narration["segment"]["kind"] = "narration"
         record = self.render(narration, config(temperature=0.95))
-        self.assertEqual(self.engine.seen[-1], None)
+        # Narration keeps [engine] sampling and asks for the open main-token draw.
+        self.assertEqual(self.engine.seen[-1], {"main_token": RULE})
         self.assertEqual(record["request"]["engine"]["temperature"], 0.7)
 
         # Turning the setting off regenerates the dialogue take at engine sampling.
         self.render(dialogue, config())
         self.assertEqual(len(self.engine.seen), 3)
         self.assertIsNone(self.engine.seen[-1])
+
+    def test_narration_taken_before_the_open_main_token_rule_is_kept(self):
+        narration = speech_request(self.voice, "The road was long.")["chunk"]
+        narration["segment"]["kind"] = "narration"
+        before = config()
+        before["narration_sampling"]["open_main_token"] = False
+        first = self.render(deepcopy(narration), before)
+        self.assertEqual(self.engine.seen, [None])
+        # Turning the rule on keeps the request and its accepted take: nothing is generated.
+        again = self.render(deepcopy(narration), config())
+        self.assertEqual(self.engine.seen, [None])
+        self.assertEqual(again, first)
 
     def test_a_saved_chapter_with_dialogue_is_reused_when_its_takes_match_their_own_sampling(self):
         from epub_tts_narrator.renderer.workflow import _saved_chapter_engines_match

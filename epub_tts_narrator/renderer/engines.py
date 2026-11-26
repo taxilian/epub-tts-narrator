@@ -268,6 +268,9 @@ class HistorySynthesis:
     """
 
     history_layouts = frozenset({"directing"})
+    # Main-token rules (``main_token.py``) this engine can draw; a ``serve``
+    # worker advertises them so a controller knows whether to ask.
+    main_token_rules = frozenset()
 
     def synthesize(self, text, voice, output_path, *, seed, direction="", performance=None, traits=""):
         # Validate the full request before encoding a voice/loading a model.
@@ -394,6 +397,12 @@ class Drama3MLXEngine(HistorySynthesis):
     @property
     def concurrent_requests(self) -> int:
         return self.batch_rows
+
+    @property
+    def main_token_rules(self) -> frozenset[str]:
+        """The single-request loop draws the open rule; the batched decoder does not."""
+        from .main_token import RULE
+        return frozenset({RULE}) if self.batch_rows == 1 else frozenset()
 
     def _mlx(self, function, *args, **kwargs):
         """Run MLX work on the batched engine's own thread (directly when unbatched)."""
@@ -593,11 +602,12 @@ class Drama3MLXEngine(HistorySynthesis):
         rows = streaming_rows(text, self._reference(voice), kept, model.tokenizer, model.model.config)
         if self._scheduler is not None:
             return self._batched_segment(model, text, rows, seed, frame_budget(text, self.max_new_tokens or 2048))
+        from .main_token import requested
         from .role_sampling import effective
         mx.random.seed(seed)
         frames, finish_reason = generate_frames_watched(
             model.model, rows, max_new_tokens=frame_budget(text, self.max_new_tokens or 2048),
-            **effective(self), watch=silence_watch(model, text))
+            **effective(self), watch=silence_watch(model, text), main_token=requested())
         if not len(frames):
             raise EngineError("Drama 3 returned no audio frames")
         codes = frames[:, 1:].T.copy()
@@ -617,11 +627,12 @@ class Drama3MLXEngine(HistorySynthesis):
             hints = prefix_ends(model.tokenizer, model.model.config, text, texts, codes, list(previous))
             return self._batched_segment(model, text, prompt, seed, frame_budget(text, self.max_new_tokens),
                                          prefix_hints=hints)
+        from .main_token import requested
         from .role_sampling import effective
         return generate_segment(
             model, text, references=references, previous_takes=previous, **effective(self),
             max_new_tokens=frame_budget(text, self.max_new_tokens), seed=seed,
-            watch=silence_watch(model, text))
+            watch=silence_watch(model, text), main_token=requested())
 
     def _batched_segment(self, model: Any, text: str, prompt: Any, seed: int, max_new_tokens: int,
                          prefix_hints=()) -> Any:
@@ -728,6 +739,10 @@ class Drama3MLXEngine(HistorySynthesis):
                     self._batch_stats.value = None
                 if layout != "directing":
                     metadata["history_layout"] = layout
+                from .main_token import requested
+                if self._scheduler is None and requested():
+                    # Provenance only: the rule is not part of the request's identity.
+                    metadata["main_token"] = requested()
                 return metadata, codes.tolist(), model.model.config.audio_decoder.vocab_size
         except EngineError:
             raise

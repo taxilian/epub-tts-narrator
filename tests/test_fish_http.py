@@ -106,10 +106,12 @@ class FakeEngine:
         self.warmup_thread = None
 
     def synthesize_fish(self, text, voices, path, *, seed, history=()):
+        from epub_tts_narrator.renderer.main_token import requested
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
-            self.calls.append({"text": text, "seed": seed, "temperature": self.temperature,
+            rule = requested()
+            self.calls.append({"text": text, "seed": seed, "temperature": self.temperature, "main_token": rule,
                                "thread": threading.get_ident(), "history": list(history),
                                "output_path": Path(path).name,
                                "reference_paths": [Path(v["reference_audio"]).name for v in voices],
@@ -121,7 +123,8 @@ class FakeEngine:
             path.write_bytes(wav_bytes())
             return {"seed": seed, "codes": [[len(self.calls) % 1024] * 3 for _ in range(10)],
                     "codebook_size": 1024, "history_turns": len(history), "history_sha256": "0" * 64,
-                    **({"finish_reason": self.finish_reason} if getattr(self, "finish_reason", None) else {})}
+                    **({"finish_reason": self.finish_reason} if getattr(self, "finish_reason", None) else {}),
+                    **({"main_token": rule} if rule and getattr(self, "draws_main_token", True) else {})}
         finally:
             self.active -= 1
 
@@ -578,6 +581,41 @@ class FishHTTPTests(unittest.TestCase):
         self.assertEqual((metadata["history_turns"], metadata["history_available"]), (0, 0))
         self.assertEqual(metadata["history_sha256"], "0" * 64)
         self.assertFalse(list(self.root.glob(".fish-*")))
+
+    def test_narration_asks_for_the_open_main_token_draw_only_from_workers_that_offer_it(self):
+        from epub_tts_narrator.renderer.main_token import RULE
+        from epub_tts_narrator.renderer.request_sampling import request_sampling
+        # An older worker advertises no rules: the request is sent without one and records none.
+        self.client.check_continuity()
+        with request_sampling({"main_token": RULE}):
+            metadata = self.client.synthesize("Hello.", self.voice, self.root / "older.wav", seed=3)
+        self.assertIsNone(self.engine.calls[-1]["main_token"])
+        self.assertNotIn("main_token", metadata)
+
+        self.engine.main_token_rules = frozenset({RULE})
+        self.client.recheck_continuity()
+        with request_sampling({"main_token": RULE}):
+            metadata = self.client.synthesize("Hello.", self.voice, self.root / "open.wav", seed=3)
+        self.assertEqual(self.engine.calls[-1]["main_token"], RULE)
+        self.assertEqual(metadata["main_token"], RULE)
+        metadata = self.client.synthesize("Hello.", self.voice, self.root / "plain.wav", seed=3)
+        self.assertIsNone(self.engine.calls[-1]["main_token"])
+        self.assertNotIn("main_token", metadata)
+
+        # A worker that offers the rule must prove it drew with it.
+        self.engine.draws_main_token = False
+        with request_sampling({"main_token": RULE}), \
+                self.assertRaisesRegex(FishHTTPError, "did not draw with the requested"):
+            self.client.synthesize("Hello.", self.voice, self.root / "unproven.wav", seed=3)
+        self.assertFalse((self.root / "unproven.wav").exists())
+
+    def test_a_main_token_rule_the_engine_cannot_draw_is_refused(self):
+        body = dict(self.json_body(), main_token="open-v1")
+        with self.assertRaises(HTTPError) as caught:
+            self.post(body)
+        self.assertEqual(caught.exception.code, 400)
+        self.assertIn("main-token rule", caught.exception.read().decode())
+        caught.exception.close()
 
     def test_synthesis_scratch_names_carry_request_speaker_and_purpose(self):
         self.client.synthesize("Hello.", self.voice, self.root / "take.wav", seed=3)

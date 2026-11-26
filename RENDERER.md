@@ -620,6 +620,30 @@ must echo the exact values before a take is accepted. Remote chapter services
 (`serve-chapters`) apply their own configuration's setting. It requires
 `engine.type = "drama3_mlx"`.
 
+Narration draws each frame's main token (the stop token or a speech token) with
+an open rule, so a pause is less likely to turn into a take that stays silent:
+
+```toml
+[narration_sampling]
+open_main_token = true # the default; false draws as the vendored runtime does
+```
+
+Every request that does not use `[dialogue_sampling]` (narration, headings,
+mixed paragraphs) draws its main token at temperature 1.0 and top-p 0.95,
+keeping the token that crosses top-p, with no top-k cap and tokens under
+probability 0.001 dropped. Codebook values keep `[engine]` sampling. The
+vendored draw at 0.7 / 0.7 / 30 drops the crossing token and caps the main token
+at 30 choices, which during a pause can leave nothing but more silence; on 40
+narration passages that had gone silent (5 voices, 2 seeds) it stalled on 27 of
+80 takes and the open rule on none, with the same transcript coverage. The rule
+is recorded on each take (`engine_metadata.main_token`) but is not part of a
+take's cache identity, so existing narration takes and chapters are kept and
+nothing regenerates when it is turned on or off; it applies to takes generated
+afterwards. It is drawn by the local single-request MLX loop and by `serve`
+workers that advertise it in `/health` (`main_token_rules`); a worker that
+advertises it must echo it. Older `serve` workers, batched decoders, MLX-Audio
+and Runpod's CUDA engine draw as before and record nothing.
+
 Supported engines: the vendored Sogni runtime, the MLX-Audio quantized models,
 `audiobook-render serve` workers (another Mac, or Runpod's inference service),
 remote chapter services and Runpod. Plugins must advertise the
