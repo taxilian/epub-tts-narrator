@@ -298,8 +298,23 @@ def _save_decision_checkpoint(cache_dir, document, decisions, status):
     write_json(path, record, overwrite=True)
 
 
+def earlier_label(records):
+    """How a choice of an earlier book's character reads in the menus and in its decision."""
+    return f"{records['character']['name']} (from {records['book']})"
+
+
+def earlier_choices(document, registry):
+    """``{role_id: records}``: characters earlier books (or this book's reading) know who are not in the cast,
+    each with the records that bring it in (``known_speakers.earlier_records``)."""
+    if not registry:
+        return {}
+    from .known_speakers import absent_characters
+    return {row["records"]["role"]["id"]: row["records"] for row in absent_characters(document, registry)
+            if row["records"] is not None}
+
+
 def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, output_stream=None,
-                             jev_client=None, decisions_cache=None, chooser=None):
+                             jev_client=None, decisions_cache=None, chooser=None, registry=None):
     """Ask for every remaining speaker, preserving progress if input ends.
 
     This function is deliberately called only by the CLI after automatic review.
@@ -317,6 +332,11 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
     passage of the run, answered or not, also one replayed from an
     interrupted run's journal: its answer is cleared (journal rewritten, a
     character made only for it dropped) and it is asked again.
+
+    ``registry`` (the book's series registry) adds the characters earlier
+    books have and this one does not to the choices (``earlier_choices``); one
+    named beside the passage is offered first. Choosing one brings its
+    earlier records and voice into the cast (the decision's ``taken_in``).
     """
     errors = validate_document(document)
     if errors:
@@ -341,7 +361,8 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
             else:
                 return prompt_speaker_decisions(
                     document, book_path=book_path, input_stream=terminal_input,
-                    output_stream=terminal_output, jev_client=jev_client, decisions_cache=decisions_cache)
+                    output_stream=terminal_output, jev_client=jev_client, decisions_cache=decisions_cache,
+                    registry=registry)
     input_stream = sys.stdin if input_stream is None else input_stream
     output_stream = sys.stderr if output_stream is None else output_stream
     color = (getattr(output_stream, "isatty", lambda: False)()
@@ -366,11 +387,39 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
     roles = result["cast"]["roles"]
     roles_by_id = {role["id"]: role for role in roles}
     labels = _role_labels(roles, characters, result["source"]["book"], result["cast"]["voices"])
+    # Earlier books' characters this book lacks; one joins the cast when it is chosen.
+    earlier = earlier_choices(result, registry)
+    labels.update({role_id: earlier_label(records) for role_id, records in earlier.items()})
     blocks = result["source"]["blocks"]
     positions = {block["id"]: index for index, block in enumerate(blocks)}
     segments_by_block = {}
     for segment in result["segments"]:
         segments_by_block.setdefault(segment["block_id"], []).append(segment)
+
+    def choosable(role_id):
+        """The cast role, or the role an earlier book's character would bring; None for neither."""
+        if role_id in roles_by_id:
+            return roles_by_id[role_id]
+        return earlier[role_id]["role"] if role_id in earlier else None
+
+    def all_roles():
+        return [*roles, *(records["role"] for role_id, records in earlier.items() if role_id not in roles_by_id)]
+
+    def take_in(choices):
+        """Bring the earlier books' characters among ``choices`` into the cast; their records, for the decision."""
+        taken = []
+        for role in choices:
+            if role["id"] in roles_by_id:
+                continue
+            records = {key: deepcopy(earlier[role["id"]][key]) for key in ("character", "voice", "role")}
+            result["cast"]["characters"].append(records["character"])
+            result["cast"]["voices"].append(records["voice"])
+            result["cast"]["roles"].append(records["role"])
+            characters[records["character"]["id"]] = records["character"]
+            roles_by_id[records["role"]["id"]] = records["role"]
+            taken.append(deepcopy(records))
+        return taken
+
     def context(entries, *, tail=False):
         for neighbor, start, end in entries:
             for name, excerpt in _context_runs(neighbor, segments_by_block[neighbor["id"]],
@@ -381,6 +430,8 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
     decisions = []
 
     def assign(item, choices, *, quiet=False):
+        taken = take_in(choices)
+        choices = [roles_by_id[role["id"]] for role in choices]
         before = deepcopy(item)
         if len(choices) == 1:
             role = choices[0]
@@ -405,6 +456,8 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                           "selected_voices": [role["voice_id"] for role in choices],
                           "previous_attribution": before["attribution"], "previous_kind": before["kind"],
                           "kind": item["kind"], "simultaneous": len(choices) > 1})
+        if taken:
+            decisions[-1]["taken_in"] = taken
         if not quiet:
             say("Assigned to " + selected + (" together." if len(choices) > 1 else "."))
 
@@ -442,7 +495,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
 
     def replay_journal(journal, *, quiet=False):
         """Reapply saved decisions through the same assign path; False leaves state untouched."""
-        available = set(roles_by_id)
+        available = set(roles_by_id) | set(earlier)
         seen = set()
         for entry in journal["decisions"]:
             if not isinstance(entry, dict):
@@ -484,15 +537,17 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                 characters[character["id"]] = character
                 roles_by_id[role["id"]] = role
                 labels[role["id"]] = defined["name"]
-            assign(segment, [roles_by_id[role_id] for role_id in entry["selected_roles"]], quiet=quiet)
+            assign(segment, [choosable(role_id) for role_id in entry["selected_roles"]], quiet=quiet)
             if defined is not None:
                 decisions[-1]["defined_voice"] = deepcopy(defined)
         return True
 
     def name_taken(name):
-        """A character this book already has, by name or by a prompt-made ID."""
+        """A character this book already has, by name or by a prompt-made ID, or an earlier book's on the list."""
         return (_mint_series_ids(result, name)[0] in characters
-                or any(_display(row["name"]).casefold() == name.casefold() for row in characters.values()))
+                or any(_display(row["name"]).casefold() == name.casefold() for row in characters.values())
+                or any(_display(records["character"]["name"]).casefold() == name.casefold()
+                       for records in earlier.values()))
 
     def refused(choices):
         if len({role["id"] for role in choices}) != len(choices):
@@ -519,6 +574,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
         roles = result["cast"]["roles"]
         roles_by_id = {role["id"]: role for role in roles}
         labels = _role_labels(roles, characters, result["source"]["book"], result["cast"]["voices"])
+        labels.update({role_id: earlier_label(records) for role_id, records in earlier.items()})
         blocks = result["source"]["blocks"]
         positions = {block["id"]: index for index, block in enumerate(blocks)}
         segments_by_block = {}
@@ -568,6 +624,16 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
 
     def likely(item):
         suggestions = []
+        # An earlier book's character named beside the passage comes first: nothing else can rank it.
+        if earlier:
+            from .known_speakers import BEFORE, named_in
+            index = positions[item["block_id"]]
+            text = "\n".join(block["text"] for block in blocks[max(0, index - BEFORE):index + 1]
+                             if block["chapter_id"] == blocks[index]["chapter_id"])
+            for role_id, records in earlier.items():
+                if role_id not in roles_by_id and named_in(text, records["character"]) and len(suggestions) < 2:
+                    suggestions.append({"role_id": role_id, "reason": f"Named here; a character from {records['book']} "
+                                                                      "who is not yet in this book's cast."})
         for suggestion in rank_speakers(result, item, jev_client=jev_client):
             if suggestion["role_id"] in roles_by_id and suggestion["role_id"] not in {
                     existing["role_id"] for existing in suggestions}:
@@ -581,8 +647,10 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
         number, error = index + 1, None
         while True:
             view = passage_view(result, item, number=number, total=total, labels=labels,
-                                suggestions=suggestions, roles=list(roles_by_id.values()),
+                                suggestions=suggestions, roles=all_roles(),
                                 previous=previous_answer(index))
+            view["names"].update({role_id: _display(records["character"]["name"]) for role_id, records in earlier.items()
+                                  if role_id not in roles_by_id})
             view["error"] = error
             view["later"] = _review_command(book_path)
             answer = chooser(view)
@@ -619,10 +687,10 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
             if action == "assign":
                 selected = answer.get("roles")
                 if (not isinstance(selected, list) or not selected
-                        or any(role_id not in roles_by_id for role_id in selected)):
+                        or any(choosable(role_id) is None for role_id in selected)):
                     error = "Choose a voice from the list."
                     continue
-                choices = [roles_by_id[role_id] for role_id in selected]
+                choices = [choosable(role_id) for role_id in selected]
                 error = refused(choices)
                 if error:
                     continue
@@ -660,7 +728,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
         if jev_client is not None:
             say("\nRanking likely speakers with JEV…")
         suggestions = likely(item)
-        shortlist = [roles_by_id[suggestion["role_id"]] for suggestion in suggestions]
+        shortlist = [choosable(suggestion["role_id"]) for suggestion in suggestions]
         previous = previous_answer(index)
         expanded = False
 
@@ -668,7 +736,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
             say()
             if expanded:
                 say("All voices")
-                for choice, role in enumerate(roles, 1):
+                for choice, role in enumerate(all_roles(), 1):
                     prose(f"{choice}. {labels[role['id']]}", indent="  ")
                 say("  B. Back to likely speakers")
             elif shortlist:
@@ -681,7 +749,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
             else:
                 say("No likely speaker found. Choose O to see all voices.")
             if not expanded:
-                say(f"  O. Other — show all {len(roles)} voices")
+                say(f"  O. Other — show all {len(all_roles())} voices")
             say("  N. New voice — define a new character")
             if previous is not None and not expanded:
                 prose(f"B. Back to passage {previous['number']} (now: {previous['answer']}) — change that answer",
@@ -732,7 +800,7 @@ def prompt_speaker_decisions(document, *, book_path=None, input_stream=None, out
                                                               "role": deepcopy(role)}}
                 save_journal("running")
                 return "done"
-            visible_roles = roles if expanded else shortlist
+            visible_roles = all_roles() if expanded else shortlist
             if answer == "" and not expanded and shortlist:
                 answer = "1"
             parts = [part.strip() for part in answer.split(",")]

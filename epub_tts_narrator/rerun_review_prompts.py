@@ -130,3 +130,14 @@ AUTHOR_FIND = f"""You find who wrote a book, from the book's own front and back 
 Input: "title" = the book's title; "text" = numbered paragraphs (N|text) from its start and end: title page, copyright page, dedication, "also by" lists, about the author.
 Return {{"a":[[name,N,quote]]}} with each author of this book that the text names, each with a short exact quote from paragraph N that contains the name and shows it is this book's author: a byline ("by NAME"), a copyright notice ("Copyright © 2002 by NAME"), "Other books by NAME", "About the author" followed by the name. Give the name as the book prints it, in normal capitalization. An editor, translator, illustrator, cover artist, publisher or a co-author of only other books listed is not an author of this book.
 Return {{"a":[]}} when these paragraphs do not show who wrote this book. Never guess from the title, the story, or your own knowledge of books."""
+
+KNOWN_SPEAKER_VERSION = "1"
+
+# Unassigned lines with a character the book knows, but not in its cast, named beside them: ``known_speakers``.
+KNOWN_SPEAKER_CHECK = f"""You decide who says audiobook lines that no character was given.
+{_DATA}
+
+Each item gives numbered paragraphs (N|text); the line to decide is marked ⟦like this⟧ in the last one. It may be speech set in italics without quotation marks, a thought, or words heard in someone's mind. "options" lists the characters named in these paragraphs (id|name|aliases|where the character comes from: note).
+{{"r":[[item_id,option_id,N,quote],[item_id,"-"]]}} for every item:
+an option id only when the text shows that character says, thinks or sends the marked line: an action beat or speech tag of theirs right beside it ("Arno flapped his wings."), or the line answering in a way only they fit. Give a short exact quote from paragraph N that contains the character's name and shows it.
+"-" when the line is someone else's, the narrator's own, or these paragraphs do not show whose it is."""

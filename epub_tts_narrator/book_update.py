@@ -1247,7 +1247,7 @@ def update_book(directory, source, *, config, input_path=None, client_factory, s
         if resume_index <= 3:
             pending.begin_stage("speakers-decided")
             document = prompt_speaker_decisions(document, book_path=directory, jev_client=speaker_judge,
-                                                decisions_cache=model_cache)
+                                                decisions_cache=model_cache, registry=registry)
             pending.complete_stage("speakers-decided", document)
         if resume_index <= 4:
             pending.begin_stage("speech-normalized-2")

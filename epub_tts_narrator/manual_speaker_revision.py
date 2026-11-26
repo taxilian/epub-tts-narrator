@@ -5,7 +5,7 @@ from copy import deepcopy
 from .contracts import readiness
 from .pipeline import fingerprint
 from .speaker_completion import ATTRIBUTION_ISSUE_KINDS, unassigned_segments
-from .speaker_decisions import _create_voice_records, _role_labels
+from .speaker_decisions import _create_voice_records, _role_labels, earlier_choices, earlier_label
 
 
 _DECISION_FIELDS = {"segment_id", "block_id", "start", "end", "text_fingerprint",
@@ -41,7 +41,7 @@ def _assign(segment, roles, labels):
                               "candidates": [], "review_required": False}
 
 
-def _apply_decisions(expected, speaker_input, receipt):
+def _apply_decisions(expected, speaker_input, receipt, registry=None):
     decisions = receipt.get("decisions")
     _require(type(receipt.get("version")) is int and receipt["version"] == 1
              and isinstance(decisions, list) and bool(decisions),
@@ -56,12 +56,15 @@ def _apply_decisions(expected, speaker_input, receipt):
     characters = {row["id"]: row for row in expected["cast"]["characters"]}
     available = {role["id"]: role for role in roles}
     labels = _role_labels(roles, characters, expected["source"]["book"], expected["cast"]["voices"])
+    # An earlier book's character a person chose joins the cast with its earlier records (``taken_in``).
+    earlier = earlier_choices(speaker_input, registry)
+    labels.update({role_id: earlier_label(records) for role_id, records in earlier.items()})
     known_ids = {row["id"] for collection in expected["cast"].values() if isinstance(collection, list)
                  for row in collection if isinstance(row, dict) and isinstance(row.get("id"), str)}
     seen = set()
     for decision in decisions:
         _require(isinstance(decision, dict)
-                 and set(decision) in (_DECISION_FIELDS, _DECISION_FIELDS | {"defined_voice"}),
+                 and set(decision) - {"taken_in"} in (_DECISION_FIELDS, _DECISION_FIELDS | {"defined_voice"}),
                  "decision fields do not match the terminal receipt schema")
         segment_id = decision.get("segment_id")
         _require(segment_id in pending and segment_id not in seen, "decision target is not uniquely pending")
@@ -107,6 +110,22 @@ def _apply_decisions(expected, speaker_input, receipt):
             labels[role["id"]] = name
             _require(selected_ids == [role["id"]] and selected_voices == [voice["id"]],
                      "a defining decision must select exactly its new role and voice")
+        taken = decision.get("taken_in", [])
+        _require(isinstance(taken, list) and bool(taken) is ("taken_in" in decision), "taken_in must list records")
+        for records in taken:
+            role_id = records.get("role", {}).get("id") if isinstance(records, dict) else None
+            _require(role_id in earlier and role_id in selected_ids and role_id not in available
+                     and records == {key: earlier[role_id][key] for key in ("character", "voice", "role")},
+                     "a character taken in must be an earlier book's, with its earlier records")
+            created_ids = (records["character"]["id"], records["voice"]["id"], role_id)
+            _require(all(value not in known_ids for value in created_ids),
+                     "a character taken in collides with an existing record")
+            known_ids.update(created_ids)
+            expected["cast"]["characters"].append(deepcopy(records["character"]))
+            expected["cast"]["voices"].append(deepcopy(records["voice"]))
+            expected["cast"]["roles"].append(deepcopy(records["role"]))
+            characters[records["character"]["id"]] = expected["cast"]["characters"][-1]
+            available[role_id] = expected["cast"]["roles"][-1]
         _require(all(role_id in available for role_id in selected_ids), "selected role is not available")
         selected = [available[role_id] for role_id in selected_ids]
         _require(selected_voices == [role["voice_id"] for role in selected]
@@ -164,7 +183,7 @@ def _validate_samples(expected, speaker_input, candidate):
              "voice_samples is not a stable product of audition preparation")
 
 
-def validate_manual_speaker_revision(original, speaker_input, candidate):
+def validate_manual_speaker_revision(original, speaker_input, candidate, registry=None):
     """Require candidate to equal the deterministic result of its manual receipt."""
     _require(isinstance(speaker_input, dict) and isinstance(candidate, dict)
              and isinstance(speaker_input.get("provenance"), dict)
@@ -178,7 +197,7 @@ def validate_manual_speaker_revision(original, speaker_input, candidate):
     receipt = candidate.get("provenance", {}).get("speaker_decisions")
     if receipt != speaker_input.get("provenance", {}).get("speaker_decisions"):
         _require(isinstance(receipt, dict), "changed receipt must be an object")
-        _apply_decisions(expected, speaker_input, receipt)
+        _apply_decisions(expected, speaker_input, receipt, registry)
     _validate_samples(expected, speaker_input, candidate)
     expected["readiness"] = readiness(expected)
     if candidate != expected:

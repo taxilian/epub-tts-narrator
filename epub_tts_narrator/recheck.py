@@ -24,11 +24,13 @@ import uuid
 FILENAME = "recheck.json"
 VERSION = 1
 # The rerun's checks, in the order ``analyze BOOK`` runs them.
-STEPS = ("cast", "names", "genders", "group-tags", "joint-lines", "attribution", "directions")
+STEPS = ("cast", "names", "genders", "group-tags", "joint-lines", "attribution", "known-speakers", "directions")
 NAMES = {"cast": "cast entries that are one person", "names": "names the book gives characters listed by a description",
          "genders": "each character's gender",
          "group-tags": "characters that may be groups", "joint-lines": "lines several characters say together",
-         "attribution": "every paragraph's speakers and speech splits", "directions": "every line's direction"}
+         "attribution": "every paragraph's speakers and speech splits",
+         "known-speakers": "unassigned lines of characters the book already knows",
+         "directions": "every line's direction"}
 
 
 class Recheck:

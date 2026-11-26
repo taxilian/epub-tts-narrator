@@ -527,7 +527,7 @@ def main(argv=None, *, in_shell=False):
             from .author_review import needs_author, review_author
             planned = [*(["author"] if needs_author(original) else []), "splits", "cast", "names", *(["character-splits"] if args.instructions else []), "genders",
                        *(["narrators"] if args.instructions or original["provenance"].get("narrator_review") else []),
-                       "groups", "joint-lines", "attribution", "directions"]
+                       "groups", "joint-lines", "attribution", "known-speakers", "directions"]
             labels = {"author": "who wrote the book (its EPUB names no author)",
                       "splits": "paragraphs whose speech and narration are divided wrongly",
                       "cast": "cast entries that are one person",
@@ -537,6 +537,7 @@ def main(argv=None, *, in_shell=False):
                       "groups": "characters that may be groups",
                       "joint-lines": "lines several characters say together",
                       "attribution": "every paragraph's speakers and speech splits",
+                      "known-speakers": "unassigned lines of characters the book already knows",
                       "directions": "every line's direction"}
 
             def check(step):
@@ -671,6 +672,15 @@ def main(argv=None, *, in_shell=False):
             if changed:
                 original = _completed_directory(directory)[0]
                 original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
+            # A line nobody speaks goes to a character this book's reading or an earlier book knows, named beside it.
+            check("known-speakers")
+            from .known_speakers import review_known_speakers
+            changed = free(lambda: review_known_speakers(directory, config, provider_client, progress,
+                                                         recheck_cache=fresh("known-speakers")), "known-speakers")
+            done("known-speakers")
+            if changed:
+                original = _completed_directory(directory)[0]
+                original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # Directions made with older rules are directed again; typed ones stay.
             check("directions")
             from .direction_refresh_command import refresh_outdated_directions
@@ -734,7 +744,8 @@ def main(argv=None, *, in_shell=False):
             revised = repair_narration_boundaries(revised, progress=print)
         speaker_input = deepcopy(revised)
         revised = prompt_speaker_decisions(revised, book_path=directory, jev_client=_speaker_judge(config),
-                                           decisions_cache=decisions_cache)
+                                           decisions_cache=decisions_cache,
+                                           registry=_completed_directory(directory)[1])
         if "voice_samples" in original["provenance"] or audition_preparation_pending(revised):
             # Keep successful auditions and retry only missing ones. Optional
             # casting text must not prevent publishing finished book analysis.
@@ -794,7 +805,8 @@ def main(argv=None, *, in_shell=False):
             for directory in revised:
                 speaker_inputs[directory] = deepcopy(revised[directory])
                 revised[directory] = prompt_speaker_decisions(revised[directory], book_path=directory,
-                                                               jev_client=judge, decisions_cache=decisions_cache)
+                                                               jev_client=judge, decisions_cache=decisions_cache,
+                                                               registry=_completed_directory(directory)[1])
                 if (revised[directory]["cast"] != documents[directory]["cast"]
                         and "voice_samples" in documents[directory]["provenance"]):
                     from .audition_scripts import prepare_document_samples
@@ -1013,7 +1025,7 @@ def main(argv=None, *, in_shell=False):
                 if resume_index <= 3:
                     begin("speakers-decided")
                     document = prompt_speaker_decisions(document, book_path=args.output, jev_client=_speaker_judge(config),
-                                                        decisions_cache=model_cache)
+                                                        decisions_cache=model_cache, registry=registry)
                     complete("speakers-decided")
                 if resume_index <= 4:
                     begin("speech-normalized-2")
