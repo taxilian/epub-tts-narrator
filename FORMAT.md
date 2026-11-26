@@ -240,6 +240,18 @@ Optional fields:
 
 Unknown correction keys fail. Edited documents retain all correction payloads in `provenance.corrections`. Reapplying the same correction file to an independently changed cast fails; inspect and refresh the edits rather than bypassing the check.
 
+## Book title and authors
+
+`source.book.title` and `source.book.authors` are the EPUB's `dc:title` and `dc:creator`. Extraction drops a placeholder author such as Calibre's `Unknown` (`book_details.real_authors`); every reader drops one saved earlier, so `["Unknown"]` means no author. A title or authors chosen later never rewrite `source.book` (its fingerprint binds chunk IDs, series history and source-bound sidecars). They are kept in `provenance.book_details`, which the bundle manifest carries:
+
+```text
+version: 1
+title: optional {value: nonempty title, basis: "user" | "analysis"}
+authors: optional {value: author names (no placeholders), basis: "user" | "analysis", evidence?: exact quotes}
+```
+
+`basis: "analysis"` is an author the book's own pages name (`author_review`, never an empty list), with the quotes that show it; `basis: "user"` is a person's choice from `review-ui` or the `analyze` question, and `authors.value: []` with it means the book has no named author. A present field replaces the EPUB's value for the spoken ending, the M4B tags and a fresh `.m4b` name (`book_details.effective_book`). It is published through `analysis_revision` scope `book-details`, which accepts a change to this record only.
+
 ## Character merges
 
 A person can say two cast entries are one character (`audiobook-render merge-characters`). Each changed book appends a record to `provenance.character_merges`:

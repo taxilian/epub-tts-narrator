@@ -653,7 +653,11 @@ def extract_epub(path: str | Path, *, include_auxiliary: bool = False) -> dict:
             return [text for node in metadata if node.tag == f"{{{_DC}}}{tag}"
                     if (text := _normalize("".join(node.itertext())))]
 
-        titles, authors, languages = values("title"), values("creator"), values("language")
+        titles, languages = values("title"), values("language")
+        # A conversion tool's stand-in for a missing author ("Unknown") is no author:
+        # ``analyze`` then works it out from the book's front matter (``author_review``).
+        from .book_details import real_authors
+        authors = real_authors(values("creator"))
         if not titles:
             warn("OPF title is missing; using the EPUB filename.")
         if not languages:

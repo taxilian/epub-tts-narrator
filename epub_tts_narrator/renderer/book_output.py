@@ -118,6 +118,24 @@ def adopted_audiobook_filename(output_dir: str | Path,
         return None
 
 
+def _retitled(book, previous_audio, recorded):
+    """A book whose title changed gets the new title's name, unless its file has a name of its own.
+
+    Only a name the renderer derived from the previous title follows the new
+    one; a recorded legacy or person-chosen name is kept.
+    """
+    previous_book = previous_audio.get("book")
+    if not isinstance(book, Mapping) or not isinstance(previous_book, Mapping):
+        return recorded
+    if book.get("title") == previous_book.get("title"):
+        return recorded
+    try:
+        derived = default_audiobook_filename(previous_book)
+    except ValueError:
+        return recorded
+    return default_audiobook_filename(book) if derived == recorded else recorded
+
+
 def resolve_audiobook_filename(book: Mapping[str, JsonValue] | None = None,
                                previous_audio: Mapping[str, JsonValue] | None = None,
                                output_dir: str | Path | None = None) -> str:
@@ -132,7 +150,7 @@ def resolve_audiobook_filename(book: Mapping[str, JsonValue] | None = None,
             adopted = adopted_audiobook_filename(output_dir, previous_audio)
             if adopted is not None:
                 return adopted
-        return recorded
+        return _retitled(book, previous_audio, recorded)
     if output_dir is not None:
         legacy = Path(output_dir) / LEGACY_AUDIOBOOK_FILENAME
         if legacy.is_symlink():

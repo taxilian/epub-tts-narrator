@@ -22,6 +22,7 @@ from typing import Sequence
 import wave
 import zipfile
 
+from epub_tts_narrator.book_details import real_authors
 from epub_tts_narrator.epub import (
     MAX_ARCHIVE_BYTES, _Archive, _parse_xml, _resolve_href, _tag,
 )
@@ -747,7 +748,7 @@ def encode_chapter(chapter: dict, output_path: str | Path, *, book: dict,
               "-i", str(tool_path(Path(chapter["wav_path"]).resolve())), "-map", "0:a:0"]
              + codec + ["-metadata", f"title={chapter['title']}",
                         "-metadata", f"album={book.get('title', 'Audiobook')}",
-                        "-metadata", f"artist={'; '.join(book.get('authors', []))}",
+                        "-metadata", f"artist={'; '.join(real_authors(book.get('authors', [])))}",
                         "-metadata", f"track={ordinal}/{total_chapters}", str(staged)])
         inspection = _check_encoded(staged, info["frames"], rate, ffprobe=ffprobe)
         target.hardlink_to(staged)

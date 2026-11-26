@@ -80,9 +80,10 @@ def spoken_title(title):
 
 
 def spoken_authors(authors):
-    """``A``, ``A and B``, ``A, B, and C``; blank and repeated names are dropped."""
+    """``A``, ``A and B``, ``A, B, and C``; blank, placeholder (``Unknown``) and repeated names are dropped."""
+    from ..book_details import real_authors
     names, seen = [], set()
-    for author in authors if isinstance(authors, list) else []:
+    for author in real_authors(authors):
         name = _plain(re.sub(r"[()\[\]<>]", " ", author)) if isinstance(author, str) else ""
         if name and name.casefold() not in seen:
             seen.add(name.casefold())
@@ -133,7 +134,8 @@ def ending_chapter(bundle, plan, render):
     if plan["partial_book"] or not any(chapter["chunks"] for chapter in plan["chapters"]):
         return None
     role = narrator_role(bundle["cast"])
-    text = ending_text(bundle["source"]["book"], render)
+    from ..book_details import bundle_book
+    text = ending_text(bundle_book(bundle), render)
     # Only a narrator voice the book already uses: the ending never designs a voice.
     if role is None or text is None or role["voice_id"] not in plan["voice_ids"]:
         return None

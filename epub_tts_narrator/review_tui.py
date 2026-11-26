@@ -105,6 +105,9 @@ class ReviewApp:
         self.ignored_chapters = self._load_ignored_chapters()
         self.confirm_ignore_index: int | None = None
         self.confirm_ignore_ignored = False
+        self.book_cursor = 0
+        self.book_field = "title"
+        self.book_buffer = ""
         self._sync_toc_selection()
         self.page_size = 10
         self.roles = {role["id"]: role for role in document["cast"]["roles"]}
@@ -472,6 +475,89 @@ class ReviewApp:
             return False
         self._store_edit(edited)
         return True
+
+    def book(self):
+        """The book's title and authors as the audiobook names them (a chosen title/author included)."""
+        from .book_details import document_book
+        return document_book(self.document)
+
+    def book_text(self):
+        from .book_details import describe
+        return describe(self.book())
+
+    def set_book_details(self, *, title=None, authors=None):
+        """Save a new title and/or authors at once (``authors``: a list, or text with ``;`` between names).
+
+        Saved separately from pending attribution edits, like a chapter ignore;
+        the next render or assemble uses them (spoken ending, tags, file name).
+        """
+        from .book_details import _UNSET, split_authors, with_details
+        try:
+            if isinstance(authors, str):
+                authors = split_authors(authors)
+            candidate = with_details(self.document, title=_UNSET if title is None else title,
+                                     authors=_UNSET if authors is None else authors, basis="user")
+        except ValueError as exc:
+            self.notice = "Not saved: " + _flat(exc)
+            return False
+        if candidate == self.document:
+            self.notice = "The title and author are unchanged"
+            return True
+        messages = []
+        try:
+            result = self._revise({self.directory: candidate}, directories=self.directories,
+                                  expected_manifest_hashes=self.expected_manifest_hashes,
+                                  scope="book-details", progress=messages.append)
+        except (ValueError, OSError) as exc:
+            self.notice = "Save failed: " + _flat(exc)
+            return False
+        self.document = candidate
+        self.expected_manifest_hashes = self._manifest_hashes()
+        self.canonical_manifest_hash = self._canonical_manifest_hash()
+        self.progress.extend(messages)
+        backup = result.get("backup_directory") if isinstance(result, dict) else None
+        if backup:
+            self.progress.append("Original analysis files and revision journal: " + str(backup))
+        self.notice = ("Saved: " + _flat(self.book_text())
+                       + ". The next render or assemble uses it (spoken ending, tags, file name).")
+        return True
+
+    def _open_book(self):
+        self.book_cursor = 0
+        self.return_view = self.view
+        self.view = "book"
+
+    def _book_rows(self):
+        book = self.book()
+        return [("title", "Title: " + book["title"]),
+                ("authors", "Author(s): " + ("; ".join(book["authors"]) or "(unknown)"))]
+
+    def _handle_book(self, key):
+        if key == "ESC":
+            self.view = self.return_view
+        elif key in {"UP", "k"}:
+            self.book_cursor = 0
+        elif key in {"DOWN", "j"}:
+            self.book_cursor = 1
+        elif key == "ENTER":
+            self.book_field = self._book_rows()[self.book_cursor][0]
+            book = self.book()
+            self.book_buffer = book["title"] if self.book_field == "title" else "; ".join(book["authors"])
+            self.view = "book_edit"
+
+    def _handle_book_edit(self, key):
+        if key == "ENTER":
+            value = self.book_buffer
+            if self.set_book_details(**{self.book_field: value}):
+                self.view = "book"
+        elif key == "ESC":
+            self.view = "book"
+        elif key == "BACKSPACE":
+            self.book_buffer = self.book_buffer[:-1]
+        elif key == "SPACE":
+            self.book_buffer += " "
+        elif isinstance(key, str) and len(key) == 1 and key.isprintable():
+            self.book_buffer += key
 
     def toggle_review(self):
         segment = self._segment(self.info_segment_id)
@@ -846,6 +932,12 @@ class ReviewApp:
         if self.view == "direction":
             self._handle_direction(key)
             return self.running
+        if self.view == "book_edit":
+            self._handle_book_edit(key)
+            return self.running
+        if self.view == "book":
+            self._handle_book(key)
+            return self.running
         # Vim movement (j/k are handled with UP/DOWN below): page, first/last, and h/l between a passage's clips.
         key = VIM_KEYS.get(key, key)
         if self.view == "takes" and key in {"h", "l"}:
@@ -885,6 +977,8 @@ class ReviewApp:
             elif key in {"h", "H"}:
                 self.show_ignored = not self.show_ignored
                 self._sync_toc_selection()
+            elif key in {"b", "B"}:
+                self._open_book()
         elif self.view == "passages":
             if key in {"UP", "k"}:
                 self._move_passage(-1)
@@ -988,7 +1082,7 @@ class ReviewApp:
         _, width = screen.size()
         screen.write(0, 0, _flat(title), {"reverse": True})
         dirty = f"  {len(self.pending)} unsaved edit(s)" if self.pending else ""
-        screen.write(1, 0, _flat(self.document["source"]["book"]["title"] + dirty), None)
+        screen.write(1, 0, _flat(self.book()["title"] + dirty), None)
 
     def _footer(self, screen, controls):
         height, _ = screen.size()
@@ -1017,7 +1111,8 @@ class ReviewApp:
             text = (f"{marker}{prefix}{row['title']}  {row['passage_count']} passages; "
                     f"{row['review_count']} review; {row['unassigned_count']} unassigned")
             screen.write(line, 0, text, _selected(index == self.toc_index))
-        self._footer(screen, "Up/Down/j/k  Enter open  I ignore/restore  H ignored  F failed  S save  Q quit")
+        self._footer(screen, "Up/Down/j/k  Enter open  I ignore/restore  H ignored  F failed  B title/author  "
+                             "S save  Q quit")
 
     def _draw_passages(self, screen):
         height, _ = screen.size()
@@ -1133,6 +1228,23 @@ class ReviewApp:
                                    list(self.roles).index(role_id) if role_id is not None else None))
         self._footer(screen, "Space toggle group  Enter confirm/choose  Unresolved clears assignment  Esc cancel")
 
+    def _draw_book(self, screen):
+        self._header(screen, "Book title and author")
+        for line, (index, (_, text)) in enumerate(enumerate(self._book_rows()), 3):
+            selected = index == self.book_cursor
+            screen.write(line, 0, ("> " if selected else "  ") + _flat(text), _selected(selected))
+        screen.write(6, 0, "Saved at once; the next render or assemble uses them (spoken ending, tags, file name).",
+                     None)
+        self._footer(screen, "Up/Down choose  Enter edit  Esc back")
+
+    def _draw_book_edit(self, screen):
+        label = "title" if self.book_field == "title" else "author(s), several separated by ;"
+        self._header(screen, "Edit the book's " + label)
+        screen.write(3, 0, self.book_buffer, None)
+        if self.book_field == "authors":
+            screen.write(4, 0, "Empty: the book has no named author.", None)
+        self._footer(screen, "Printable text  Backspace delete  Enter save  Esc cancel")
+
     def _draw_direction(self, screen):
         self._header(screen, "Edit delivery direction")
         screen.write(3, 0, self.direction_buffer, None)
@@ -1158,6 +1270,10 @@ class ReviewApp:
             self._draw_speaker(screen)
         elif self.view == "direction":
             self._draw_direction(screen)
+        elif self.view == "book":
+            self._draw_book(screen)
+        elif self.view == "book_edit":
+            self._draw_book_edit(screen)
         elif self.view == "confirm_quit":
             self._header(screen, "Unsaved changes")
             screen.write(3, 0, "Save changes before quitting?", None)

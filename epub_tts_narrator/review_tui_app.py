@@ -75,13 +75,15 @@ class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
         Binding("f,F", "failed", "Failed", tooltip="Go to the chapter's first failed passage"),
         Binding("i,I", "ignore", "Ignore", tooltip="Ignore the chapter in the next render and assemble, or restore it"),
         Binding("h,H", "show_ignored", "Ignored", show=False, tooltip="Show or hide ignored chapters"),
+        Binding("b,B", "book", "Title/author",
+                tooltip="Change the book's title or author (saved at once; used by the next render or assemble)"),
         Binding("escape", "back", "Chapters", show=False, tooltip="Back to the chapter list"),
     ]
 
     def __init__(self, controller, *, title=None):
         super().__init__()
         self.controller = controller
-        self.book_title = title or controller.document["source"]["book"]["title"]
+        self.book_title = title or controller.book()["title"]
         self.role_colors = palette(len(controller.roles))
         self.messages = []
         self.playing = None
@@ -500,6 +502,42 @@ class ReviewTuiApp(VimKeysMixin, CapturePrintMixin, App):
         self.push_screen(ConfirmScreen(
             f"{action} chapter {index + 1}? This saves now and applies to the next render and assemble; "
             "unsaved attribution edits are unchanged.", title=f"{action} chapter {index + 1}", yes=action), chosen)
+
+    def action_book(self):
+        controller = self.controller
+        book = controller.book()
+
+        def edited(field):
+            def check(text):
+                from .book_details import check_title, split_authors
+                check_title(text) if field == "title" else split_authors(text)
+
+            def chosen(text):
+                if text is not None:
+                    ok = controller.set_book_details(**{field: text})
+                    if ok:
+                        self.book_title = controller.book()["title"]
+                        self.title = f"Review — {_flat(self.book_title)}"
+                    self.refresh_all(ok)
+            if field == "title":
+                self.push_screen(TextEditScreen("The book's title", book["title"], validate=check, single_line=True,
+                                                help_text="Saved at once · the next render or assemble uses it "
+                                                          "(spoken ending, tags, file name) · Escape cancels"),
+                                 chosen)
+            else:
+                self.push_screen(TextEditScreen(
+                    "The book's author(s)", "; ".join(book["authors"]), validate=check, single_line=True,
+                    help_text="Separate several with ; · empty: no named author · saved at once · the next render "
+                              "or assemble uses it · Escape cancels"), chosen)
+
+        def picked(field):
+            if field is not None:
+                edited(field)
+        self.push_screen(ChoiceScreen(
+            "Book title and author",
+            [("title", "Title: " + _flat(book["title"])),
+             ("authors", "Author(s): " + (_flat("; ".join(book["authors"])) or "(unknown)"))],
+            filterable=False), picked)
 
     def action_show_ignored(self):
         self.controller.show_ignored = not self.controller.show_ignored

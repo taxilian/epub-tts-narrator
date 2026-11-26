@@ -121,8 +121,8 @@ def read_publication_metadata(epub: str | Path, expected_book_id: str) -> dict:
     titles = nodes("title")
     main_title = next((node for node in titles if refinement(node, "title-type") == "main"),
                       titles[0] if titles else None)
-    authors = list(dict.fromkeys(_text(node) for node in nodes("creator")
-                                if role(node) in {"", "aut", "author"} and _text(node)))
+    from ..book_details import placeholder, real_authors
+    authors = real_authors([_text(node) for node in nodes("creator") if role(node) in {"", "aut", "author"}])
     book = {"id": expected_book_id, "title": (_text(main_title) if main_title is not None else "") or epub.stem,
             "authors": authors, "language": next(iter(values("language")), "und")}
     for name in ("publisher", "description", "rights"):
@@ -139,7 +139,7 @@ def read_publication_metadata(epub: str | Path, expected_book_id: str) -> dict:
         if found:
             book[key] = found
     contributors = list(dict.fromkeys(_text(node) for node in nodes("contributor") + nodes("creator")
-                                      if _text(node) and _text(node) not in authors))
+                                      if not placeholder(_text(node)) and _text(node) not in authors))
     if contributors:
         book["contributors"] = contributors
     collections = [node for node in metadata if _tag(node) == "meta"

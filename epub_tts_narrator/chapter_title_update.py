@@ -40,6 +40,10 @@ def source_for_title_refresh(document, source, *, epub_sha256=None):
     if len(current["chapters"]) != len(saved["chapters"]):
         return None
     current["book"]["id"] = saved["book"]["id"]
+    from .book_details import real_authors
+    if real_authors(current["book"].get("authors")) == real_authors(saved["book"].get("authors")):
+        # A book saved before placeholder authors ("Unknown") were dropped at extraction.
+        current["book"]["authors"] = deepcopy(saved["book"].get("authors"))
     current["warnings"] = deepcopy(saved["warnings"])
     current["exclusions"] = deepcopy(saved["exclusions"])
     previous = deepcopy(current)

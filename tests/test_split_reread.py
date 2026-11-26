@@ -196,9 +196,10 @@ class ReReadTests(unittest.TestCase):
         status, stdout, stderr = self.run_cli("analyze", self.book)
         self.assertIn(status, (0, 2), stderr + stdout)
         self.assertNotIn("reading them again", stdout)
-        # Only the fixture's still-missing auditions are retried; nothing is read again.
-        self.assertEqual({call.get("mode") for client in self.clients[clients:] for call in client.calls} - {"audition_script"},
-                         set())
+        # Only the fixture's still-missing auditions and author (its fake model answers neither) are retried;
+        # nothing is read again.
+        self.assertEqual({call.get("mode") for client in self.clients[clients:] for call in client.calls}
+                         - {"audition_script", "author_find"}, set())
         self.assertEqual((self.book / "manifest.json").read_bytes(), published)
 
     def test_a_reread_naming_a_new_speaker_in_a_continued_book_keeps_the_saved_lines(self):

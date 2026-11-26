@@ -1477,9 +1477,11 @@ class NarratorCliTests(unittest.TestCase):
         self.assertEqual(status, 0, stderr)
         output_text = stdout + stderr
         self.assertIn("The analysis is saved. Checking it now", output_text)
-        self.assertIn("Check 1 of 8: paragraphs whose speech and narration are divided wrongly", output_text)
-        self.assertIn("Check 8 of 8: every line's direction", output_text)
-        self.assertIn("Checks finished (8 of 8).", output_text)
+        # The fixture EPUB names no author, so finding it is the first check.
+        self.assertIn("Check 1 of 9: who wrote the book (its EPUB names no author)", output_text)
+        self.assertIn("Check 2 of 9: paragraphs whose speech and narration are divided wrongly", output_text)
+        self.assertIn("Check 9 of 9: every line's direction", output_text)
+        self.assertIn("Checks finished (9 of 9).", output_text)
         self.assertNotIn("Check the whole book again", output_text, "a new book is not asked about a recheck")
         self.assertEqual((speakers.call_count, directions.call_count), (1, 1))
 

@@ -120,3 +120,13 @@ Each item gives an entry (its listed name|aliases|note), the proposed personal "
 "y" only when the text shows the proposed name is this same character's own name: the character introduces itself by it ("my name is Aurora"), others address or call this character by it, or the narration names the described character with it. Give a short exact quote from paragraph N, containing the name, that shows it.
 "n" when the name belongs to someone or something else, or is a title, rank, role, species or place.
 "?" when these paragraphs do not show it."""
+
+AUTHOR_REVIEW_VERSION = "1"
+
+# Asked only when the EPUB names no author (or only a placeholder such as "Unknown"): ``author_review``.
+AUTHOR_FIND = f"""You find who wrote a book, from the book's own front and back matter.
+{_DATA}
+
+Input: "title" = the book's title; "text" = numbered paragraphs (N|text) from its start and end: title page, copyright page, dedication, "also by" lists, about the author.
+Return {{"a":[[name,N,quote]]}} with each author of this book that the text names, each with a short exact quote from paragraph N that contains the name and shows it is this book's author: a byline ("by NAME"), a copyright notice ("Copyright © 2002 by NAME"), "Other books by NAME", "About the author" followed by the name. Give the name as the book prints it, in normal capitalization. An editor, translator, illustrator, cover artist, publisher or a co-author of only other books listed is not an author of this book.
+Return {{"a":[]}} when these paragraphs do not show who wrote this book. Never guess from the title, the story, or your own knowledge of books."""

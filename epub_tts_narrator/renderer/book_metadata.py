@@ -8,6 +8,19 @@ import tempfile
 PUBLICATION_ASSET_VERSION = 2
 
 
+def bundle_book(bundle):
+    from ..book_details import bundle_book as effective
+    return effective(bundle)
+
+
+def _basis(bundle, field):
+    from ..book_details import basis
+    provenance = bundle.get("provenance")
+    if provenance is None:
+        provenance = bundle.get("manifest", {}).get("provenance")
+    return basis(provenance, field)
+
+
 def accepted_source_epubs(bundle):
     """SHA-256 values of EPUBs that belong to this book.
 
@@ -64,10 +77,27 @@ def check_publication_source(bundle, config):
                                  ffmpeg=config["render"]["ffmpeg"], ffprobe=config["render"]["ffprobe"])
 
 
+def _book_details(book, saved, chosen):
+    """The EPUB's richer metadata with the book's own title and authors kept where they decide.
+
+    A title or authors chosen in ``provenance.book_details`` (a person's or the
+    analysis's) always win; the saved authors are kept when the EPUB names none
+    (a placeholder such as ``Unknown`` names none).
+    """
+    from ..book_details import real_authors
+    book["authors"] = real_authors(book.get("authors"))
+    for field in ("title", "authors"):
+        if field in chosen or (field == "authors" and not book["authors"]):
+            book[field] = deepcopy(saved[field])
+    return book
+
+
 def publication_assets(bundle, config, output_dir, *, notify=lambda message: None):
     """Enrich publication data without changing analyzed text or fingerprints."""
     from .book_artwork import prepare_book_artwork, read_publication_metadata
-    book = deepcopy(bundle["source"]["book"])
+    book = bundle_book(bundle)
+    saved = deepcopy(book)
+    chosen = {field for field in ("title", "authors") if _basis(bundle, field) is not None}
     epub = config["render"].get("epub")
     if not epub:
         check_publication_source(bundle, config)
@@ -87,6 +117,7 @@ def publication_assets(bundle, config, output_dir, *, notify=lambda message: Non
             if extract_cover(epub, temporary, expected) is None:
                 book.update(read_publication_metadata(epub, expected))
                 book["id"] = bundle["source"]["book"]["id"]
+                book = _book_details(book, saved, chosen)
                 notify("Cover requirement explicitly disabled; EPUB has no supported cover.")
                 return book, None, None
     assets = prepare_book_artwork(epub, output_dir, expected,
@@ -94,6 +125,7 @@ def publication_assets(bundle, config, output_dir, *, notify=lambda message: Non
                                  ffprobe=config["render"]["ffprobe"])
     book.update(assets["book"])
     book["id"] = bundle["source"]["book"]["id"]
+    book = _book_details(book, saved, chosen)
     # Artwork is under this fixed subdirectory in the published package.
     for image in ("source_image", "cover"):
         assets["artwork"][image]["path"] = "artwork/" + assets["artwork"][image]["path"]
@@ -103,8 +135,9 @@ def publication_assets(bundle, config, output_dir, *, notify=lambda message: Non
 
 def book_tags(book):
     """Use standard iTunes/M4B tags, retaining richer EPUB data in the manifest."""
+    from ..book_details import real_authors
     title = str(book.get("title", "Audiobook"))
-    author = "; ".join(book.get("authors", []))
+    author = "; ".join(real_authors(book.get("authors", [])))
     tags = {"title": title, "album": title, "artist": author, "album_artist": author,
             "genre": "Audiobook", "media_type": "2"}
     for source, target in (("date", "date"), ("publisher", "publisher"),

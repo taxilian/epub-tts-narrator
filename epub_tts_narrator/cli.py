@@ -524,10 +524,12 @@ def main(argv=None, *, in_shell=False):
 
         if not args.edits:
             # Each check is announced in the log and the status lines ("Check 3 of 10: ...").
-            planned = ["splits", "cast", "names", *(["character-splits"] if args.instructions else []), "genders",
+            from .author_review import needs_author, review_author
+            planned = [*(["author"] if needs_author(original) else []), "splits", "cast", "names", *(["character-splits"] if args.instructions else []), "genders",
                        *(["narrators"] if args.instructions or original["provenance"].get("narrator_review") else []),
                        "groups", "joint-lines", "attribution", "directions"]
-            labels = {"splits": "paragraphs whose speech and narration are divided wrongly",
+            labels = {"author": "who wrote the book (its EPUB names no author)",
+                      "splits": "paragraphs whose speech and narration are divided wrongly",
                       "cast": "cast entries that are one person",
                       "names": "characters listed by a description whose name the book gives",
                       "character-splits": "entries your notes say hold two characters' lines",
@@ -554,6 +556,12 @@ def main(argv=None, *, in_shell=False):
             if after_fresh:
                 progress(f"The analysis is saved. Checking it now, the way rerunning analyze would: {len(planned)} "
                          "checks. A later rerun checks only what changes.")
+            # An EPUB without an author: the book's own pages name it, or a terminal is asked.
+            if "author" in planned:
+                check("author")
+                if free(lambda: review_author(directory, config, provider_client, progress), "author"):
+                    original = _completed_directory(directory)[0]
+                    original_manifest_hash = hashlib.sha256((directory / "manifest.json").read_bytes()).hexdigest()
             # A saved split made before quotation marks were read the current way
             # (mixed curly and straight marks, a paragraph opening inside speech)
             # is read again; the model-free tag repair goes first.
@@ -1035,6 +1043,10 @@ def main(argv=None, *, in_shell=False):
                       f"{state['review_count']} advisory notes. Bundle created.")
                 if args.edits or not config["analysis"]["check_new_book"]:
                     # (Edits are applied already; the saved-book checks would apply them again.)
+                    # An EPUB without an author is still given one from its own pages, or asked.
+                    from .author_review import review_author
+                    _when_free(lambda: review_author(args.output, config, provider_client, progress),
+                               "who wrote the book")
                     return with_name_tags(args.output, config, _speaker_completion_status(document))
                 # The checks a rerun makes run now, once, so one analyze is enough to trust.
                 return with_name_tags(args.output, config, resume_book(args.output, config, after_fresh=True))

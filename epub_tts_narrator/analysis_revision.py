@@ -305,10 +305,11 @@ def revise_directories(revisions, *, directories=None, expected_manifest_hashes=
                        reserved_update_locks=None):
     """Publish a revision, coordinating manual decisions with profile refreshes."""
     if scope not in {"attribution", "source-edit", "voice-profiles", "speaker-decisions", "character-merge",
-                     "narrators", "character-rename", "ensembles", "group-proposals", "character-split"}:
+                     "narrators", "character-rename", "ensembles", "group-proposals", "character-split",
+                     "book-details"}:
         raise ValueError("Revision scope must be attribution, source-edit, voice-profiles, speaker-decisions, "
-                         "character-merge, narrators, character-rename, ensembles, group-proposals, or "
-                         "character-split")
+                         "character-merge, narrators, character-rename, ensembles, group-proposals, "
+                         "character-split, or book-details")
     if speaker_decision_inputs is not None and scope != "speaker-decisions":
         raise ValueError("speaker_decision_inputs are accepted only for speaker-decisions revisions")
     if reserved_update_locks is not None and scope == "speaker-decisions":
@@ -373,10 +374,12 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
     narration roles attached to existing characters, each with its own voice
     the renderer links to the character's recording
     (``narrator_review.validate_narrator_revision``).
+    ``"book-details"`` accepts only a new ``provenance.book_details`` (a
+    title or authors chosen over the EPUB's; ``book_details``).
     ``"character-rename"`` accepts exactly the renames newly recorded in
     ``provenance.character_renames`` (``character_rename.validate_character_rename``)
     with the audition and accent-group name sidecars.
-    Attribution, narrator and rename revisions never refuse live renderers (see
+    Attribution, narrator, rename and book-details revisions never refuse live renderers (see
     ``reserve_revision_scope``); every other scope still probes render
     activity before staging and again immediately before publication.
     """
@@ -450,6 +453,12 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
                 validate_character_rename(document, candidate)
             elif candidate != document:
                 raise ValueError("A character rename may change only the books it names")
+        elif scope == "book-details":
+            if path in revisions:
+                from .book_details import validate_book_details_revision
+                validate_book_details_revision(document, candidate)
+            elif candidate != document:
+                raise ValueError("A title or author change may change only the selected book")
         elif scope == "character-split":
             if path in revisions:
                 from .character_split import validate_character_split
@@ -510,7 +519,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
             _rebind_auditions(path, document, candidate, added_voices, sidecars, names, original_hashes)
         if readiness(candidate)["errors"]:
             raise ValueError("Cannot publish an invalid speaker revision")
-        if (scope not in {"attribution", "narrators", "character-rename"} and path in revisions
+        if (scope not in {"attribution", "narrators", "character-rename", "book-details"} and path in revisions
                 and (reason := _render_active(path))):
             raise BookBusy(f"Rendering is active; finish it before revising analysis: {path} ({reason})")
     locks = []
@@ -604,7 +613,7 @@ def _revise_directories(revisions, *, directories=None, expected_manifest_hashes
         for path in paths:
             if any(_hash(path / name) != checksum for name, checksum in original_hashes[path].items()):
                 raise ValueError(f"Analysis changed before publication: {path}")
-            if (scope not in {"attribution", "narrators", "character-rename"} and path in revisions
+            if (scope not in {"attribution", "narrators", "character-rename", "book-details"} and path in revisions
                     and (reason := _render_active(path))):
                 raise BookBusy(f"Rendering started during revision: {path} ({reason})")
         # A reservation destroyed or replaced after entry cannot write: each
