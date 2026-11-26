@@ -138,7 +138,7 @@ class NarratorChapterTitleRefreshTests(unittest.TestCase):
         self.config.write_text(self.config.read_text()
                                + "[engine]\ncheckpoint = " + json.dumps(str(self.root / "unused-tts"))
                                + "\n[verification]\nmodel = " + json.dumps(str(self.root / "unused-asr"))
-                               + "\n[render]\nrequire_cover = false\nending = false\n"
+                               + "\n[render]\nrequire_cover = false\nending = false\nopening = false\n"
                                + "[casting]\nassign_accents = false\n", encoding="utf-8")
         config = renderer_config(self.config)
         engine = FixtureEngine({})

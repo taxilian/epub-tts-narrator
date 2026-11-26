@@ -127,7 +127,7 @@ It opens full screen: the book's rendered chapters on the left — the same chap
 
 - `e` (or F2) reassigns the passage to existing cast members, the likely speakers first. Space marks two or more for a line said together (simultaneous speech); "Unresolved" clears the assignment.
 - `d` (or F3) edits its delivery direction (at most 240 characters), and `r` (or F4) turns its review flag on or off.
-- `b` changes the book's title or author (several authors separated by `;`). It saves at once and is used by the next `render` or `assemble`: the spoken ending, the M4B's tags and its file name.
+- `b` changes the book's title or author (several authors separated by `;`). It saves at once and is used by the next `render` or `assemble`: the spoken opening and ending, the M4B's tags and its file name.
 - `S` (or Ctrl+S) saves. `q` asks before throwing unsaved edits away.
 
 Saving publishes the same receipt-bound attribution revisions as `verify-attribution --apply`, with backups and series descendant rebinding; the published cast never changes and no model calls are made. Saving is never refused because a render is running — not even a render of this same book or a series descendant: the active render finishes the analysis snapshot it loaded, a render starting during the save retries after the save's brief publication window, and the next render re-renders the chapters whose saved attribution changed. `--plain` opens the older, simpler curses screen instead (also used when Textual is missing); it does the same things with the keys it lists at the bottom.

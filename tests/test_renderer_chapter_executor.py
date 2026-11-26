@@ -30,7 +30,7 @@ class ChapterExecutorTests(unittest.TestCase):
         self.root = Path(temporary.name).resolve()
         self.work = self.root / "work"
         self.config = deepcopy(DEFAULTS)
-        self.config["render"].update(ffmpeg=FFMPEG, ffprobe=FFPROBE, max_attempts=1,
+        self.config["render"].update(ffmpeg=FFMPEG, ffprobe=FFPROBE, max_attempts=1, opening=False,
                                      normalize_loudness=False, paragraph_synthesis=True)
         self.config["quality"] = validate_policy({})
         self.engine = ParagraphFixtureEngine()

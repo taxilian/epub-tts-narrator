@@ -52,7 +52,7 @@ class IncrementalRendererTests(unittest.TestCase):
         self.config["voices"].update(directory=str(self.root / "voices"), series_id="incremental-fixture")
         self.config["render"].update(
             work_dir=str(self.work), output_dir=str(self.output),
-            max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE, require_cover=False, ending=False)
+            max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE, require_cover=False, ending=False, opening=False)
         self.config["quality"] = validate_policy({})
         self.engine = FixtureEngine({})
         self.verifier = FixtureVerifier(self.engine.fixture_transcripts)

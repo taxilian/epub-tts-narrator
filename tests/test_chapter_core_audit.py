@@ -29,7 +29,8 @@ class ChapterProtocolAuditTests(unittest.TestCase):
         for row in bundle["chapters"][0]["rows"]:
             if row["block_id"] == "b000003":
                 row["role_id"] = "mara_dialogue"
-        plan = make_render_plan(bundle, config)
+        # A chapter service's plan: no spoken opening or ending (they are not in the bundle).
+        plan = make_render_plan(bundle, config, ending=False)
         self.spec = {"version": 1, "book": bundle["source"]["book"],
                      "source_fingerprint": bundle["manifest"]["source_fingerprint"],
                      "renderer_fingerprint": "f" * 64, "chapter": plan["chapters"][0],

@@ -214,6 +214,12 @@ ending = true
 ending_title = "End Credits"
 ending_text = "This has been {title} by {authors}. Thank you for listening!"
 ending_text_without_authors = "This has been {title}. Thank you for listening!"
+# The same before the first chapter: "You are listening to <title>, by <authors>.",
+# the M4B's first chapter. Set false to leave it out.
+opening = true
+opening_title = "Opening Credits"
+opening_text = "You are listening to {title}, by {authors}."
+opening_text_without_authors = "You are listening to {title}."
 allow_review = false
 # Prefer --chapters 3 or --chapters 3-5,7 for per-book selections.
 chapter_numbers = [] # all manifest script entries

@@ -1872,7 +1872,8 @@ The completed output directory (`<book-directory>/audiobook/` by default) contai
 | `chapters/chapter-0001.m4a` or `.mp3`, etc. | Chapter audio using original manifest numbers, including when a subset is selected; empty entries are marked skipped. |
 | `<book-title>.m4b` | AAC audiobook with chapter titles and timing, using a filesystem-safe form of the actual book title. |
 | `chapter-links/chapter-01.m4a` etc. | Convenience symlinks to each finished chapter's audio inside `chapters/`; renderer-owned and ignored during replacement validation. Entries are always symlinks. |
-| `chapters/spoken-ending.m4a`, `chapter-links/spoken-ending.m4a` | The spoken ending, the M4B's last chapter (see [The spoken ending](#the-spoken-ending)). |
+| `chapters/spoken-opening.m4a`, `chapter-links/spoken-opening.m4a` | The spoken opening, the M4B's first chapter (see [The spoken opening and ending](#the-spoken-opening-and-ending)). |
+| `chapters/spoken-ending.m4a`, `chapter-links/spoken-ending.m4a` | The spoken ending, the M4B's last chapter (see [The spoken opening and ending](#the-spoken-opening-and-ending)). |
 | `artwork/cover.jpg` | Square 1600×1600 cover embedded in the M4B. |
 | `artwork/original-cover.jpg` or `.png` | Original declared EPUB cover, retained byte-for-byte. |
 | `sync.json` | Exact PCM frame ranges linking audio chunks to source text. |
@@ -1895,15 +1896,15 @@ Fresh books use a sanitized form of the actual title, for example `The Last Lant
 
 An existing per-book `audiobook.path` is authoritative across render, assemble, metadata refresh, publication, result paths, and checksums, including a custom name or an explicitly recorded `book.m4b`. Changing the book title does not silently rename that output. An older manifest without `audiobook.path` can use an intact existing `book.m4b`; that compatibility fallback is not a fresh-book default. No existing book is renamed, deleted, re-encoded, or regenerated merely because its name is legacy.
 
-### The spoken ending
+### The spoken opening and ending
 
-Every whole-book render ends with a short narrator line, by default "This has been *title* by *authors*. Thank you for listening!", published as the M4B's last chapter, **End Credits**. It is planned when the render starts (`renderer/spoken_ending.py`), never written into the analysis: the source text and every block, segment, chunk and chapter ID stay as they were, so no earlier chapter, take or checkpoint changes.
+Every whole-book render opens with a short narrator line, by default "You are listening to *title*, by *authors*.", published as the M4B's first chapter, **Opening Credits**, and ends with one, by default "This has been *title* by *authors*. Thank you for listening!", published as its last chapter, **End Credits**. Both are planned when the render starts (`renderer/spoken_ending.py`), never written into the analysis: the source text and every block, segment, chunk and chapter ID stay as they were, so no chapter, take or checkpoint changes. The rules below apply to each; the ending's are described, and the opening differs only where said.
 
 - **Words.** `{title}` and `{authors}` come from the bundle's `source.book` (the analyzed EPUB's metadata), with a title or author chosen later laid over it (`provenance.book_details`: one a person set in `review-ui` with `b`, or the author `analyze` found in the book's own pages when the EPUB names none; `book_details.bundle_book`). A trailing series part in parentheses or brackets is read as an aside: `Pawn of Prophecy (The Belgariad Book 1)` becomes "This has been Pawn of Prophecy, The Belgariad Book 1, by David Eddings." Several authors are joined as "A and B" or "A, B, and C"; blank and repeated names are dropped, and so is a conversion tool's placeholder such as Calibre's `Unknown` (a book saved with `["Unknown"]` reads as having no author). A book without authors uses `ending_text_without_authors`; a book without a title gets no ending. A changed title or author rewords the ending, so the next `render` or `assemble` renders that one line again.
 - **Voice.** The cast's main narration role (`narrator_main`, else the first narration role) with its voice and accent cue, as plain narration with no direction. A cast without a narrator gets no ending.
 - **Verification.** It is one ordinary narration passage: rendered with chapter continuity, checked by the same fail-closed acceptance gate, recovery and retries as every take, and saved as chapter checkpoint `render-work/completed-chapters/spoken-ending.json`. A failed ending fails like a failed chapter (no M4B; retry it in the run shell or rerun).
-- **Chapter list.** Its own final chapter after the last source chapter, numbered one past the book's last chapter (its track tag reads N+1 of N+1; other chapters keep theirs), files `spoken-ending.flac`/`.m4a`, `chapters/spoken-ending.m4a` in the output, and one `sync.json` entry whose segment and block ID are `spoken-ending`.
-- **Books already rendered.** The next `render` renders only the ending and reuses every finished chapter. `assemble` does the same: when the ending is missing or reworded, it loads the TTS engine and verifier (the same worker pool or local engine `render` uses) for that one line only; every other chapter is restored from its checkpoint without synthesis. A retitled ending, or one renumbered because the book gained chapters, is rebuilt from its verified take without models.
+- **Chapter list.** Its own final chapter after the last source chapter, numbered one past the book's last chapter (its track tag reads N+1 of N+1; other chapters keep theirs), files `spoken-ending.flac`/`.m4a`, `chapters/spoken-ending.m4a` in the output, and one `sync.json` entry whose segment and block ID are `spoken-ending`. The opening plays first but is numbered two past the last source chapter, so no source chapter and no saved ending is renumbered (chapter numbers identify chapters; play order is the M4B's order): checkpoint `spoken-opening.json`, track tag 1 of N, files `spoken-opening.*`, the first `sync.json` entry `spoken-opening`.
+- **Books already rendered.** The next `render` renders only the opening and ending and reuses every finished chapter. `assemble` does the same: when either is missing or reworded, it loads the TTS engine and verifier (the same worker pool or local engine `render` uses, once for both) for those lines only; every other chapter is restored from its checkpoint without synthesis. A retitled ending, or one renumbered because the book gained chapters, is rebuilt from its verified take without models.
 - **Not added** to a partial render (`--chapters`), a book whose chapters are all ignored, or chapters from a remote chapter service (`[remote_chapters]` or `render --remote`), which says so: the service renders bundle chapters only.
 
 ```toml
@@ -1912,6 +1913,10 @@ ending = true                    # false leaves it out
 ending_title = "End Credits"     # the chapter's title in the M4B
 ending_text = "This has been {title} by {authors}. Thank you for listening!"
 ending_text_without_authors = "This has been {title}. Thank you for listening!"
+opening = true                   # false leaves the opening out (the ending has its own setting)
+opening_title = "Opening Credits"
+opening_text = "You are listening to {title}, by {authors}."
+opening_text_without_authors = "You are listening to {title}."
 ```
 
 The texts may use only `{title}` and `{authors}` (`{title}` without authors), up to 400 characters, without brackets. Rewording renders the new line on the next `render` or `assemble`; the earlier take stays in the speech cache until `prune`.

@@ -148,10 +148,11 @@ def renderer_config(root=None, *, series_id=None, checkpoint="unused-tts", asr_m
                     max_attempts=2, ffmpeg=FFMPEG, ffprobe=FFPROBE, **render):
     config = deepcopy(DEFAULTS)
     # Synthetic renderer fixtures have no publication EPUB/artwork, and their
-    # chapter and take counts exclude the spoken ending
-    # (test_renderer_spoken_ending.py covers it).
+    # chapter and take counts exclude the spoken opening and ending
+    # (test_renderer_spoken_ending.py covers them).
     render.setdefault("require_cover", False)
     render.setdefault("ending", False)
+    render.setdefault("opening", False)
     if root is not None:
         config["engine"]["checkpoint"] = str(root / checkpoint)
         config["verification"]["model"] = str(root / asr_model)

@@ -31,6 +31,7 @@ class CacheReportTests(unittest.TestCase):
         self.bundle["chapters"][0]["rows"] = self.bundle["chapters"][0]["rows"][:1]
         self.config = resolve_book_config(self.bundle, deepcopy(DEFAULTS))
         self.config["render"]["ending"] = False
+        self.config["render"]["opening"] = False
         self.engine = {"engine": "drama3_mlx", "model": "fishaudio/drama-3",
                        "checkpoint_files_sha256": {"weights": "original"},
                        "installed_version": "0.1.1", "runtime": "original"}

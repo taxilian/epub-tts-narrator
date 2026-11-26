@@ -1,4 +1,4 @@
-"""Every whole-book render ends with a short narrator line, added without touching earlier chapters."""
+"""Every whole-book render opens and ends with a short narrator line, added without touching any chapter."""
 
 from copy import deepcopy
 from pathlib import Path
@@ -109,8 +109,9 @@ class EndingBookFixture:
         self.config["engine"]["checkpoint"] = str(self.root / "unused-tts")
         self.config["verification"]["model"] = str(self.root / "unused-asr")
         self.config["voices"].update(directory=str(self.root / "voices"), series_id="ending-fixture")
+        # The ending tests leave the opening out; OpeningTests turn it on.
         self.config["render"].update(work_dir=str(self.work), output_dir=str(self.output), max_attempts=2,
-                                     ffmpeg=FFMPEG, ffprobe=FFPROBE, require_cover=False)
+                                     ffmpeg=FFMPEG, ffprobe=FFPROBE, require_cover=False, opening=False)
         self.config["quality"] = validate_policy({})
         self.engine = FixtureEngine({})
         self.verifier = FixtureVerifier(self.engine.fixture_transcripts)
@@ -264,6 +265,123 @@ class EndingRenderTests(EndingBookFixture, unittest.TestCase):
         self.assertEqual([failure["number"] for failure in raised.exception.failed_chapters], [3])
         self.assertFalse((self.output / "audio-manifest.json").exists())
         self.assertTrue(self.checkpoint("chapter-0002").exists(), "the book's chapters still finished")
+
+
+class OpeningTextTests(unittest.TestCase):
+    def text(self, title, authors, **render):
+        return spoken_ending.opening_text({"title": title, "authors": authors},
+                                          {**spoken_ending.SETTINGS, **render})
+
+    def test_the_opening_names_the_title_and_authors(self):
+        self.assertEqual(self.text("The Talisman", ["Stephen King"]),
+                         "You are listening to The Talisman, by Stephen King.")
+        self.assertEqual(self.text("Pawn of Prophecy (The Belgariad Book 1)", ["David Eddings", "Leigh Eddings"]),
+                         "You are listening to Pawn of Prophecy, The Belgariad Book 1, by David Eddings and "
+                         "Leigh Eddings.")
+
+    def test_a_book_without_a_known_author_is_named_by_its_title_alone(self):
+        for authors in ([], None, ["Unknown"]):
+            with self.subTest(authors=authors):
+                self.assertEqual(self.text("Pawn of Prophecy (The Belgariad Book 1)", authors),
+                                 "You are listening to Pawn of Prophecy, The Belgariad Book 1.")
+        self.assertIsNone(self.text(" ", ["Ann Lee"]))
+
+    def test_invalid_opening_settings_name_the_setting(self):
+        cases = [
+            ({"opening": 1}, "render.opening must be boolean"),
+            ({"opening_text": "Now {narrator} reads."}, "render.opening_text may use only"),
+            ({"opening_text_without_authors": "By {authors}."}, "render.opening_text_without_authors may use only"),
+            ({"opening_title": ""}, "render.opening_title must be"),
+        ]
+        for render, message in cases:
+            with self.subTest(render=render), self.assertRaisesRegex(ValueError, message):
+                spoken_ending.validate_settings({**spoken_ending.SETTINGS, **render})
+
+    def test_configuration_turns_it_on_by_default(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "audiobook-render.toml"
+            path.write_text("", encoding="utf-8")
+            config = load_config(path, require_verifier=False, require_engine=False)
+            self.assertIs(config["render"]["opening"], True)
+            self.assertEqual(config["render"]["opening_title"], "Opening Credits")
+
+
+OPENING = "You are listening to Night Harbor, Harbor Tales Book 2, by Ann Lee and Bo Park."
+
+
+class OpeningPlanTests(EndingBookFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.config["render"]["opening"] = True
+
+    def test_a_whole_book_plan_opens_with_the_narrator_line_and_keeps_every_number_and_identity(self):
+        plan = make_render_plan(self.bundle, self.config)
+        source = make_plan(self.bundle, self.config)
+        self.assertEqual([chapter["id"] for chapter in plan["chapters"]],
+                         ["spoken-opening", *[chapter["id"] for chapter in source["chapters"]], "spoken-ending"])
+        self.assertEqual(plan["chapters"][1:-1], make_render_plan(self.bundle, self.config, ending=False)["chapters"])
+        opening, ending = plan["chapters"][0], plan["chapters"][-1]
+        # Every source chapter and the ending keep their numbers; the opening takes the next one.
+        self.assertEqual((opening["number"], opening["title"], ending["number"]), (4, "Opening Credits", 3))
+        [chunk] = opening["chunks"]
+        self.assertEqual(chunk["spoken_text"], OPENING)
+        narrator = next(role for role in self.bundle["cast"]["roles"] if role["kind"] == "narration")
+        self.assertEqual((chunk["segment"]["role_id"], chunk["segment"]["voice_id"]),
+                         (narrator["id"], narrator["voice_id"]))
+        self.assertNotEqual(chunk["chunk_id"], ending["chunks"][0]["chunk_id"])
+
+    def test_no_opening_when_disabled_for_a_partial_book_or_a_remote_chapter_service(self):
+        disabled = deepcopy(self.config)
+        disabled["render"]["opening"] = False
+        partial = deepcopy(self.config)
+        partial["render"]["chapter_numbers"] = [1]
+        for name, config, options in (("disabled", disabled, {}), ("partial", partial, {}),
+                                      ("remote", self.config, {"ending": False})):
+            with self.subTest(name):
+                plan = make_render_plan(self.bundle, config, **options)
+                self.assertNotIn("spoken-opening", [chapter["id"] for chapter in plan["chapters"]])
+        # Turning the opening off leaves the ending as it was.
+        self.assertEqual(make_render_plan(self.bundle, disabled)["chapters"][-1],
+                         make_render_plan(self.bundle, self.config)["chapters"][-1])
+
+
+@unittest.skipUnless(FFMPEG and FFPROBE, "FFmpeg and ffprobe are required")
+class OpeningRenderTests(EndingBookFixture, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self.config["render"]["opening"] = True
+
+    def test_render_publishes_the_opening_as_the_first_chapter(self):
+        result = self.run_render()
+
+        self.assertIn(OPENING, self.spoken())
+        self.assertEqual(self.m4b_chapters(result), ["Opening Credits", "CHAPTER ONE", "CHAPTER TWO", "End Credits"])
+        first = result["audio"]["chapters"][0]
+        self.assertEqual((first["id"], first["number"], first["ordinal"], first["path"]),
+                         ("spoken-opening", 4, 1, "chapters/spoken-opening.m4a"))
+        [accepted] = read_json(self.checkpoint("spoken-opening"))["acceptance"]
+        self.assertIs(accepted["report"]["passed"], True)
+        self.assertEqual(read_json(self.output / "sync.json")["segments"][0]["spoken_text"], OPENING)
+
+    def test_assemble_adds_a_missing_opening_and_ending_loading_the_engine_once(self):
+        self.config["render"].update(opening=False, ending=False)
+        self.run_render()
+        saved = {number: self.checkpoint(f"chapter-{number:04d}").read_bytes() for number in (1, 2)}
+        spoken = len(self.engine.speech_calls)
+        self.config["render"].update(opening=True, ending=True)
+
+        with self.assertRaisesRegex(RenderBlocked, "spoken opening has not been rendered yet. Run render"):
+            self.package(components=False)
+        result = self.package()
+
+        self.assertEqual(self.loaded, 1)
+        self.assertEqual(self.spoken()[spoken:], [OPENING, LINE])
+        self.assertEqual({number: self.checkpoint(f"chapter-{number:04d}").read_bytes() for number in (1, 2)},
+                         saved)
+        self.assertEqual(self.m4b_chapters(result), ["Opening Credits", "CHAPTER ONE", "CHAPTER TWO", "End Credits"])
+        with patch("epub_tts_narrator.renderer.workflow.verified_take", side_effect=AssertionError("No TTS/ASR")):
+            again = self.package(components=False)
+        self.assertEqual(self.m4b_chapters(again)[0], "Opening Credits")
 
 
 if __name__ == "__main__":

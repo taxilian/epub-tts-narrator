@@ -84,6 +84,11 @@ RENDER_CONTRACT = {
                     "kind": "phrase"},
     "ending_text_without_authors": {"default": "This has been {title}. Thank you for listening!",
                                     "kind": "phrase"},
+    # The spoken opening before the first chapter, alike.
+    "opening": {"default": True, "kind": "bool"},
+    "opening_title": {"default": "Opening Credits", "kind": "phrase"},
+    "opening_text": {"default": "You are listening to {title}, by {authors}.", "kind": "phrase"},
+    "opening_text_without_authors": {"default": "You are listening to {title}.", "kind": "phrase"},
 }
 
 

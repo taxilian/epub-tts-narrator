@@ -1033,8 +1033,9 @@ def _recover_failed_paragraph(bundle, config, plan, voices, capabilities, failur
 def _note_no_ending(config, notify):
     from .spoken_ending import enabled
     if enabled(config):
-        notify("The spoken ending is not added to books from a remote chapter service: it speaks a line "
-               "the bundle does not contain. Render or assemble with local or worker-pool TTS to add it.")
+        notify("The spoken opening and ending are not added to books from a remote chapter service: they "
+               "speak lines the bundle does not contain. Render or assemble with local or worker-pool TTS "
+               "to add them.")
 
 
 def render_remote(bundle, config, *, notify=print, chapters_only=False):
@@ -1056,9 +1057,9 @@ def render_remote(bundle, config, *, notify=print, chapters_only=False):
 
 
 def _render_remote_locked(bundle, config, plan, store, *, notify, chapters_only, validated=False):
-    from .spoken_ending import is_ending
-    # The service renders bundle chapters only; a local plan's ending never goes to it.
-    plan = dict(plan, chapters=[chapter for chapter in plan["chapters"] if not is_ending(chapter)])
+    from .spoken_ending import is_credits
+    # The service renders bundle chapters only; a local plan's opening and ending never go to it.
+    plan = dict(plan, chapters=[chapter for chapter in plan["chapters"] if not is_credits(chapter)])
     if config["render"]["chapter_format"] != "m4a":
         raise ChapterClientError("Remote chapter jobs currently produce M4A; use --chapter-format m4a")
     voices = {voice_id: store.load(voice_id) for voice_id in plan["voice_ids"]}

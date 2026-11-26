@@ -28,7 +28,7 @@ from test_renderer_workflow import EXAMPLE, FFMPEG, FFPROBE, FixtureVerifier, pc
 def settings(concurrency=1):
     config = deepcopy(DEFAULTS)
     config["quality"] = validate_policy({})
-    config["render"].update(ffmpeg=FFMPEG, ffprobe=FFPROBE, normalize_loudness=False, max_attempts=1)
+    config["render"].update(ffmpeg=FFMPEG, ffprobe=FFPROBE, normalize_loudness=False, max_attempts=1, opening=False)
     config["render_pool"]["workers"] = [{"name": "shared-gpu", "type": "fish_http",
         "url": "http://localhost:8081/v1/tts", "api_key": "", "model": "drama-3",
         "timeout_seconds": 30, "concurrency": concurrency, "multi_speaker": True}]

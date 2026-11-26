@@ -1,11 +1,17 @@
-"""The spoken ending: one narrator line after the last chapter.
+"""The spoken opening and ending: one narrator line before the first chapter and one after the last.
 
-"This has been <title> by <authors>. Thank you for listening!" is planned as
-one extra chapter (``spoken-ending``) at the end of a whole-book render plan,
-built only from the bundle's ``source.book`` metadata and the narrator role.
-It never changes the analysis, its source text, or any block, segment, chunk
-or chapter ID, so every existing chapter keeps its checkpoint and audio; the
-ending is rendered and verified like any other narration take.
+"You are listening to <title>, by <authors>." is planned as one extra chapter
+(``spoken-opening``, "Opening Credits") at the start of a whole-book render
+plan, and "This has been <title> by <authors>. Thank you for listening!" as
+one (``spoken-ending``, "End Credits") at its end. Both are built only from
+the book's title and authors (``book_details.bundle_book``) and the narrator
+role. They never change the analysis, its source text, or any block,
+segment, chunk or chapter ID, so every existing chapter keeps its checkpoint
+and audio; each is rendered and verified like any other narration take.
+
+Chapter numbers are positive and distinct, and every source chapter keeps its
+own, so the ending is number last+1 and the opening last+2 although it plays
+first: play order is the plan's order, never the number.
 """
 
 from __future__ import annotations
@@ -17,7 +23,8 @@ from .common import digest
 
 
 ENDING_ID = "spoken-ending"
-# Changing how the line is built or bound changes its chunk identity.
+OPENING_ID = "spoken-opening"
+# Changing how a line is built or bound changes its chunk identity.
 VERSION = 1
 FIELDS = frozenset({"title", "authors"})
 MAX_TEXT_CHARS = 400
@@ -27,7 +34,12 @@ SETTINGS = {
     "ending_title": "End Credits",
     "ending_text": "This has been {title} by {authors}. Thank you for listening!",
     "ending_text_without_authors": "This has been {title}. Thank you for listening!",
+    "opening": True,
+    "opening_title": "Opening Credits",
+    "opening_text": "You are listening to {title}, by {authors}.",
+    "opening_text_without_authors": "You are listening to {title}.",
 }
+KINDS = ("opening", "ending")
 
 
 def _fields(template):
@@ -39,14 +51,19 @@ def _fields(template):
 
 
 def validate_settings(render):
-    """Check the ``[render]`` ending settings; errors name the setting."""
-    if type(render.get("ending", True)) is not bool:
-        raise ValueError("render.ending must be boolean")
-    title = render.get("ending_title", SETTINGS["ending_title"])
+    """Check the ``[render]`` opening and ending settings; errors name the setting."""
+    for kind in KINDS:
+        _validate_kind(render, kind)
+
+
+def _validate_kind(render, kind):
+    if type(render.get(kind, True)) is not bool:
+        raise ValueError(f"render.{kind} must be boolean")
+    title = render.get(f"{kind}_title", SETTINGS[f"{kind}_title"])
     if (not isinstance(title, str) or not title.strip() or len(title) > MAX_TITLE_CHARS
             or any(ord(char) < 32 for char in title)):
-        raise ValueError(f"render.ending_title must be a nonempty single line of at most {MAX_TITLE_CHARS} characters")
-    for key, allowed in (("ending_text", FIELDS), ("ending_text_without_authors", FIELDS - {"authors"})):
+        raise ValueError(f"render.{kind}_title must be a nonempty single line of at most {MAX_TITLE_CHARS} characters")
+    for key, allowed in ((f"{kind}_text", FIELDS), (f"{kind}_text_without_authors", FIELDS - {"authors"})):
         template = render.get(key, SETTINGS[key])
         if not isinstance(template, str) or not template.strip() or len(template) > MAX_TEXT_CHARS:
             raise ValueError(f"render.{key} must be nonempty text of at most {MAX_TEXT_CHARS} characters")
@@ -95,13 +112,22 @@ def spoken_authors(authors):
 
 def ending_text(book, render):
     """The ending line for ``book`` (``source.book``), or None when the book has no title."""
+    return credit_text(book, render, "ending")
+
+
+def opening_text(book, render):
+    """The opening line for ``book`` (``source.book``), or None when the book has no title."""
+    return credit_text(book, render, "opening")
+
+
+def credit_text(book, render, kind):
     title = spoken_title(book.get("title", "")) if isinstance(book.get("title"), str) else ""
     if not title.strip(" ,"):
         return None
     authors = spoken_authors(book.get("authors"))
-    template = render.get("ending_text", SETTINGS["ending_text"])
+    template = render.get(f"{kind}_text", SETTINGS[f"{kind}_text"])
     if not authors and "authors" in {field for field, _, _ in _fields(template)}:
-        template = render.get("ending_text_without_authors", SETTINGS["ending_text_without_authors"])
+        template = render.get(f"{kind}_text_without_authors", SETTINGS[f"{kind}_text_without_authors"])
     text = template.format(title=title, authors=authors)
     # A title read as an aside ends in a comma; drop it before other punctuation.
     text = re.sub(r",\s*([,.!?;:])", r"\1", text)
@@ -119,9 +145,23 @@ def is_ending(chapter):
     return isinstance(chapter, dict) and chapter.get("ending") is True
 
 
-def enabled(config):
-    """The ending is on unless ``[render] ending = false``."""
-    return config.get("render", {}).get("ending", SETTINGS["ending"]) is True
+def is_opening(chapter):
+    return isinstance(chapter, dict) and chapter.get("opening") is True
+
+
+def is_credits(chapter):
+    """The spoken opening or ending: a plan chapter that is not in the bundle."""
+    return is_opening(chapter) or is_ending(chapter)
+
+
+def label(chapter):
+    return "the spoken opening" if is_opening(chapter) else "the spoken ending"
+
+
+def enabled(config, kind=None):
+    """The opening and ending are each on unless ``[render] opening``/``ending = false``; no ``kind``: either."""
+    render = config.get("render", {})
+    return any(render.get(name, SETTINGS[name]) is True for name in ((kind,) if kind else KINDS))
 
 
 def ending_chapter(bundle, plan, render):
@@ -131,16 +171,27 @@ def ending_chapter(bundle, plan, render):
     whose chapters are all ignored, or a book whose narrator voice speaks no
     line (or that has no narrator) has none.
     """
-    if plan["partial_book"] or not any(chapter["chunks"] for chapter in plan["chapters"]):
+    return _credit_chapter(bundle, plan, render, "ending")
+
+
+def opening_chapter(bundle, plan, render):
+    """The plan chapter that speaks the opening, or None (as for ``ending_chapter``)."""
+    return _credit_chapter(bundle, plan, render, "opening")
+
+
+def _credit_chapter(bundle, plan, render, kind):
+    if plan["partial_book"] or not any(chapter["chunks"] for chapter in plan["chapters"]
+                                       if not is_credits(chapter)):
         return None
     role = narrator_role(bundle["cast"])
     from ..book_details import bundle_book
-    text = ending_text(bundle_book(bundle), render)
-    # Only a narrator voice the book already uses: the ending never designs a voice.
+    text = credit_text(bundle_book(bundle), render, kind)
+    # Only a narrator voice the book already uses: the credits never design a voice.
     if role is None or text is None or role["voice_id"] not in plan["voice_ids"]:
         return None
     from .bundle import split_text
-    row = {"id": ENDING_ID, "block_id": ENDING_ID, "chapter_id": ENDING_ID,
+    chapter_id = OPENING_ID if kind == "opening" else ENDING_ID
+    row = {"id": chapter_id, "block_id": chapter_id, "chapter_id": chapter_id,
            "start": 0, "end": len(text), "text": text, "kind": "narration",
            "role_id": role["id"], "voice_id": role["voice_id"],
            "delivery": {"direction": "", "evidence": []}, "break_after": "paragraph"}
@@ -148,9 +199,12 @@ def ending_chapter(bundle, plan, render):
     for start, end in split_text(text, render.get("max_chunk_chars", 320)):
         chunk = {"segment": row, "spoken_text": text[start:end], "spoken_start": start, "spoken_end": end,
                  "source_ranges": [{"start": start, "end": end}], "silent_control": False,
-                 "chunk_id": digest({"spoken_ending": VERSION, "role_id": role["id"],
+                 "chunk_id": digest({f"spoken_{kind}": VERSION, "role_id": role["id"],
                                      "voice_id": role["voice_id"], "start": start, "end": end,
                                      "spoken_text": text[start:end]})[:32]}
         chunks.append(chunk)
-    return {"number": len(bundle["chapters"]) + 1, "id": ENDING_ID, "title": _plain(render.get("ending_title", SETTINGS["ending_title"])),
-            "script_path": None, "audio_stem": ENDING_ID, "chunks": chunks, "ending": True}
+    # The ending keeps the number it always had; the opening takes the next.
+    number = len(bundle["chapters"]) + (2 if kind == "opening" else 1)
+    return {"number": number, "id": chapter_id,
+            "title": _plain(render.get(f"{kind}_title", SETTINGS[f"{kind}_title"])),
+            "script_path": None, "audio_stem": chapter_id, "chunks": chunks, kind: True}

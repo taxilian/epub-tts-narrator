@@ -38,6 +38,7 @@ class RendererSpeechTraitsFlowTests(unittest.TestCase):
             export_bundle(prepare_document(document), directory)
             bundle = load_bundle(directory)
             config = resolve_book_config(bundle, deepcopy(DEFAULTS))
+            config["render"]["opening"] = False
             initial = make_render_plan(bundle, config)
             paragraph = next(chunk for chunk in initial["chapters"][0]["chunks"]
                              if "paragraph_turns" in chunk)
