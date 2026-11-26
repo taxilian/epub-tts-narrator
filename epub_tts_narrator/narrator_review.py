@@ -29,6 +29,7 @@ later books follow). Answers are cached in the book's request cache.
 
 from __future__ import annotations
 
+from .analysis_revision import BookBusy
 from copy import deepcopy
 import hashlib
 import json
@@ -427,6 +428,8 @@ def review_narrators(directory, config, client_factory, progress, *, instruction
     try:
         result = revise_directories({directory: revised}, directories=directories, expected_manifest_hashes=hashes,
                                     scope="narrators", progress=print)
+    except BookBusy:
+        raise
     except (OSError, ValueError) as error:
         print(f"Narrator check: the narrators were not saved: {error} Rerun analyze to try again; its answers are cached.")
         return False

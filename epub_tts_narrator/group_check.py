@@ -17,6 +17,7 @@ book's request cache.
 
 from __future__ import annotations
 
+from .analysis_revision import BookBusy
 import hashlib
 import json
 from pathlib import Path
@@ -149,6 +150,8 @@ def review_group_tags(directory, config, client_factory, progress, *, recheck_ca
     try:
         revise_directories({directory: revised}, directories=directories, expected_manifest_hashes=hashes,
                            scope="group-proposals", progress=progress)
+    except BookBusy:
+        raise
     except (OSError, ValueError) as error:
         print(f"Group check: the proposals were not saved: {error} Rerun analyze to try again; its answers are cached.")
         return False

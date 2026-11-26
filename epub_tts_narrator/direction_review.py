@@ -17,6 +17,7 @@ Answers are cached in the book's request cache. Publication goes through
 
 from __future__ import annotations
 
+from .analysis_revision import BookBusy
 from contextlib import ExitStack
 from copy import deepcopy
 import hashlib
@@ -192,6 +193,8 @@ def review_book_directions(directory, config, client_factory, progress, *, reche
             result = revise_directories({directory: revised}, directories=directories,
                                         expected_manifest_hashes=hashes, scope="attribution", progress=print,
                                         reserved_update_locks=reserved or None)
+        except BookBusy:
+            raise
         except (OSError, ValueError) as exc:
             raise ValueError(f"Direction review publication did not succeed: {exc} Its answers are cached; rerun "
                              "analyze to publish them without new requests.") from exc

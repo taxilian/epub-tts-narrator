@@ -22,6 +22,7 @@ renamed. A rename changes only words: nothing is rendered again.
 
 from __future__ import annotations
 
+from .analysis_revision import BookBusy
 import re
 import sys
 from pathlib import Path
@@ -245,6 +246,8 @@ def review_names(directory, config, client_factory, progress, *, recheck_cache=N
         try:
             plan = plan_rename(directory, character_id, name, basis="analysis")
             apply_rename(plan, progress=print)
+        except BookBusy:
+            raise
         except (ValueError, OSError) as error:
             print(f"Names: {old} is called {name} in the book (“{quote}”), but it was not renamed: {error}")
             continue

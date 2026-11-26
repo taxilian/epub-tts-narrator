@@ -39,6 +39,7 @@ cache, so a rerun with an unchanged cast asks nothing new.
 
 from __future__ import annotations
 
+from .analysis_revision import BookBusy
 import json
 from pathlib import Path
 import re
@@ -468,6 +469,8 @@ def review_cast(directory, config, config_path, client_factory, progress, *, int
                 continue
         try:
             apply_merge(plan, progress=print)
+        except BookBusy:
+            raise
         except (ValueError, OSError) as error:
             print(f"Cast review: {plan.absorbed['name']} and {plan.kept['name']} were left as two entries: {error}")
             continue

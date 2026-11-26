@@ -116,6 +116,27 @@ class GenderReviewTests(AttributionCLIHarness):
         self.assertFalse(changed)
         self.assertEqual((self.book / "manifest.json").read_bytes(), manifest)
 
+    def test_a_fix_refused_while_the_book_is_in_use_is_saved_on_retry_without_asking_again(self):
+        from epub_tts_narrator.analysis_revision import BookBusy, revise_directories
+        from epub_tts_narrator.busy_retry import run_when_free
+        self.make_book(risk=False, prepare=male_mara)
+        host, calls = ScreenHost("f"), []
+
+        def busy_once(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise BookBusy("Rendering is active")
+            return revise_directories(*args, **kwargs)
+        with (screen_host(host), patch("epub_tts_narrator.analysis_revision.revise_directories", busy_once)):
+            changed = run_when_free(lambda: self.review(GenderClient({"Mara": "Female"}), voiced={"Mara"},
+                                                        interactive=True)[0],
+                                    "each character's gender", ask=lambda prompt: "r", output=lambda message: None,
+                                    is_interactive=lambda: True)
+        self.assertTrue(changed)
+        self.assertEqual(len(calls), 2, "saved on the retry")
+        self.assertEqual(len(host.screens), 1, "the person was asked once")
+        self.assertTrue(self.description("Mara").startswith("Female"))
+
     def test_a_persons_notes_win_over_the_text(self):
         self.make_book(risk=False, prepare=male_mara)
         changed, output = self.review(GenderClient({"Mara": "Male"}), notes={"Mara": {"gender": "woman"}})

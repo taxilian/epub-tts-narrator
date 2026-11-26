@@ -29,6 +29,7 @@ checked again once under new ones: the record keeps the notes' digest.
 
 from __future__ import annotations
 
+from .analysis_revision import BookBusy
 from contextlib import ExitStack
 import hashlib
 import json
@@ -204,6 +205,8 @@ def recheck_attributions(directory, config, client_factory, progress, *, notes=N
             result = revise_directories({directory: audited}, directories=directories,
                                         expected_manifest_hashes=hashes, scope="attribution", progress=print,
                                         reserved_update_locks=reserved or None)
+        except BookBusy:
+            raise
         except (OSError, ValueError) as exc:
             raise ValueError(f"Attribution check publication did not succeed: {exc} This run's responses "
                              "remain; rerun analyze to publish them without new requests.") from exc

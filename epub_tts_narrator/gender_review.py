@@ -11,12 +11,15 @@ it: the mismatch is shown and, in a terminal or the run shell, the
 description may be fixed for the next recast ([F] fix the description /
 [L] leave it; the run shell shows the description before and after,
 ``rerun_review_tui.GenderScreen``); without a terminal it is listed. Publication goes through the
-``voice-profiles`` revision scope with backups (audition bindings follow).
+``voice-profiles`` revision scope with backups (audition bindings follow). A save refused while a book
+is in use (``BookBusy``) goes to ``analyze``'s wait/retry/skip question, and a retry keeps the answers
+already given in this run instead of asking again.
 Answers are cached in the book's request cache.
 """
 
 from __future__ import annotations
 
+from .analysis_revision import BookBusy
 import hashlib
 import json
 from pathlib import Path
@@ -24,6 +27,8 @@ import re
 import sys
 
 GENDERS = ("Male", "Female", "Androgynous")
+# This process's answers to "fix the description?", so a retried save does not ask again.
+_ANSWERS = {}
 BATCH = 25
 
 
@@ -171,7 +176,13 @@ def review_genders(directory, config, config_path, client_factory, progress, *, 
             fixes[voice["id"]] = with_gender(voice["description"], wanted)
             continue
         print(message + " A voice already exists, so recast it (cast BOOK) to change how it sounds.")
-        if interactive and _decide(row, voice["description"], current, wanted, why) == "f":
+        if not interactive:
+            continue
+        # A save refused while a book is in use runs this check again: the answer already given stands.
+        key = (str(directory), voice["id"], voice["description"], wanted)
+        if key not in _ANSWERS:
+            _ANSWERS[key] = _decide(row, voice["description"], current, wanted, why)
+        if _ANSWERS[key] == "f":
             fixes[voice["id"]] = with_gender(voice["description"], wanted)
     if not fixes:
         print("Gender check: every character's voice description agrees with the book.")
@@ -198,6 +209,8 @@ def review_genders(directory, config, config_path, client_factory, progress, *, 
     try:
         result = revise_directories({directory: revised}, directories=directories, expected_manifest_hashes=hashes,
                                     scope="voice-profiles", sidecars=sidecars, progress=print)
+    except BookBusy:
+        raise
     except (OSError, ValueError) as error:
         print(f"Gender check: the corrected descriptions were not saved: {error} Rerun analyze to try again; "
               "its answers are cached.")
